@@ -336,15 +336,25 @@ function renderProgress(data) {
 
   updateKPIs(total, totalDocs, totalBytes, parseInt($('#kpi-batches').textContent) || 0);
 
+  const statusMsg = data.status === 'running' ? 'Baixando documentos...'
+    : data.status === 'failed' ? 'Falhou'
+    : data.status === 'done' && failed > 0 ? 'Concluido com falhas'
+    : data.status === 'done' ? 'Concluido' : data.status;
+
+  const errorLine = (data.error || (failed > 0 && done === 0))
+    ? `<div class="text-xs" style="color:var(--red);margin-top:4px">${esc(data.error || `${failed}/${total} processos falharam`)}</div>`
+    : '';
+
   area.innerHTML = `
     <div style="margin-bottom:8px">
       <span style="font-size:.9rem;font-weight:600">Batch: </span>
       <span class="text-mono text-xs">${esc(data.batch_id || '')}</span>
     </div>
     <div class="text-xs text-muted">
-      ${data.status === 'running' ? 'Baixando documentos...' : data.status}
-      ${failed > 0 ? ` \u2022 <span style="color:var(--red)">${failed} falha(s)</span>` : ''}
-    </div>`;
+      ${statusMsg}
+      ${failed > 0 && done > 0 ? ` \u2022 <span style="color:var(--red)">${failed} falha(s)</span>` : ''}
+    </div>
+    ${errorLine}`;
 
   // Show batch table
   batchCard.classList.remove('hidden');
@@ -409,10 +419,11 @@ function renderHistory(batches) {
 
   let html = '';
   for (const b of batches) {
+    const errHint = b.error ? `<div class="pipeline__detail" style="color:var(--red)">${esc(b.error.substring(0, 80))}</div>` : '';
     html += `<tr class="clickable" onclick="viewBatch('${esc(b.batch_id)}')">
       <td class="td-mono">${esc(b.batch_id)}</td>
       <td>${b.processos}</td>
-      <td>${statusTag(b.status)}</td>
+      <td>${statusTag(b.status)}${errHint}</td>
       <td>${b.total_docs || 0}</td>
       <td>${fmtBytes(b.total_bytes || 0)}</td>
       <td class="text-xs">${fmtDate(b.finished_at || b.created_at)}</td>

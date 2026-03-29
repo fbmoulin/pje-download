@@ -143,7 +143,6 @@ class DashboardState:
                 gdrive_url_map=job.gdrive_map if job.gdrive_map else None,
             )
 
-            job.status = "done"
             job.finished_at = datetime.now(UTC).isoformat()
             job.progress = {
                 "total": progress.total,
@@ -164,9 +163,25 @@ class DashboardState:
                 },
             }
 
+            # Determine final status based on actual results
+            if progress.failed > 0 and progress.done == 0:
+                job.status = "failed"
+                # Collect first error for display
+                first_err = next(
+                    (ps.erro for ps in progress.processos.values() if ps.erro),
+                    "All processes failed",
+                )
+                job.error = first_err
+            elif progress.failed > 0:
+                job.status = "done"  # partial success
+                job.error = f"{progress.failed}/{progress.total} processos falharam"
+            else:
+                job.status = "done"
+
             log.info(
                 "dashboard.batch.complete",
                 batch_id=job.id,
+                status=job.status,
                 done=progress.done,
                 failed=progress.failed,
             )

@@ -264,7 +264,16 @@ async def download_batch(
     client = MNIClient()
     health = await client.health_check()
     if health["status"] != "healthy":
-        log.error("batch.mni_unhealthy", error=health.get("error"))
+        error_msg = health.get("error", "MNI unhealthy")
+        log.error("batch.mni_unhealthy", error=error_msg)
+        # Mark all processes as failed so dashboard shows the error
+        for ps in progress.processos.values():
+            if ps.status == "pending":
+                ps.status = "failed"
+                ps.phase = "failed"
+                ps.phase_detail = f"MNI indisponivel: {error_msg[:80]}"
+                ps.erro = error_msg
+        progress.save(force=True)
         return progress
 
     # Detectar processos antigos
