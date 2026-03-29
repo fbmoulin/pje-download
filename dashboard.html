@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kratos PJe — Dashboard de Downloads</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>K</text></svg>">
+</head>
+<body>
+
+<div class="container">
+
+  <!-- ── Header ── -->
+  <header class="header">
+    <div class="header__logo">
+      <div class="header__icon">K</div>
+      <h1 class="header__title"><span>Kratos</span> PJe Downloads</h1>
+    </div>
+    <span id="status-badge" class="badge badge--idle">Idle</span>
+    <div class="header__spacer"></div>
+    <span id="clock" class="header__clock"></span>
+  </header>
+
+  <!-- ── KPIs ── -->
+  <section class="kpi-grid">
+    <div class="kpi">
+      <div class="kpi__value" id="kpi-processos">0</div>
+      <div class="kpi__label">Processos</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi__value" id="kpi-docs">0</div>
+      <div class="kpi__label">Documentos</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi__value" id="kpi-size">0 B</div>
+      <div class="kpi__label">Tamanho Total</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi__value" id="kpi-batches">0</div>
+      <div class="kpi__label">Batches</div>
+    </div>
+  </section>
+
+  <!-- ── Submit + Progress ── -->
+  <section class="grid-2">
+
+    <!-- Submit Form -->
+    <div class="card">
+      <div class="card__header">
+        <h2 class="card__title">Submeter Processos</h2>
+      </div>
+
+      <textarea
+        id="processos-input"
+        class="textarea"
+        placeholder="Cole os numeros dos processos (um por linha)&#10;&#10;Ex: 5008407-35.2024.8.08.0012&#10;    0126923-56.2011.8.08.0012"
+        spellcheck="false"
+        aria-label="Numeros dos processos"
+      ></textarea>
+
+      <div class="checkbox-row">
+        <input type="checkbox" id="skip-anexos">
+        <label for="skip-anexos">Pular anexos (procuracao, docs pessoais)</label>
+      </div>
+
+      <div style="margin:10px 0; display:flex; align-items:center; gap:10px">
+        <label class="btn btn--ghost btn--sm file-upload">
+          <input type="file" accept=".csv,.txt,.json" onchange="handleFileUpload(this)">
+          Upload CSV / TXT / JSON
+        </label>
+        <span id="file-label" class="file-label"></span>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn--primary" id="btn-submit" onclick="submitDownload()">
+          Iniciar Download
+        </button>
+        <button class="btn btn--ghost btn--sm" onclick="clearForm()">Limpar</button>
+        <span class="text-xs text-muted" style="margin-left:auto">Ctrl+Enter</span>
+      </div>
+    </div>
+
+    <!-- Current Progress -->
+    <div class="card">
+      <div class="card__header">
+        <h2 class="card__title">Progresso Atual</h2>
+      </div>
+      <div id="progress-area">
+        <div class="empty-state">
+          <div class="empty-state__icon">&darr;</div>
+          <div class="empty-state__text">Nenhum download em andamento</div>
+          <div class="empty-state__sub">Submeta processos para iniciar</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Batch Detail ── -->
+  <section id="batch-card" class="card batch-detail hidden">
+    <div class="card__header">
+      <h2 class="card__title">Processos do Batch</h2>
+      <button class="btn btn--ghost btn--sm" onclick="document.getElementById('batch-card').classList.add('hidden')">
+        Fechar
+      </button>
+    </div>
+    <div class="progress-track">
+      <div class="progress-fill" id="main-progress" style="width:0%"></div>
+    </div>
+    <div class="progress-label" id="progress-label">0 / 0 processos</div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Processo</th>
+            <th>Etapa</th>
+            <th>Docs</th>
+            <th>Tamanho</th>
+            <th>Tempo</th>
+          </tr>
+        </thead>
+        <tbody id="processos-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── History ── -->
+  <section class="card">
+    <div class="card__header">
+      <h2 class="card__title">Historico de Batches</h2>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Batch</th>
+            <th>Processos</th>
+            <th>Status</th>
+            <th>Docs</th>
+            <th>Tamanho</th>
+            <th>Data</th>
+          </tr>
+        </thead>
+        <tbody id="history-tbody"></tbody>
+      </table>
+    </div>
+    <div id="history-empty" class="empty-state hidden">
+      <div class="empty-state__icon">&empty;</div>
+      <div class="empty-state__text">Nenhum batch no historico</div>
+      <div class="empty-state__sub">Batches concluidos aparecerao aqui</div>
+    </div>
+  </section>
+
+</div>
+
+<!-- Toast Container -->
+<div id="toast-container" class="toast-container"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
