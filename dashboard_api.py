@@ -173,6 +173,15 @@ class DashboardState:
             )
 
         except Exception as exc:
+            # Recover partial progress if available
+            progress_file = Path(job.output_dir) / "_progress.json"
+            if progress_file.exists():
+                try:
+                    job.progress = json.loads(
+                        progress_file.read_text(encoding="utf-8")
+                    )
+                except Exception:
+                    pass
             job.status = "failed"
             job.error = str(exc)
             job.finished_at = datetime.now(UTC).isoformat()
@@ -249,14 +258,27 @@ async def handle_download(request: web.Request) -> web.Response:
         return web.json_response({"error": "Nenhum processo informado"}, status=400)
 
     # Validar formato dos números
+    from config import is_valid_processo
+
     processos = []
+    invalidos = []
     for p in processos_raw:
         p = p.strip().strip('"').strip("'")
-        if p:
+        if not p:
+            continue
+        if is_valid_processo(p):
             processos.append(p)
+        else:
+            invalidos.append(p)
+
+    if invalidos:
+        log.warning("dashboard.invalid_processos", invalidos=invalidos)
 
     if not processos:
-        return web.json_response({"error": "Nenhum processo válido"}, status=400)
+        return web.json_response(
+            {"error": "Nenhum processo com formato CNJ válido", "invalidos": invalidos},
+            status=400,
+        )
 
     # Verificar se já há batch em execução
     if state.current_batch_id:

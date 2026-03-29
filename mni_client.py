@@ -207,14 +207,17 @@ class MNIClient:
             client = self._get_client()
 
             # Executa chamada SOAP em thread separada (zeep é síncrono)
-            result = await asyncio.to_thread(
-                self._call_consultar_processo,
-                client,
-                numero_processo,
-                incluir_documentos,
-                incluir_cabecalho,
-                incluir_movimentacoes,
-                documento_ids,
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._call_consultar_processo,
+                    client,
+                    numero_processo,
+                    incluir_documentos,
+                    incluir_cabecalho,
+                    incluir_movimentacoes,
+                    documento_ids,
+                ),
+                timeout=self.timeout,
             )
 
             # Verificar resposta MNI (sucesso/mensagem/processo)
@@ -239,6 +242,16 @@ class MNIClient:
 
             return MNIResult(success=True, processo=processo, raw_response=result)
 
+        except asyncio.TimeoutError:
+            log.error(
+                "mni.consultar_processo.timeout",
+                processo=numero_processo,
+                timeout_s=self.timeout,
+            )
+            return MNIResult(
+                success=False, error=f"SOAP timeout ({self.timeout}s)"
+            )
+
         except Exception as exc:
             error_msg = str(exc)
 
@@ -251,8 +264,6 @@ class MNIClient:
                 log.error(
                     "mni.consultar_processo.auth_failed", processo=numero_processo
                 )
-            elif "timeout" in error_msg.lower():
-                log.error("mni.consultar_processo.timeout", processo=numero_processo)
             else:
                 log.error(
                     "mni.consultar_processo.failed",

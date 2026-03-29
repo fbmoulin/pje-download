@@ -1,8 +1,11 @@
-"""Shared configuration loader for pje-download."""
+"""Shared configuration and validation for pje-download."""
 
 import os
 import re
 from pathlib import Path
+
+# CNJ process number format: NNNNNNN-DD.YYYY.J.TR.OOOO
+CNJ_PATTERN = re.compile(r"^\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}$")
 
 
 def load_env() -> None:
@@ -21,3 +24,8 @@ def load_env() -> None:
                     val = re.split(r"\s+#\s", val, maxsplit=1)[0].strip()
                     os.environ.setdefault(key.strip(), val)
             return
+
+
+def is_valid_processo(numero: str) -> bool:
+    """Validate CNJ process number format."""
+    return bool(CNJ_PATTERN.match(numero.strip()))

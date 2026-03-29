@@ -130,9 +130,12 @@ class BatchProgress:
                 for num, ps in self.processos.items()
             },
         }
-        self.progress_file.write_text(
+        # Atomic write: temp file + rename prevents corruption
+        tmp = self.progress_file.with_suffix(".tmp")
+        tmp.write_text(
             json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
         )
+        tmp.replace(self.progress_file)
 
     @classmethod
     def load(cls, path: Path) -> "BatchProgress":

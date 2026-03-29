@@ -195,7 +195,16 @@ class PJeSessionWorker:
         return elapsed > SESSION_TIMEOUT_MINUTES
 
     async def invalidate_session(self) -> None:
-        """Remove sessão salva para forçar novo login."""
+        """Remove sessão salva e fecha recursos do browser."""
+        for resource in (self.page, self.context, self._browser):
+            if resource:
+                try:
+                    await resource.close()
+                except Exception:
+                    pass
+        self.page = None
+        self.context = None
+        self._browser = None
         if SESSION_STATE_PATH.exists():
             SESSION_STATE_PATH.unlink()
         self.session_valid = False
@@ -769,12 +778,27 @@ class PJeSessionWorker:
                 break
 
             # BLPOP: aguarda até 5s por um job
-            result = await self.redis.blpop("kratos:pje:jobs", timeout=5)
+            try:
+                result = await self.redis.blpop("kratos:pje:jobs", timeout=5)
+            except (redis.ConnectionError, redis.TimeoutError) as exc:
+                log.error("pje.queue.redis_error", error=str(exc))
+                self._last_error = f"redis:{exc}"
+                await asyncio.sleep(5)
+                continue
+
             if not result:
                 continue
 
             _, job_json = result
-            job = json.loads(job_json)
+            try:
+                job = json.loads(job_json)
+            except json.JSONDecodeError as exc:
+                log.error("pje.queue.invalid_json", error=str(exc))
+                continue
+
+            if "jobId" not in job or "numeroProcesso" not in job:
+                log.error("pje.queue.missing_fields", keys=list(job.keys()))
+                continue
 
             log.info(
                 "pje.queue.job_received",

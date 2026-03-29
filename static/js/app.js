@@ -8,12 +8,14 @@
 // ── Constants ──
 
 const API = window.location.origin;
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MIN = 1500;
+const POLL_INTERVAL_MAX = 15000;
 const TOAST_DURATION_MS = 5000;
 
 // ── State ──
 
 let pollTimer = null;
+let pollInterval = POLL_INTERVAL_MIN;
 let currentView = 'main'; // 'main' | 'batch-detail'
 
 // ── DOM helpers ──
@@ -272,23 +274,34 @@ function handleFileUpload(input) {
 
 function startPolling() {
   stopPolling();
+  pollInterval = POLL_INTERVAL_MIN;
   fetchProgress();
-  pollTimer = setInterval(fetchProgress, POLL_INTERVAL_MS);
+  schedulePoll();
+}
+
+function schedulePoll() {
+  pollTimer = setTimeout(() => {
+    fetchProgress();
+    schedulePoll();
+  }, pollInterval);
 }
 
 function stopPolling() {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
 }
 
 async function fetchProgress() {
   try {
     const data = await apiFetch('/api/progress');
+    pollInterval = POLL_INTERVAL_MIN; // reset on success
     renderProgress(data);
     if (data.status === 'done' || data.status === 'failed' || data.status === 'idle') {
       stopPolling();
       fetchHistory();
     }
-  } catch (e) { /* silent */ }
+  } catch (e) {
+    pollInterval = Math.min(pollInterval * 1.5, POLL_INTERVAL_MAX);
+  }
 }
 
 function renderProgress(data) {
