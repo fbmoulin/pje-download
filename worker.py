@@ -21,7 +21,6 @@ O foco é REDUZIR a exposição ao CAPTCHA, não combatê-lo.
 import asyncio
 import hashlib
 import json
-import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,22 +35,29 @@ from mni_client import MNIClient, MNIResult
 log: structlog.BoundLogger = structlog.get_logger("kratos.pje-worker")
 
 # ─────────────────────────────────────────────
-# CONFIGURAÇÃO
+# CONFIGURAÇÃO (centralizada em config.py)
 # ─────────────────────────────────────────────
 
-PJE_BASE_URL = os.getenv("PJE_BASE_URL", "https://pje.tjes.jus.br/pje")
-SESSION_STATE_PATH = Path(os.getenv("SESSION_STATE_PATH", "/data/pje-session.json"))
-DOWNLOAD_BASE_DIR = Path(os.getenv("DOWNLOAD_BASE_DIR", "/data/downloads"))
-SESSION_TIMEOUT_MINUTES = int(os.getenv("SESSION_TIMEOUT_MINUTES", "60"))
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-MAX_DOCS_PER_SESSION = int(os.getenv("MAX_DOCS_PER_SESSION", "50"))
-DOWNLOAD_DELAY_SECS = float(os.getenv("DOWNLOAD_DELAY_SECS", "1.5"))
-HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8006"))
-
-# MNI — habilitado por padrão se credenciais estiverem configuradas
-MNI_ENABLED = os.getenv("MNI_ENABLED", "true").lower() == "true"
+from config import (
+    PJE_BASE_URL, SESSION_STATE_PATH, DOWNLOAD_BASE_DIR,
+    SESSION_TIMEOUT_MINUTES, REDIS_URL, MAX_DOCS_PER_SESSION,
+    DOWNLOAD_DELAY_SECS, HEALTH_PORT, CONCURRENT_DOWNLOADS, MNI_ENABLED,
+)
 
 DOWNLOAD_BASE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _unique_filename(directory: Path, filename: str) -> str:
+    """Return filename, appending counter if it already exists in directory."""
+    dest = directory / filename
+    if not dest.exists():
+        return filename
+    stem = dest.stem
+    suffix = dest.suffix
+    counter = 1
+    while (directory / f"{stem}_{counter}{suffix}").exists():
+        counter += 1
+    return f"{stem}_{counter}{suffix}"
 
 # Padrões conhecidos de CAPTCHA no PJe
 CAPTCHA_INDICATORS = [
@@ -88,6 +94,32 @@ class PJeSessionWorker:
         self.docs_downloaded_count: int = 0
         self._health_status: str = "starting"
         self._last_error: str | None = None
+        self._session_lock_fh: Any | None = None
+
+    def _acquire_session_lock(self) -> bool:
+        """Acquire advisory lock on session state file (prevents multi-instance corruption)."""
+        lock_path = SESSION_STATE_PATH.with_suffix(".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import fcntl
+            self._session_lock_fh = open(lock_path, "w")
+            fcntl.flock(self._session_lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except (ImportError, OSError):
+            # fcntl unavailable (Windows) or lock held by another process
+            log.warning("pje.session.lock_failed", path=str(lock_path))
+            return True  # proceed anyway on platforms without fcntl
+
+    def _release_session_lock(self) -> None:
+        """Release session state file lock."""
+        if self._session_lock_fh:
+            try:
+                import fcntl
+                fcntl.flock(self._session_lock_fh.fileno(), fcntl.LOCK_UN)
+            except (ImportError, OSError):
+                pass
+            self._session_lock_fh.close()
+            self._session_lock_fh = None
 
     async def init(self) -> None:
         self.redis = redis.from_url(REDIS_URL, decode_responses=True)
@@ -134,7 +166,7 @@ class PJeSessionWorker:
             headless=False
         )  # headless=False para login manual
 
-        if SESSION_STATE_PATH.exists():
+        if SESSION_STATE_PATH.exists() and self._acquire_session_lock():
             log.info("pje.session.loading", path=str(SESSION_STATE_PATH))
             self.context = await self._browser.new_context(
                 storage_state=str(SESSION_STATE_PATH)
@@ -179,7 +211,8 @@ class PJeSessionWorker:
             # Se MNI está disponível, pode continuar sem browser
             return self.mni_client is not None
 
-        # Salvar estado da sessão para reuso
+        # Salvar estado da sessão para reuso (with lock)
+        self._acquire_session_lock()
         await self.context.storage_state(path=str(SESSION_STATE_PATH))
         log.info("pje.session.saved", path=str(SESSION_STATE_PATH))
 
@@ -438,7 +471,8 @@ class PJeSessionWorker:
                 f"{PJE_BASE_URL}/api/documentos/{doc_id}/download",
             )
             if response.status == 200:
-                filename = doc.get("nome", f"{doc_id}.pdf")
+                raw_name = doc.get("nome", f"{doc_id}.pdf")
+                filename = _unique_filename(output_dir, raw_name)
                 dest = output_dir / filename
                 content = await response.body()
                 dest.write_bytes(content)
@@ -585,9 +619,10 @@ class PJeSessionWorker:
                     await download_btn.click()
 
                 download = await download_info.value
-                filename = (
+                raw_name = (
                     download.suggested_filename or f"{numero_processo}_completo.pdf"
                 )
+                filename = _unique_filename(output_dir, raw_name)
                 dest = output_dir / filename
 
                 await download.save_as(str(dest))
@@ -638,10 +673,11 @@ class PJeSessionWorker:
                             ) as dl2:
                                 await confirm.first.click()
                             download2 = await dl2.value
-                            filename2 = (
+                            raw_name2 = (
                                 download2.suggested_filename
                                 or f"{numero_processo}_completo.pdf"
                             )
+                            filename2 = _unique_filename(output_dir, raw_name2)
                             dest2 = output_dir / filename2
                             await download2.save_as(str(dest2))
                             content2 = dest2.read_bytes()
@@ -685,6 +721,9 @@ class PJeSessionWorker:
         """
         Estratégia 3b (fallback): Download individual de cada documento
         via ConsultaDocumento.
+
+        Coleta hrefs first, then downloads concurrently via separate
+        browser pages (limited by CONCURRENT_DOWNLOADS semaphore).
         """
         files: list[dict] = []
 
@@ -712,47 +751,87 @@ class PJeSessionWorker:
             processo=numero_processo,
         )
 
+        # Collect hrefs from main page first
+        hrefs: list[tuple[int, str]] = []
+        for i, link in enumerate(doc_links[:MAX_DOCS_PER_SESSION]):
+            try:
+                href = await link.get_attribute("href")
+                if href:
+                    # Make absolute URL if relative
+                    if href.startswith("/"):
+                        href = PJE_BASE_URL.rsplit("/", 1)[0] + href
+                    hrefs.append((i, href))
+            except Exception:
+                continue
+
+        if not hrefs:
+            # Fallback: sequential click-based download
+            return await self._download_docs_sequential(doc_links, output_dir)
+
+        # Download concurrently via separate pages
+        sem = asyncio.Semaphore(CONCURRENT_DOWNLOADS)
+
+        async def _fetch_one(idx: int, url: str) -> dict | None:
+            async with sem:
+                try:
+                    dl_page = await self.context.new_page()
+                    try:
+                        async with dl_page.expect_download(timeout=30_000) as dl_info:
+                            await dl_page.goto(url)
+                        download = await dl_info.value
+                        filename = download.suggested_filename or f"doc_{idx:03d}.pdf"
+                        dest = output_dir / _unique_filename(output_dir, filename)
+                        await download.save_as(str(dest))
+                        content = dest.read_bytes()
+                        checksum = hashlib.sha256(content).hexdigest()
+                        self.docs_downloaded_count += 1
+                        log.info("pje.browser.individual.doc_saved", filename=dest.name, size=len(content))
+                        return {
+                            "nome": dest.name,
+                            "tipo": "pdf",
+                            "tamanhoBytes": len(content),
+                            "localPath": str(dest),
+                            "checksum": checksum,
+                            "fonte": "browser_individual",
+                        }
+                    finally:
+                        await dl_page.close()
+                except Exception as e:
+                    log.warning("pje.browser.individual.doc_failed", index=idx, error=str(e))
+                    return None
+
+        results = await asyncio.gather(*[_fetch_one(i, url) for i, url in hrefs])
+        files = [r for r in results if r is not None]
+        return files
+
+    async def _download_docs_sequential(
+        self, doc_links: list, output_dir: Path
+    ) -> list:
+        """Fallback: sequential click-based download when hrefs unavailable."""
+        files: list[dict] = []
         for i, link in enumerate(doc_links[:MAX_DOCS_PER_SESSION]):
             try:
                 if i > 0 and i % 10 == 0 and await self._detect_captcha():
-                    log.warning(
-                        "pje.browser.individual.captcha_mid_download", downloaded=i
-                    )
+                    log.warning("pje.browser.individual.captcha_mid_download", downloaded=i)
                     break
-
                 async with self.page.expect_download(timeout=30_000) as download_info:
                     await link.click()
-
                 download = await download_info.value
                 filename = download.suggested_filename or f"doc_{i:03d}.pdf"
-                dest = output_dir / filename
+                dest = output_dir / _unique_filename(output_dir, filename)
                 await download.save_as(str(dest))
                 content = dest.read_bytes()
                 checksum = hashlib.sha256(content).hexdigest()
-
-                files.append(
-                    {
-                        "nome": filename,
-                        "tipo": "pdf",
-                        "tamanhoBytes": len(content),
-                        "localPath": str(dest),
-                        "checksum": checksum,
-                        "fonte": "browser_individual",
-                    }
-                )
-
-                log.info(
-                    "pje.browser.individual.doc_saved",
-                    filename=filename,
-                    size=len(content),
-                )
+                files.append({
+                    "nome": dest.name, "tipo": "pdf",
+                    "tamanhoBytes": len(content), "localPath": str(dest),
+                    "checksum": checksum, "fonte": "browser_individual",
+                })
                 self.docs_downloaded_count += 1
                 await asyncio.sleep(DOWNLOAD_DELAY_SECS)
-
             except Exception as e:
                 log.warning("pje.browser.individual.doc_failed", index=i, error=str(e))
                 continue
-
         return files
 
     # ──────────────────────
@@ -842,13 +921,58 @@ class PJeSessionWorker:
         log.info("pje.health.started", port=HEALTH_PORT)
 
     async def _health_handler(self, request):
-        """Handler do endpoint /health."""
+        """Handler do endpoint /health with deep checks."""
+        import shutil
         from aiohttp import web
 
-        status_code = 200 if self._health_status in ("ready", "consuming") else 503
+        checks: dict = {}
+        healthy = self._health_status in ("ready", "consuming")
+
+        # MNI connectivity
+        if self.mni_client is not None:
+            try:
+                mni_health = await asyncio.wait_for(
+                    self.mni_client.health_check(), timeout=5.0
+                )
+                checks["mni"] = mni_health["status"]
+                if mni_health["status"] != "healthy":
+                    healthy = False
+            except Exception:
+                checks["mni"] = "unreachable"
+                healthy = False
+        else:
+            checks["mni"] = "disabled"
+
+        # Redis connectivity
+        if self.redis is not None:
+            try:
+                await asyncio.wait_for(self.redis.ping(), timeout=3.0)
+                checks["redis"] = "healthy"
+            except Exception:
+                checks["redis"] = "unreachable"
+                healthy = False
+        else:
+            checks["redis"] = "not_initialized"
+
+        # Disk space
+        try:
+            usage = shutil.disk_usage(DOWNLOAD_BASE_DIR)
+            free_mb = usage.free / 1_048_576
+            checks["disk_free_mb"] = round(free_mb, 1)
+            if free_mb < 100:
+                checks["disk"] = "low"
+                healthy = False
+            else:
+                checks["disk"] = "ok"
+        except Exception:
+            checks["disk"] = "unknown"
+
+        status_code = 200 if healthy else 503
         body = {
             "service": "pje-worker",
             "status": self._health_status,
+            "healthy": healthy,
+            "checks": checks,
             "mni_enabled": self.mni_client is not None,
             "session_valid": self.session_valid,
             "docs_downloaded": self.docs_downloaded_count,
@@ -910,6 +1034,7 @@ class PJeSessionWorker:
             await self._browser.close()
         if self.redis:
             await self.redis.close()
+        self._release_session_lock()
 
 
 # ─────────────────────────────────────────────

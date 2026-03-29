@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
@@ -39,8 +39,7 @@ log: structlog.BoundLogger = structlog.get_logger("kratos.dashboard-api")
 # CONFIGURAÇÃO
 # ─────────────────────────────────────────────
 
-DEFAULT_PORT = int(os.getenv("DASHBOARD_PORT", "8007"))
-DEFAULT_OUTPUT = Path(os.getenv("DOWNLOAD_BASE_DIR", "./downloads"))
+from config import DASHBOARD_PORT as DEFAULT_PORT, DOWNLOAD_BASE_DIR as DEFAULT_OUTPUT
 
 
 # ─────────────────────────────────────────────
@@ -409,8 +408,9 @@ def create_app(output_dir: Path) -> web.Application:
     state = DashboardState(output_dir)
 
     app = web.Application()
-    # CORS headers
+    # Middleware stack (order matters: CORS first, then rate limit)
     app.middlewares.append(cors_middleware)
+    app.middlewares.append(rate_limit_middleware)
 
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/status", handle_status)
@@ -425,6 +425,35 @@ def create_app(output_dir: Path) -> web.Application:
         app.router.add_static("/static", static_dir, show_index=False)
 
     return app
+
+
+# ─────────────────────────────────────────────
+# RATE LIMITING (in-memory, per-IP)
+# ─────────────────────────────────────────────
+
+_rate_buckets: dict[str, list[float]] = {}
+RATE_LIMIT_MAX = 10       # max requests
+RATE_LIMIT_WINDOW = 60.0  # per N seconds
+
+
+@web.middleware
+async def rate_limit_middleware(request: web.Request, handler):
+    """Simple sliding-window rate limiter for POST endpoints."""
+    if request.method != "POST":
+        return await handler(request)
+
+    ip = request.remote or "unknown"
+    now = time.monotonic()
+    bucket = _rate_buckets.setdefault(ip, [])
+    # Prune old entries
+    bucket[:] = [t for t in bucket if now - t < RATE_LIMIT_WINDOW]
+    if len(bucket) >= RATE_LIMIT_MAX:
+        return web.json_response(
+            {"error": f"Rate limit exceeded ({RATE_LIMIT_MAX}/{RATE_LIMIT_WINDOW:.0f}s)"},
+            status=429,
+        )
+    bucket.append(now)
+    return await handler(request)
 
 
 @web.middleware

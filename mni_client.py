@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,10 +45,7 @@ TRIBUNAL_ENDPOINTS: dict[str, str] = {
     "TRT17": "https://pje.trt17.jus.br/pje/intercomunicacao?wsdl",
 }
 
-MNI_USERNAME = os.getenv("MNI_USERNAME", "")  # CPF sem pontos
-MNI_PASSWORD = os.getenv("MNI_PASSWORD", "")
-MNI_TRIBUNAL = os.getenv("MNI_TRIBUNAL", "TJES")
-MNI_TIMEOUT = int(os.getenv("MNI_TIMEOUT", "60"))
+from config import MNI_USERNAME, MNI_PASSWORD, MNI_TRIBUNAL, MNI_TIMEOUT
 
 
 # ─────────────────────────────────────────────
@@ -630,8 +626,10 @@ class MNIClient:
         )
         return saved_files
 
+    _seen_checksums: set[str] = set()
+
     def _save_document(self, doc: MNIDocumento, output_dir: Path) -> dict | None:
-        """Salva um documento com conteúdo em disco. Retorna info ou None."""
+        """Salva um documento com conteúdo em disco. Skips duplicates by checksum."""
         try:
             ext = _mimetype_to_ext(doc.mimetype)
             safe_name = _sanitize_filename(doc.nome)
@@ -639,9 +637,18 @@ class MNIClient:
             dest = output_dir / filename
 
             content_bytes = base64.b64decode(doc.conteudo_base64)
-            dest.write_bytes(content_bytes)
-
             checksum = hashlib.sha256(content_bytes).hexdigest()
+
+            if checksum in self._seen_checksums:
+                log.info(
+                    "mni.download.duplicate_skipped",
+                    doc_id=doc.id,
+                    checksum=checksum[:12],
+                )
+                return None
+            self._seen_checksums.add(checksum)
+
+            dest.write_bytes(content_bytes)
 
             log.info(
                 "mni.download.saved",

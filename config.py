@@ -29,3 +29,33 @@ def load_env() -> None:
 def is_valid_processo(numero: str) -> bool:
     """Validate CNJ process number format."""
     return bool(CNJ_PATTERN.match(numero.strip()))
+
+
+# ─────────────────────────────────────────────
+# Centralized defaults (all env-configurable)
+# ─────────────────────────────────────────────
+
+# PJe / Worker
+PJE_BASE_URL = os.getenv("PJE_BASE_URL", "https://pje.tjes.jus.br/pje")
+SESSION_STATE_PATH = Path(os.getenv("SESSION_STATE_PATH", "/data/pje-session.json"))
+DOWNLOAD_BASE_DIR = Path(os.getenv("DOWNLOAD_BASE_DIR", "/data/downloads"))
+SESSION_TIMEOUT_MINUTES = int(os.getenv("SESSION_TIMEOUT_MINUTES", "60"))
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+MAX_DOCS_PER_SESSION = int(os.getenv("MAX_DOCS_PER_SESSION", "50"))
+DOWNLOAD_DELAY_SECS = float(os.getenv("DOWNLOAD_DELAY_SECS", "1.5"))
+CONCURRENT_DOWNLOADS = int(os.getenv("CONCURRENT_DOWNLOADS", "3"))
+HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8006"))
+MNI_ENABLED = os.getenv("MNI_ENABLED", "true").lower() == "true"
+
+# MNI Client
+MNI_USERNAME = os.getenv("MNI_USERNAME", "")
+MNI_PASSWORD = os.getenv("MNI_PASSWORD", "")
+MNI_TRIBUNAL = os.getenv("MNI_TRIBUNAL", "TJES")
+MNI_TIMEOUT = int(os.getenv("MNI_TIMEOUT", "60"))
+
+# Batch Downloader
+BATCH_SIZE_DEFAULT = int(os.getenv("MNI_BATCH_SIZE", "5"))
+BATCH_DELAY_DEFAULT = float(os.getenv("BATCH_DELAY_SECS", "2.0"))
+
+# Dashboard
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8007"))
