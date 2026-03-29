@@ -1,0 +1,120 @@
+# ============================================================
+# PJe Download — Docker Compose
+# ============================================================
+#
+# Uso:
+#   docker compose up -d                    # dashboard + redis
+#   docker compose --profile worker up -d   # + pje worker
+#
+# Dashboard: http://localhost:8007
+# Worker health: http://localhost:8006/health
+# ============================================================
+
+services:
+  # ────────────────────────────────
+  # REDIS
+  # ────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: pje-redis
+    restart: unless-stopped
+    mem_limit: 128m
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-pje_redis_2026}
+      --maxmemory 96mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-pje_redis_2026}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - pje-net
+
+  # ────────────────────────────────
+  # DASHBOARD API
+  # ────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pje-dashboard
+    restart: unless-stopped
+    mem_limit: 256m
+    command: ["python", "dashboard_api.py", "--port", "8007", "--output", "/data/downloads"]
+    environment:
+      DASHBOARD_PORT: "8007"
+      DOWNLOAD_BASE_DIR: /data/downloads
+      MNI_USERNAME: ${MNI_USERNAME}
+      MNI_PASSWORD: ${MNI_PASSWORD}
+      MNI_TRIBUNAL: ${MNI_TRIBUNAL:-TJES}
+      MNI_TIMEOUT: ${MNI_TIMEOUT:-60}
+      MNI_BATCH_SIZE: ${MNI_BATCH_SIZE:-5}
+    ports:
+      - "${DASHBOARD_PORT:-8007}:8007"
+    volumes:
+      - downloads_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8007/api/status"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    networks:
+      - pje-net
+
+  # ────────────────────────────────
+  # PJe WORKER (Playwright)
+  # ────────────────────────────────
+  # NOTA: headless=False requer display virtual (Xvfb) ou
+  # execucao em maquina local com GUI para login manual.
+  # Em producao, usar modo semiassistido com sessao salva.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pje-worker
+    restart: "no"
+    mem_limit: 512m
+    environment:
+      PJE_BASE_URL: ${PJE_BASE_URL:-https://pje.tjes.jus.br/pje}
+      SESSION_STATE_PATH: /data/pje-session.json
+      DOWNLOAD_BASE_DIR: /data/downloads
+      REDIS_URL: redis://:${REDIS_PASSWORD:-pje_redis_2026}@redis:6379
+      SESSION_TIMEOUT_MINUTES: ${SESSION_TIMEOUT_MINUTES:-60}
+      MAX_DOCS_PER_SESSION: ${MAX_DOCS_PER_SESSION:-50}
+      DOWNLOAD_DELAY_SECS: ${DOWNLOAD_DELAY_SECS:-1.5}
+      CONCURRENT_DOWNLOADS: ${CONCURRENT_DOWNLOADS:-3}
+      HEALTH_PORT: "8006"
+      MNI_ENABLED: ${MNI_ENABLED:-true}
+      MNI_USERNAME: ${MNI_USERNAME}
+      MNI_PASSWORD: ${MNI_PASSWORD}
+      MNI_TRIBUNAL: ${MNI_TRIBUNAL:-TJES}
+      MNI_TIMEOUT: ${MNI_TIMEOUT:-60}
+    ports:
+      - "${HEALTH_PORT:-8006}:8006"
+    volumes:
+      - downloads_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - pje-net
+    profiles:
+      - worker
+
+networks:
+  pje-net:
+    name: pje-net
+
+volumes:
+  redis_data:
+  downloads_data:
