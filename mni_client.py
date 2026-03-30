@@ -121,16 +121,18 @@ class MNIClient:
 
     def __init__(
         self,
-        tribunal: str = MNI_TRIBUNAL,
-        username: str = MNI_USERNAME,
-        password: str = MNI_PASSWORD,
-        timeout: int = MNI_TIMEOUT,
+        tribunal: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        timeout: int | None = None,
     ) -> None:
-        self.tribunal = tribunal.upper()
-        self.username = username
-        self.password = password
-        self.timeout = timeout
+        import os
+        self.tribunal = (tribunal or os.getenv("MNI_TRIBUNAL", MNI_TRIBUNAL)).upper()
+        self.username = username or os.getenv("MNI_USERNAME", MNI_USERNAME)
+        self.password = password or os.getenv("MNI_PASSWORD", MNI_PASSWORD)
+        self.timeout = timeout or int(os.getenv("MNI_TIMEOUT", str(MNI_TIMEOUT)))
         self._client: Any | None = None
+        self._seen_checksums: set[str] = set()
 
         endpoint = TRIBUNAL_ENDPOINTS.get(self.tribunal)
         if not endpoint:
@@ -625,8 +627,6 @@ class MNIClient:
             total_download=len(all_docs),
         )
         return saved_files
-
-    _seen_checksums: set[str] = set()
 
     def _save_document(self, doc: MNIDocumento, output_dir: Path) -> dict | None:
         """Salva um documento com conteúdo em disco. Skips duplicates by checksum."""
