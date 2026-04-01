@@ -17,10 +17,12 @@
   --text:     #e8eaf2;
   --text2:    #8891ab;
   --text3:    #5a6380;
-  /* Accents */
-  --accent:   #7c6cf0;
-  --accent2:  #a49bfe;
-  --accent-bg: rgba(124, 108, 240, .08);
+  /* Accents — vivid orange gradient */
+  --accent:   #f97316;
+  --accent2:  #fb923c;
+  --accent-bg: rgba(249, 115, 22, .08);
+  --orange:   #f97316;
+  --amber:    #f59e0b;
   --green:    #10b981;
   --green-bg: rgba(16, 185, 129, .10);
   --red:      #ef4444;
@@ -265,13 +267,13 @@ body {
 .btn:active { transform: scale(.97); }
 
 .btn--primary {
-  background: linear-gradient(135deg, var(--accent), #5b4dd4);
+  background: linear-gradient(135deg, var(--accent), #ea580c);
   color: #fff;
-  box-shadow: 0 2px 8px rgba(124, 108, 240, .25);
+  box-shadow: 0 2px 8px rgba(249, 115, 22, .25);
 }
 .btn--primary:hover {
   background: linear-gradient(135deg, var(--accent2), var(--accent));
-  box-shadow: 0 4px 16px rgba(124, 108, 240, .35);
+  box-shadow: 0 4px 16px rgba(249, 115, 22, .35);
   transform: translateY(-1px);
 }
 .btn--primary:disabled {
