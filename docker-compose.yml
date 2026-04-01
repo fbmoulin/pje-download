@@ -43,6 +43,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: dashboard
     container_name: pje-dashboard
     restart: unless-stopped
     mem_limit: 256m
@@ -81,6 +82,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: worker
     container_name: pje-worker
     restart: "no"
     mem_limit: 512m
