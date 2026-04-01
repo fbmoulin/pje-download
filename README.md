@@ -233,3 +233,9 @@ downloads/
   _progress.json             # Progresso em tempo real (atomic writes)
   _report.json               # Relatorio final do batch
 ```
+
+## Integracao com Kratos Case Pipeline
+
+Este projeto e o primeiro estagio do [Kratos Case Pipeline (KCP)](https://github.com/fbmoulin/kratos-case-pipeline) — o orquestrador que conecta download PJe, extracao PDF e analise FIRAC em um pipeline automatizado para gabinetes judiciais.
+
+Fluxo: **pje-download** (MNI SOAP) → **KCP** (organiza, classifica, despacha) → **kratos-pdf-extractor** (extracao) → **kratos-v5** (FIRAC + minuta)
