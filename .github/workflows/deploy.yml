@@ -46,6 +46,32 @@ jobs:
             -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" \
             ./ "${VPS_USER}@${VPS_HOST}:/opt/pje-download/"
 
+      - name: Write .env on VPS
+        uses: appleboy/ssh-action@v1.2.5
+        env:
+          MNI_USERNAME: ${{ secrets.MNI_USERNAME }}
+          MNI_PASSWORD: ${{ secrets.MNI_PASSWORD }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: MNI_USERNAME,MNI_PASSWORD
+          script: |
+            {
+              printf 'MNI_USERNAME=%s\n' "${MNI_USERNAME}"
+              printf 'MNI_PASSWORD=%s\n' "${MNI_PASSWORD}"
+              printf 'MNI_TRIBUNAL=TJES\n'
+              printf 'MNI_TIMEOUT=60\n'
+              printf 'MNI_BATCH_SIZE=5\n'
+              printf 'MNI_ENABLED=true\n'
+              printf 'PJE_BASE_URL=https://pje.tjes.jus.br/pje\n'
+              printf 'REDIS_PASSWORD=pje_redis_2026\n'
+              printf 'REDIS_URL=redis://:pje_redis_2026@redis:6379\n'
+              printf 'DOWNLOAD_BASE_DIR=/data/downloads\n'
+              printf 'HEALTH_PORT=8006\n'
+              printf 'DASHBOARD_PORT=8007\n'
+            } > /opt/pje-download/.env
+
       - name: Restart dashboard
         uses: appleboy/ssh-action@v1.2.5
         with:
