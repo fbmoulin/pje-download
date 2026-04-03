@@ -20,7 +20,7 @@ jobs:
     needs: []
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Sync files to VPS
         env:
@@ -47,7 +47,7 @@ jobs:
             ./ "${VPS_USER}@${VPS_HOST}:/opt/pje-download/"
 
       - name: Restart dashboard
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
