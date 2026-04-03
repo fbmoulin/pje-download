@@ -15,7 +15,7 @@ services:
   # REDIS
   # ────────────────────────────────
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     container_name: pje-redis
     restart: unless-stopped
     mem_limit: 128m
@@ -51,8 +51,8 @@ services:
     environment:
       DASHBOARD_PORT: "8007"
       DOWNLOAD_BASE_DIR: /data/downloads
-      MNI_USERNAME: ${MNI_USERNAME}
-      MNI_PASSWORD: ${MNI_PASSWORD}
+      MNI_USERNAME: ${MNI_USERNAME:-}
+      MNI_PASSWORD: ${MNI_PASSWORD:-}
       MNI_TRIBUNAL: ${MNI_TRIBUNAL:-TJES}
       MNI_TIMEOUT: ${MNI_TIMEOUT:-60}
       MNI_BATCH_SIZE: ${MNI_BATCH_SIZE:-5}
@@ -97,8 +97,8 @@ services:
       CONCURRENT_DOWNLOADS: ${CONCURRENT_DOWNLOADS:-3}
       HEALTH_PORT: "8006"
       MNI_ENABLED: ${MNI_ENABLED:-true}
-      MNI_USERNAME: ${MNI_USERNAME}
-      MNI_PASSWORD: ${MNI_PASSWORD}
+      MNI_USERNAME: ${MNI_USERNAME:-}
+      MNI_PASSWORD: ${MNI_PASSWORD:-}
       MNI_TRIBUNAL: ${MNI_TRIBUNAL:-TJES}
       MNI_TIMEOUT: ${MNI_TIMEOUT:-60}
     ports:
