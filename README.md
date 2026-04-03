@@ -40,10 +40,10 @@ Automacao de download de documentos processuais do PJe (Processo Judicial Eletro
 | `worker.py` | ~1076 | Worker PJe com 3 estrategias em cascata, downloads paralelos, deep health checks |
 | `mni_client.py` | ~743 | Cliente SOAP para MNI — download em 2 fases com dedup por checksum |
 | `batch_downloader.py` | ~631 | Download em lote via CLI com progresso atomico, retomada e relatorio |
-| `dashboard_api.py` | ~518 | API REST (aiohttp) com rate limiting, validacao CNJ e recuperacao parcial |
-| `dashboard.html` | ~185 | Frontend HTML com Google Fonts, data-animate attrs e SVG icons |
-| `static/css/style.css` | ~600 | Design system — glassmorphism, Oswald KPIs, dot-grid bg, staggered animations |
-| `static/js/app.js` | ~515 | Dashboard — adaptive polling, pipeline renderer (SVG), toasts, file upload |
+| `dashboard_api.py` | ~701 | API REST (aiohttp) com rate limiting, validacao CNJ, recuperacao parcial e gestao de sessao PJe |
+| `dashboard.html` | ~193 | Frontend HTML com Google Fonts, data-animate attrs e card de sessao PJe |
+| `static/css/style.css` | ~685 | Design system — glassmorphism, Oswald KPIs, dot-grid bg, staggered animations |
+| `static/js/app.js` | ~618 | Dashboard — adaptive polling, pipeline renderer (SVG), toasts, file upload, sessao PJe |
 | `gdrive_downloader.py` | ~596 | Download de pastas Google Drive (processos antigos escaneados) |
 | `config.py` | ~61 | Configuracao centralizada — todas as variaveis env-configuraveis |
 | `metrics.py` | ~60 | Registry Prometheus dedicado — 7 metricas de latencia, throughput e erros |
@@ -174,6 +174,9 @@ python worker.py
 | `GET` | `/api/batch/{id}` | Detalhes de um batch especifico |
 | `GET` | `/metrics` | Metricas Prometheus (text/plain) |
 | `GET` | `/static/*` | Arquivos estaticos (CSS, JS) |
+| `GET` | `/api/session/status` | Estado da sessao PJe salva em disco |
+| `POST` | `/api/session/login` | Dispara login interativo no browser local (202 async) |
+| `POST` | `/api/session/verify` | Valida sessao salva via browser headless |
 
 ### POST /api/download
 
@@ -283,6 +286,11 @@ downloads/
 ## Frontend
 
 Dashboard em `http://localhost:8007` — design "Precision Judicial Ops".
+
+**Sessao PJe (card no topo):**
+- Dot colorido indica estado: verde (sessao salva), cinza (sem sessao), ambar pulsante (login em andamento), vermelho (falha)
+- Botao **Fazer Login** — abre browser real (headless=False) para login manual com CAPTCHA/MFA; retorna 202 imediatamente e faz polling ate concluir
+- Botao **Verificar** — valida sessao salva via browser headless; exibe resultado com toast
 
 **Tipografia (Google Fonts):**
 | Familia | Uso |

@@ -243,6 +243,11 @@ class DashboardState:
 
 state: DashboardState | None = None
 
+# ── Session login state ──
+_login_running: bool = False
+_login_task: asyncio.Task | None = None
+_login_last_ok: bool | None = None  # resultado do último login
+
 
 async def handle_status(request: web.Request) -> web.Response:
     """GET /api/status — Status geral incluindo health do worker."""
@@ -437,6 +442,72 @@ async def handle_batch_detail(request: web.Request) -> web.Response:
     )
 
 
+async def handle_session_status(request: web.Request) -> web.Response:
+    """GET /api/session/status — Estado da sessão PJe salva em disco."""
+    from pje_session import SESSION_FILE
+
+    exists = SESSION_FILE.exists()
+    modified_at: str | None = None
+    if exists:
+        import os
+        modified_at = datetime.fromtimestamp(
+            os.path.getmtime(SESSION_FILE), tz=UTC
+        ).isoformat()
+
+    return web.json_response(
+        {
+            "file_exists": exists,
+            "login_running": _login_running,
+            "last_login_ok": _login_last_ok,
+            "modified_at": modified_at,
+            "session_file": str(SESSION_FILE),
+        }
+    )
+
+
+async def handle_session_verify(request: web.Request) -> web.Response:
+    """POST /api/session/verify — Valida a sessão salva (abre browser headless)."""
+    from pje_session import PJeSessionClient
+
+    try:
+        client = PJeSessionClient()
+        valid = await client.is_valid()
+        return web.json_response({"valid": valid})
+    except FileNotFoundError:
+        return web.json_response({"valid": False, "error": "Sessão não encontrada"}, status=404)
+    except Exception as exc:
+        log.error("dashboard.session.verify_error", error=str(exc))
+        return web.json_response({"valid": False, "error": str(exc)}, status=500)
+
+
+async def handle_session_login(request: web.Request) -> web.Response:
+    """POST /api/session/login — Dispara login interativo no browser local."""
+    global _login_running, _login_task, _login_last_ok
+
+    if _login_running:
+        return web.json_response({"error": "Login já em andamento"}, status=409)
+
+    async def _do_login() -> None:
+        global _login_running, _login_last_ok
+        _login_running = True
+        try:
+            from pje_session import interactive_login
+
+            ok = await interactive_login()
+            _login_last_ok = ok
+            log.info("dashboard.session.login_done", ok=ok)
+        except Exception as exc:
+            _login_last_ok = False
+            log.error("dashboard.session.login_error", error=str(exc))
+        finally:
+            _login_running = False
+
+    _login_task = asyncio.create_task(_do_login())
+    return web.json_response(
+        {"message": "Login iniciado — complete no browser que será aberto"}, status=202
+    )
+
+
 async def handle_metrics(request: web.Request) -> web.Response:
     """GET /metrics — Prometheus text exposition format."""
     from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
@@ -492,6 +563,9 @@ def create_app(output_dir: Path) -> web.Application:
     app.router.add_get("/api/progress", handle_progress)
     app.router.add_get("/api/history", handle_history)
     app.router.add_get("/api/batch/{id}", handle_batch_detail)
+    app.router.add_get("/api/session/status", handle_session_status)
+    app.router.add_post("/api/session/login", handle_session_login)
+    app.router.add_post("/api/session/verify", handle_session_verify)
 
     # Serve static files (CSS, JS)
     static_dir = Path(__file__).parent / "static"

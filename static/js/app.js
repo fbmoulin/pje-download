@@ -506,6 +506,112 @@ async function init() {
   }
 
   fetchHistory();
+  fetchSessionStatus();
+}
+
+// ══════════════════════════════════════════
+//  Session
+// ══════════════════════════════════════════
+
+let _sessionPollTimer = null;
+
+async function fetchSessionStatus() {
+  try {
+    const data = await apiFetch('/api/session/status');
+    _renderSessionStatus(data);
+    // Poll faster while login is running
+    if (data.login_running) {
+      clearTimeout(_sessionPollTimer);
+      _sessionPollTimer = setTimeout(fetchSessionStatus, 1500);
+    }
+  } catch {
+    _setSessionUI('error', '⚠ Serviço indisponível', false);
+  }
+}
+
+function _renderSessionStatus(data) {
+  const btnLogin = $('#btn-session-login');
+  const btnVerify = $('#btn-session-verify');
+
+  if (data.login_running) {
+    _setSessionUI('running', 'Aguardando login no browser…', true);
+    btnLogin.disabled = true;
+    btnLogin.textContent = 'Aguardando…';
+    btnVerify.disabled = true;
+    return;
+  }
+
+  btnLogin.disabled = false;
+  btnLogin.textContent = 'Fazer Login';
+  btnVerify.disabled = false;
+
+  if (!data.file_exists) {
+    _setSessionUI('missing', 'Sem sessão salva', false);
+    return;
+  }
+
+  if (data.last_login_ok === false) {
+    _setSessionUI('error', 'Último login falhou', false);
+    return;
+  }
+
+  const when = data.modified_at ? ' · ' + fmtDate(data.modified_at) : '';
+  _setSessionUI('ok', 'Sessão salva' + when, false);
+}
+
+function _setSessionUI(state, text, spinning) {
+  const dot = $('#session-dot');
+  const label = $('#session-status-text');
+  const colors = { ok: 'var(--green)', missing: 'var(--text3)', running: 'var(--amber)', error: 'var(--red)', unknown: 'var(--text3)' };
+  dot.style.background = colors[state] || colors.unknown;
+  dot.style.animation = spinning ? 'pulse 1s infinite' : '';
+  label.textContent = text;
+}
+
+async function sessionLogin() {
+  const btn = $('#btn-session-login');
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API}/api/session/login`, { method: 'POST' });
+    if (res.status === 409) {
+      toast('Login já está em andamento', 'warning');
+    } else if (res.status === 202) {
+      toast('Browser aberto — complete o login no PJe', 'info');
+      _setSessionUI('running', 'Aguardando login no browser…', true);
+      _sessionPollTimer = setTimeout(fetchSessionStatus, 2000);
+    } else {
+      const d = await res.json().catch(() => ({}));
+      toast(d.error || 'Erro ao iniciar login', 'error');
+      btn.disabled = false;
+    }
+  } catch {
+    toast('Falha na requisição de login', 'error');
+    btn.disabled = false;
+  }
+}
+
+async function sessionVerify() {
+  const btn = $('#btn-session-verify');
+  btn.disabled = true;
+  btn.textContent = 'Verificando…';
+  _setSessionUI('running', 'Abrindo browser headless…', true);
+  try {
+    const res = await fetch(`${API}/api/session/verify`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (data.valid) {
+      _setSessionUI('ok', 'Sessão válida ✓', false);
+      toast('Sessão PJe válida', 'success');
+    } else {
+      _setSessionUI('error', 'Sessão expirada', false);
+      toast('Sessão expirada — faça login novamente', 'warning');
+    }
+  } catch {
+    toast('Erro ao verificar sessão', 'error');
+    await fetchSessionStatus();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Verificar';
+  }
 }
 
 // Boot
