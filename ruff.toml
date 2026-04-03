@@ -1,0 +1,4 @@
+[lint]
+# E402: module-level import not at top — intentional in dashboard_api.py,
+# mni_client.py and worker.py (load_env() must run before config constants)
+ignore = ["E402"]
