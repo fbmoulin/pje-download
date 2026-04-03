@@ -290,16 +290,35 @@ async def download_batch(
     # Inicializar cliente MNI
     client = MNIClient()
     health = await client.health_check()
-    if health["status"] != "healthy":
-        error_msg = health.get("error", "MNI unhealthy")
-        log.error("batch.mni_unhealthy", error=error_msg)
-        # Mark all processes as failed so dashboard shows the error
+    mni_available = health["status"] == "healthy"
+    if not mni_available:
+        log.warning(
+            "batch.mni_unhealthy",
+            error=health.get("error"),
+            fallback="pje_session (Playwright)",
+        )
+
+    # Inicializar cliente Playwright como fallback quando MNI indisponível
+    from pje_session import PJeSessionClient, SESSION_FILE
+
+    pje_client: PJeSessionClient | None = None
+    if not mni_available and SESSION_FILE.exists():
+        pje_client = PJeSessionClient()
+        log.info("batch.pje_session_fallback", session=str(SESSION_FILE))
+    elif not mni_available:
+        log.error(
+            "batch.no_fallback",
+            hint="Execute: python pje_session.py login",
+        )
         for ps in progress.processos.values():
             if ps.status == "pending":
                 ps.status = "failed"
                 ps.phase = "failed"
-                ps.phase_detail = f"MNI indisponivel: {error_msg[:80]}"
-                ps.erro = error_msg
+                ps.phase_detail = (
+                    "MNI indisponível e sessão PJe não encontrada. "
+                    "Execute: python pje_session.py login"
+                )
+                ps.erro = health.get("error", "MNI unhealthy")
         progress.save(force=True)
         return progress
 
@@ -382,6 +401,40 @@ async def download_batch(
                             processo=numero,
                             note="Processo antigo sem link do Google Drive; tentando MNI apenas",
                         )
+
+                # ── PLAYWRIGHT FALLBACK (quando MNI indisponível) ──
+                if not mni_available and pje_client is not None:
+                    ps.phase = "pje_session"
+                    ps.phase_detail = (
+                        "Baixando via sessão Playwright (MNI indisponível)"
+                    )
+                    progress.save()
+                    try:
+                        pje_files = await pje_client.download_processo(
+                            numero, proc_dir, include_anexos=incluir_anexos
+                        )
+                        all_files.extend(pje_files)
+                        if pje_files:
+                            ps.docs_baixados = len(all_files)
+                            ps.tamanho_bytes = sum(f["tamanhoBytes"] for f in all_files)
+                            ps.status = "done"
+                            ps.phase = "done"
+                            ps.phase_detail = f"Playwright: {len(pje_files)} docs"
+                            ps.fim = time.monotonic()
+                            metrics.batch_processos_total.labels(status="done").inc()
+                            metrics.batch_docs_total.inc(ps.docs_baixados)
+                            metrics.batch_bytes_total.inc(ps.tamanho_bytes)
+                            return
+                    except Exception as exc:
+                        log.warning(
+                            "batch.pje_session_failed", processo=numero, error=str(exc)
+                        )
+                        ps.status = "failed"
+                        ps.phase = "failed"
+                        ps.phase_detail = f"Playwright falhou: {exc}"
+                        ps.erro = str(exc)
+                    progress.save()
+                    return
 
                 # ── MNI SOAP: Fase 1 (metadados) ──
                 ps.phase = "mni_metadata"
