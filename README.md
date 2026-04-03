@@ -41,9 +41,9 @@ Automacao de download de documentos processuais do PJe (Processo Judicial Eletro
 | `mni_client.py` | ~743 | Cliente SOAP para MNI — download em 2 fases com dedup por checksum |
 | `batch_downloader.py` | ~631 | Download em lote via CLI com progresso atomico, retomada e relatorio |
 | `dashboard_api.py` | ~518 | API REST (aiohttp) com rate limiting, validacao CNJ e recuperacao parcial |
-| `dashboard.html` | ~161 | Frontend HTML referenciando CSS/JS externos |
-| `static/css/style.css` | ~553 | Design system — dark theme, animations, responsive grid |
-| `static/js/app.js` | ~500 | Dashboard — adaptive polling, pipeline renderer, toasts, file upload |
+| `dashboard.html` | ~185 | Frontend HTML com Google Fonts, data-animate attrs e SVG icons |
+| `static/css/style.css` | ~600 | Design system — glassmorphism, Oswald KPIs, dot-grid bg, staggered animations |
+| `static/js/app.js` | ~515 | Dashboard — adaptive polling, pipeline renderer (SVG), toasts, file upload |
 | `gdrive_downloader.py` | ~596 | Download de pastas Google Drive (processos antigos escaneados) |
 | `config.py` | ~61 | Configuracao centralizada — todas as variaveis env-configuraveis |
 | `metrics.py` | ~60 | Registry Prometheus dedicado — 7 metricas de latencia, throughput e erros |
@@ -280,6 +280,27 @@ downloads/
   _report.json               # Relatorio final do batch
 ```
 
+## Frontend
+
+Dashboard em `http://localhost:8007` — design "Precision Judicial Ops".
+
+**Tipografia (Google Fonts):**
+| Familia | Uso |
+|---------|-----|
+| `Figtree` 400–800 | Texto UI (labels, botoes, tabelas) |
+| `Oswald` 600–700 | Numeros KPI (4rem, condensado) |
+| `DM Mono` 400–500 | Numeros de processo, relogio |
+
+**Efeitos visuais:**
+- Glassmorphism em todos os cards (`backdrop-filter: blur`)
+- Textura dot-grid no background (`radial-gradient` 24px×24px)
+- Cards KPI com numero 4rem + faixa laranja gradiente na borda esquerda
+- Badge "running" com animacao ripple (`box-shadow` ring expansion)
+- Barra de progresso com divisores de segmento + gradiente laranja→ambar→verde
+- Pipeline de fases com conectores SVG + dot animado no passo ativo
+- Entrada de pagina em cascata (5 secoes, `[data-animate]`, delay 0→320ms)
+- Compat. `prefers-reduced-motion` — todas as animacoes desativadas se preferido
+
 ## Deploy
 
 ### Docker Compose (recomendado)
@@ -310,7 +331,7 @@ curl http://localhost:8007/metrics      # metricas Prometheus
 
 | Workflow | Trigger | Etapas |
 |----------|---------|--------|
-| `ci.yml` | push / PR | ruff lint → pytest (69 testes) |
+| `ci.yml` | push / PR | ruff lint → pytest (69 testes) — badge acima |
 | `deploy.yml` | push master | rsync → `docker compose up --build` no VPS |
 | `dependabot.yml` | semanal | atualiza actions + pip deps |
 
