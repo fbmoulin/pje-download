@@ -285,11 +285,21 @@ class MNIClient:
                     "mni.consultar_processo.not_found", processo=numero_processo
                 )
                 _status = "not_found"
+                user_error = "Processo não encontrado no tribunal"
             elif "Acesso negado" in error_msg or "Unauthorized" in error_msg:
                 log.error(
                     "mni.consultar_processo.auth_failed", processo=numero_processo
                 )
                 _status = "auth_failed"
+                user_error = "MNI: credenciais inválidas (Acesso negado)"
+            elif "403" in error_msg or "Forbidden" in error_msg:
+                log.error(
+                    "mni.consultar_processo.forbidden",
+                    processo=numero_processo,
+                    tribunal=self.tribunal,
+                )
+                _status = "auth_failed"
+                user_error = f"MNI indisponível: acesso bloqueado pelo servidor (403 Forbidden) — tribunal={self.tribunal}"
             else:
                 log.error(
                     "mni.consultar_processo.failed",
@@ -297,12 +307,13 @@ class MNIClient:
                     error=error_msg,
                 )
                 _status = "error"
+                user_error = error_msg
 
             metrics.mni_latency_seconds.labels(operation=_op).observe(
                 time.monotonic() - t0
             )
             metrics.mni_requests_total.labels(operation=_op, status=_status).inc()
-            return MNIResult(success=False, error=error_msg)
+            return MNIResult(success=False, error=user_error)
 
     def _call_consultar_processo(
         self,
