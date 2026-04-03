@@ -39,9 +39,16 @@ log: structlog.BoundLogger = structlog.get_logger("kratos.pje-worker")
 # ─────────────────────────────────────────────
 
 from config import (
-    PJE_BASE_URL, SESSION_STATE_PATH, DOWNLOAD_BASE_DIR,
-    SESSION_TIMEOUT_MINUTES, REDIS_URL, MAX_DOCS_PER_SESSION,
-    DOWNLOAD_DELAY_SECS, HEALTH_PORT, CONCURRENT_DOWNLOADS, MNI_ENABLED,
+    PJE_BASE_URL,
+    SESSION_STATE_PATH,
+    DOWNLOAD_BASE_DIR,
+    SESSION_TIMEOUT_MINUTES,
+    REDIS_URL,
+    MAX_DOCS_PER_SESSION,
+    DOWNLOAD_DELAY_SECS,
+    HEALTH_PORT,
+    CONCURRENT_DOWNLOADS,
+    MNI_ENABLED,
 )
 
 DOWNLOAD_BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -58,6 +65,7 @@ def _unique_filename(directory: Path, filename: str) -> str:
     while (directory / f"{stem}_{counter}{suffix}").exists():
         counter += 1
     return f"{stem}_{counter}{suffix}"
+
 
 # Padrões conhecidos de CAPTCHA no PJe
 CAPTCHA_INDICATORS = [
@@ -102,6 +110,7 @@ class PJeSessionWorker:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             import fcntl
+
             self._session_lock_fh = open(lock_path, "w")
             fcntl.flock(self._session_lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             return True
@@ -115,6 +124,7 @@ class PJeSessionWorker:
         if self._session_lock_fh:
             try:
                 import fcntl
+
                 fcntl.flock(self._session_lock_fh.fileno(), fcntl.LOCK_UN)
             except (ImportError, OSError):
                 pass
@@ -126,25 +136,33 @@ class PJeSessionWorker:
 
         # Inicializar cliente MNI se habilitado e credenciais configuradas
         if MNI_ENABLED:
-            try:
-                self.mni_client = MNIClient()
-                health = await self.mni_client.health_check()
-                if health["status"] == "healthy":
-                    log.info(
-                        "pje.mni.ready",
-                        tribunal=health["tribunal"],
-                        operations=health["operations"],
-                        latency_ms=health["latency_ms"],
-                    )
-                else:
-                    log.warning(
-                        "pje.mni.unhealthy",
-                        error=health.get("error"),
-                    )
+            import os as _os
+
+            if not _os.getenv("MNI_USERNAME") or not _os.getenv("MNI_PASSWORD"):
+                log.error(
+                    "pje.mni.credentials_missing",
+                    reason="MNI_USERNAME ou MNI_PASSWORD não configurados — worker iniciará sem MNI",
+                )
+            else:
+                try:
+                    self.mni_client = MNIClient()
+                    health = await self.mni_client.health_check()
+                    if health["status"] == "healthy":
+                        log.info(
+                            "pje.mni.ready",
+                            tribunal=health["tribunal"],
+                            operations=health["operations"],
+                            latency_ms=health["latency_ms"],
+                        )
+                    else:
+                        log.warning(
+                            "pje.mni.unhealthy",
+                            error=health.get("error"),
+                        )
+                        self.mni_client = None
+                except Exception as exc:
+                    log.warning("pje.mni.init_failed", error=str(exc))
                     self.mni_client = None
-            except Exception as exc:
-                log.warning("pje.mni.init_failed", error=str(exc))
-                self.mni_client = None
 
         self._health_status = "ready"
 
@@ -238,6 +256,7 @@ class PJeSessionWorker:
         self.page = None
         self.context = None
         self._browser = None
+        self._release_session_lock()
         if SESSION_STATE_PATH.exists():
             SESSION_STATE_PATH.unlink()
         self.session_valid = False
@@ -785,7 +804,11 @@ class PJeSessionWorker:
                         content = dest.read_bytes()
                         checksum = hashlib.sha256(content).hexdigest()
                         self.docs_downloaded_count += 1
-                        log.info("pje.browser.individual.doc_saved", filename=dest.name, size=len(content))
+                        log.info(
+                            "pje.browser.individual.doc_saved",
+                            filename=dest.name,
+                            size=len(content),
+                        )
                         return {
                             "nome": dest.name,
                             "tipo": "pdf",
@@ -797,7 +820,9 @@ class PJeSessionWorker:
                     finally:
                         await dl_page.close()
                 except Exception as e:
-                    log.warning("pje.browser.individual.doc_failed", index=idx, error=str(e))
+                    log.warning(
+                        "pje.browser.individual.doc_failed", index=idx, error=str(e)
+                    )
                     return None
 
         results = await asyncio.gather(*[_fetch_one(i, url) for i, url in hrefs])
@@ -812,7 +837,9 @@ class PJeSessionWorker:
         for i, link in enumerate(doc_links[:MAX_DOCS_PER_SESSION]):
             try:
                 if i > 0 and i % 10 == 0 and await self._detect_captcha():
-                    log.warning("pje.browser.individual.captcha_mid_download", downloaded=i)
+                    log.warning(
+                        "pje.browser.individual.captcha_mid_download", downloaded=i
+                    )
                     break
                 async with self.page.expect_download(timeout=30_000) as download_info:
                     await link.click()
@@ -822,11 +849,16 @@ class PJeSessionWorker:
                 await download.save_as(str(dest))
                 content = dest.read_bytes()
                 checksum = hashlib.sha256(content).hexdigest()
-                files.append({
-                    "nome": dest.name, "tipo": "pdf",
-                    "tamanhoBytes": len(content), "localPath": str(dest),
-                    "checksum": checksum, "fonte": "browser_individual",
-                })
+                files.append(
+                    {
+                        "nome": dest.name,
+                        "tipo": "pdf",
+                        "tamanhoBytes": len(content),
+                        "localPath": str(dest),
+                        "checksum": checksum,
+                        "fonte": "browser_individual",
+                    }
+                )
                 self.docs_downloaded_count += 1
                 await asyncio.sleep(DOWNLOAD_DELAY_SECS)
             except Exception as e:

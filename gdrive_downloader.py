@@ -141,7 +141,7 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
             }
         )
 
-        resp = await asyncio.to_thread(session.get, folder_url)
+        resp = await asyncio.to_thread(session.get, folder_url, timeout=30)
         if resp.status_code != 200:
             log.warning("gdrive.requests.folder_error", status=resp.status_code)
             return None
@@ -155,11 +155,10 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
         for match in re.finditer(r"/file/d/([a-zA-Z0-9_-]{20,})", resp.text):
             file_ids.add(match.group(1))
 
-        # Padrão 2: IDs em arrays JavaScript da página
-        for match in re.finditer(r'\["([a-zA-Z0-9_-]{25,60})"', resp.text):
+        # Padrão 2: IDs em arrays JavaScript da página (28-44 chars = intervalo real de file IDs)
+        for match in re.finditer(r'\["([a-zA-Z0-9_-]{28,44})"', resp.text):
             candidate = match.group(1)
-            # Filtrar IDs que parecem ser file IDs (não folder IDs que já temos)
-            if candidate != folder_id and len(candidate) > 20:
+            if candidate != folder_id:
                 file_ids.add(candidate)
 
         if not file_ids:
@@ -175,7 +174,7 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
                 # URL de download direto do Google Drive
                 dl_url = f"https://drive.google.com/uc?export=download&id={file_id}"
                 dl_resp = await asyncio.to_thread(
-                    session.get, dl_url, stream=True, allow_redirects=True
+                    session.get, dl_url, stream=True, allow_redirects=True, timeout=30
                 )
 
                 if dl_resp.status_code != 200:
@@ -197,16 +196,18 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
                 # Verificar se é página de confirmação (arquivos grandes)
                 content_type = dl_resp.headers.get("Content-Type", "")
                 if "text/html" in content_type:
-                    # Google Drive pede confirmação para arquivos grandes
+                    # Google Drive pede confirmação para arquivos grandes.
+                    # Versões modernas usam confirm=t (cookie-based); versões antigas
+                    # emitem confirm=<token> no corpo — fallback para 't' se não encontrado.
                     confirm_match = re.search(r"confirm=([a-zA-Z0-9_-]+)", dl_resp.text)
-                    if confirm_match:
-                        confirm_url = (
-                            f"https://drive.google.com/uc?export=download"
-                            f"&confirm={confirm_match.group(1)}&id={file_id}"
-                        )
-                        dl_resp = await asyncio.to_thread(
-                            session.get, confirm_url, stream=True
-                        )
+                    confirm_token = confirm_match.group(1) if confirm_match else "t"
+                    confirm_url = (
+                        f"https://drive.google.com/uc?export=download"
+                        f"&confirm={confirm_token}&id={file_id}"
+                    )
+                    dl_resp = await asyncio.to_thread(
+                        session.get, confirm_url, stream=True, timeout=30
+                    )
 
                 dest = output_dir / filename
                 # Evitar sobrescrever — adicionar sufixo se necessário
@@ -582,15 +583,27 @@ def is_processo_antigo(numero_processo: str) -> bool:
     """
     Detecta se um processo é antigo (escaneado/Google Drive).
 
-    Processos novos do PJe começam com "5" no primeiro dígito
+    Regra primária: processos novos do PJe começam com "5"
     (ex: 5008407-35.2024.8.08.0012).
-    Processos antigos/migrados começam com "0" ou outro dígito
-    (ex: 0126923-56.2011.8.08.0012).
+
+    Regra secundária: mesmo começando com "5", processos anteriores a 2013
+    são considerados antigos pois foram digitalizados antes da migração ao PJe.
 
     Returns:
-        True se o processo é antigo (não começa com "5")
+        True se o processo é antigo (não começa com "5" OU ano < 2013)
     """
     numero_limpo = numero_processo.strip()
     if not numero_limpo:
         return False
-    return not numero_limpo.startswith("5")
+    # Regra primária: não começa com "5"
+    if not numero_limpo.startswith("5"):
+        return True
+    # Regra secundária: CNJ format NNNNNNN-DD.AAAA.J.TT.OOOO — extrai ano
+    year_match = re.search(r"-\d{2}\.(\d{4})\.", numero_limpo)
+    if year_match:
+        try:
+            if int(year_match.group(1)) < 2013:
+                return True
+        except ValueError:
+            pass
+    return False

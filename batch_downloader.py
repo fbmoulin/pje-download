@@ -132,9 +132,7 @@ class BatchProgress:
         }
         # Atomic write: temp file + rename prevents corruption
         tmp = self.progress_file.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(self.progress_file)
 
     @classmethod
@@ -177,7 +175,7 @@ class BatchProgress:
 
 def load_processos_from_file(path: Path) -> list[str]:
     """Lê lista de números de processo de CSV, JSON ou TXT."""
-    text = path.read_text(encoding="utf-8").strip()
+    text = path.read_text(encoding="utf-8-sig").strip()
     suffix = path.suffix.lower()
 
     if suffix == ".json":
@@ -324,148 +322,162 @@ async def download_batch(
 
     start_time = time.monotonic()
 
-    for i, (numero, ps) in enumerate(progress.processos.items()):
+    import os as _os
+
+    concurrent = int(_os.getenv("CONCURRENT_DOWNLOADS", "3"))
+    sem = asyncio.Semaphore(concurrent)
+
+    async def _download_one(i: int, numero: str, ps: ProcessoStatus) -> None:
         if ps.status in ("done", "skipped"):
-            continue
+            return
 
-        ps.status = "downloading"
-        ps.phase = "starting"
-        ps.phase_detail = ""
-        ps.inicio = time.monotonic()
-        progress.save()
-
-        safe_name = re.sub(r'[<>:"/\\|?*]', "_", numero)
-        proc_dir = output_dir / safe_name
-        proc_dir.mkdir(parents=True, exist_ok=True)
-
-        log.info(
-            "batch.processo.start",
-            processo=numero,
-            index=i + 1,
-            total=progress.total,
-        )
-
-        try:
-            all_files: list[dict] = []
-
-            # ── PROCESSO ANTIGO: Google Drive + MNI ──
-            if is_processo_antigo(numero):
-                gdrive_url = gdrive_url_map.get(numero)
-                if gdrive_url:
-                    ps.phase = "gdrive"
-                    ps.phase_detail = "Baixando pasta Google Drive"
-                    progress.save()
-                    log.info(
-                        "batch.processo.antigo_gdrive",
-                        processo=numero,
-                        gdrive_url=gdrive_url,
-                    )
-                    gdrive_dir = proc_dir / "escaneados_gdrive"
-                    gdrive_files = await download_gdrive_folder(gdrive_url, gdrive_dir)
-                    all_files.extend(gdrive_files)
-                    log.info(
-                        "batch.processo.gdrive_done",
-                        processo=numero,
-                        gdrive_docs=len(gdrive_files),
-                    )
-                else:
-                    log.warning(
-                        "batch.processo.antigo_sem_gdrive",
-                        processo=numero,
-                        note="Processo antigo sem link do Google Drive; tentando MNI apenas",
-                    )
-
-            # ── MNI SOAP: Fase 1 (metadados) ──
-            ps.phase = "mni_metadata"
-            ps.phase_detail = "Consultando metadados via MNI SOAP"
+        async with sem:
+            ps.status = "downloading"
+            ps.phase = "starting"
+            ps.phase_detail = ""
+            ps.inicio = time.monotonic()
             progress.save()
-            result: MNIResult = await client.consultar_processo(
-                numero,
-                incluir_documentos=True,
-                incluir_cabecalho=True,
-            )
 
-            if not result.success:
-                # Se já baixou do GDrive, não é falha total
-                if all_files:
-                    log.warning(
-                        "batch.processo.mni_failed_gdrive_ok",
-                        processo=numero,
-                        error=result.error,
-                        gdrive_docs=len(all_files),
-                    )
-                    ps.docs_baixados = len(all_files)
-                    ps.tamanho_bytes = sum(f["tamanhoBytes"] for f in all_files)
-                    ps.status = "done"
-                    ps.phase = "done"
-                    ps.phase_detail = f"GDrive OK ({len(all_files)} docs), MNI falhou"
-                    ps.fim = time.monotonic()
-                    progress.save(force=True)
-                    continue
-                else:
-                    ps.status = "failed"
-                    ps.phase = "failed"
-                    ps.phase_detail = result.error or "consulta falhou"
-                    ps.erro = result.error or "consulta falhou"
-                    ps.fim = time.monotonic()
-                    log.warning(
-                        "batch.processo.failed",
-                        processo=numero,
-                        error=ps.erro,
-                    )
-                    progress.save(force=True)
-                    continue
-
-            total_docs = len(result.processo.documentos)
-            total_vinc = sum(len(d.vinculados) for d in result.processo.documentos)
-            ps.total_docs = total_docs + (total_vinc if incluir_anexos else 0)
-
-            # ── MNI SOAP: Fase 2 (download) ──
-            ps.phase = "mni_download"
-            ps.phase_detail = f"Baixando {ps.total_docs} docs via MNI SOAP"
-            progress.save()
-            mni_files = await client.download_documentos(
-                result.processo,
-                proc_dir,
-                batch_size=batch_size,
-                incluir_anexos=incluir_anexos,
-            )
-            all_files.extend(mni_files)
-
-            ps.docs_baixados = len(all_files)
-            ps.tamanho_bytes = sum(f["tamanhoBytes"] for f in all_files)
-            ps.status = "done"
-            ps.phase = "done"
-            ps.phase_detail = f"{ps.docs_baixados} docs, {round(ps.tamanho_bytes / 1024 / 1024, 1)} MB"
-            ps.fim = time.monotonic()
+            safe_name = re.sub(r'[<>:"/\\|?*]', "_", numero)
+            proc_dir = output_dir / safe_name
+            proc_dir.mkdir(parents=True, exist_ok=True)
 
             log.info(
-                "batch.processo.done",
+                "batch.processo.start",
                 processo=numero,
-                docs=ps.docs_baixados,
-                size_mb=round(ps.tamanho_bytes / 1024 / 1024, 2),
-                duracao_s=ps.duracao_s,
-                is_antigo=is_processo_antigo(numero),
+                index=i + 1,
+                total=progress.total,
             )
 
-        except Exception as exc:
-            ps.status = "failed"
-            ps.phase = "failed"
-            ps.phase_detail = str(exc)[:100]
-            ps.erro = str(exc)
-            ps.fim = time.monotonic()
-            log.error(
-                "batch.processo.error",
-                processo=numero,
-                error=str(exc),
-            )
+            try:
+                all_files: list[dict] = []
 
-        progress.save(force=True)
+                # ── PROCESSO ANTIGO: Google Drive + MNI ──
+                if is_processo_antigo(numero):
+                    gdrive_url = gdrive_url_map.get(numero)
+                    if gdrive_url:
+                        ps.phase = "gdrive"
+                        ps.phase_detail = "Baixando pasta Google Drive"
+                        progress.save()
+                        log.info(
+                            "batch.processo.antigo_gdrive",
+                            processo=numero,
+                            gdrive_url=gdrive_url,
+                        )
+                        gdrive_dir = proc_dir / "escaneados_gdrive"
+                        gdrive_files = await download_gdrive_folder(
+                            gdrive_url, gdrive_dir
+                        )
+                        all_files.extend(gdrive_files)
+                        log.info(
+                            "batch.processo.gdrive_done",
+                            processo=numero,
+                            gdrive_docs=len(gdrive_files),
+                        )
+                    else:
+                        log.warning(
+                            "batch.processo.antigo_sem_gdrive",
+                            processo=numero,
+                            note="Processo antigo sem link do Google Drive; tentando MNI apenas",
+                        )
 
-        # Pausa entre processos
-        remaining = progress.pending
-        if remaining > 0:
+                # ── MNI SOAP: Fase 1 (metadados) ──
+                ps.phase = "mni_metadata"
+                ps.phase_detail = "Consultando metadados via MNI SOAP"
+                progress.save()
+                result: MNIResult = await client.consultar_processo(
+                    numero,
+                    incluir_documentos=True,
+                    incluir_cabecalho=True,
+                )
+
+                if not result.success:
+                    # Se já baixou do GDrive, não é falha total
+                    if all_files:
+                        log.warning(
+                            "batch.processo.mni_failed_gdrive_ok",
+                            processo=numero,
+                            error=result.error,
+                            gdrive_docs=len(all_files),
+                        )
+                        ps.docs_baixados = len(all_files)
+                        ps.tamanho_bytes = sum(f["tamanhoBytes"] for f in all_files)
+                        ps.status = "done"
+                        ps.phase = "done"
+                        ps.phase_detail = (
+                            f"GDrive OK ({len(all_files)} docs), MNI falhou"
+                        )
+                        ps.fim = time.monotonic()
+                        progress.save(force=True)
+                        return
+                    else:
+                        ps.status = "failed"
+                        ps.phase = "failed"
+                        ps.phase_detail = result.error or "consulta falhou"
+                        ps.erro = result.error or "consulta falhou"
+                        ps.fim = time.monotonic()
+                        log.warning(
+                            "batch.processo.failed",
+                            processo=numero,
+                            error=ps.erro,
+                        )
+                        progress.save(force=True)
+                        return
+
+                total_docs = len(result.processo.documentos)
+                total_vinc = sum(len(d.vinculados) for d in result.processo.documentos)
+                ps.total_docs = total_docs + (total_vinc if incluir_anexos else 0)
+
+                # ── MNI SOAP: Fase 2 (download) ──
+                ps.phase = "mni_download"
+                ps.phase_detail = f"Baixando {ps.total_docs} docs via MNI SOAP"
+                progress.save()
+                mni_files = await client.download_documentos(
+                    result.processo,
+                    proc_dir,
+                    batch_size=batch_size,
+                    incluir_anexos=incluir_anexos,
+                )
+                all_files.extend(mni_files)
+
+                ps.docs_baixados = len(all_files)
+                ps.tamanho_bytes = sum(f["tamanhoBytes"] for f in all_files)
+                ps.status = "done"
+                ps.phase = "done"
+                ps.phase_detail = f"{ps.docs_baixados} docs, {round(ps.tamanho_bytes / 1024 / 1024, 1)} MB"
+                ps.fim = time.monotonic()
+
+                log.info(
+                    "batch.processo.done",
+                    processo=numero,
+                    docs=ps.docs_baixados,
+                    size_mb=round(ps.tamanho_bytes / 1024 / 1024, 2),
+                    duracao_s=ps.duracao_s,
+                    is_antigo=is_processo_antigo(numero),
+                )
+
+            except Exception as exc:
+                ps.status = "failed"
+                ps.phase = "failed"
+                ps.phase_detail = str(exc)[:100]
+                ps.erro = str(exc)
+                ps.fim = time.monotonic()
+                log.error(
+                    "batch.processo.error",
+                    processo=numero,
+                    error=str(exc),
+                )
+
+            progress.save(force=True)
+
+            # Pausa de cortesia antes de liberar o slot do semáforo
             await asyncio.sleep(delay_entre_processos)
+
+    tasks = [
+        _download_one(i, numero, ps)
+        for i, (numero, ps) in enumerate(progress.processos.items())
+    ]
+    await asyncio.gather(*tasks)
 
     elapsed = time.monotonic() - start_time
 

@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from pathlib import Path
 
+import aiohttp
 from aiohttp import web
 import structlog
 
@@ -64,6 +65,9 @@ class BatchJob:
     error: str | None = None
 
 
+MAX_BATCH_SIZE = 500  # máximo de processos por batch
+
+
 class DashboardState:
     """Estado global da dashboard — batches, progresso, histórico."""
 
@@ -72,6 +76,8 @@ class DashboardState:
         self.batches: dict[str, BatchJob] = {}
         self.current_batch_id: str | None = None
         self._task: asyncio.Task | None = None
+        self._progress_cache: dict | None = None
+        self._progress_cache_time: float = 0.0
         self._load_history()
 
     def _load_history(self):
@@ -191,9 +197,7 @@ class DashboardState:
             progress_file = Path(job.output_dir) / "_progress.json"
             if progress_file.exists():
                 try:
-                    job.progress = json.loads(
-                        progress_file.read_text(encoding="utf-8")
-                    )
+                    job.progress = json.loads(progress_file.read_text(encoding="utf-8"))
                 except Exception:
                     pass
             job.status = "failed"
@@ -202,22 +206,30 @@ class DashboardState:
             log.error("dashboard.batch.failed", batch_id=job.id, error=str(exc))
 
     def get_current_progress(self) -> dict | None:
-        """Lê progresso em tempo real do _progress.json do batch atual."""
+        """Retorna progresso do batch atual — em memória (TTL 1s) durante execução."""
         if not self.current_batch_id:
             return None
         job = self.batches.get(self.current_batch_id)
         if not job:
             return None
 
-        # Se já terminou, retornar progresso final
+        # Se já terminou, retornar progresso final (já em memória)
         if job.status in ("done", "failed"):
+            self._progress_cache = None  # limpar cache ao terminar
             return {"batch_id": job.id, "status": job.status, **job.progress}
 
-        # Ler _progress.json em tempo real
+        # Durante execução: servir do cache em memória (TTL 1s)
+        now = time.monotonic()
+        if self._progress_cache is not None and (now - self._progress_cache_time) < 1.0:
+            return {"batch_id": job.id, "status": "running", **self._progress_cache}
+
+        # Cache expirado — ler do disco e atualizar cache
         progress_file = Path(job.output_dir) / "_progress.json"
         if progress_file.exists():
             try:
                 data = json.loads(progress_file.read_text(encoding="utf-8"))
+                self._progress_cache = data
+                self._progress_cache_time = now
                 return {"batch_id": job.id, "status": "running", **data}
             except Exception:
                 pass
@@ -233,10 +245,25 @@ state: DashboardState | None = None
 
 
 async def handle_status(request: web.Request) -> web.Response:
-    """GET /api/status — Status geral."""
+    """GET /api/status — Status geral incluindo health do worker."""
     if state is None:
         return web.json_response({"error": "Service not initialized"}, status=503)
     current = state.get_current_progress()
+
+    # Consultar health do worker (:8006) — falha graciosamente se indisponível
+    worker_status = "unknown"
+    try:
+        timeout = aiohttp.ClientTimeout(total=2)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.get("http://localhost:8006/health") as resp:
+                if resp.status == 200:
+                    worker_data = await resp.json()
+                    worker_status = worker_data.get("status", "unknown")
+                else:
+                    worker_status = "unhealthy"
+    except Exception:
+        worker_status = "unreachable"
+
     return web.json_response(
         {
             "service": "pje-dashboard",
@@ -245,6 +272,7 @@ async def handle_status(request: web.Request) -> web.Response:
             "current_batch": state.current_batch_id,
             "current_status": current["status"] if current else "idle",
             "output_dir": str(state.output_dir.resolve()),
+            "worker_status": worker_status,
         }
     )
 
@@ -292,6 +320,14 @@ async def handle_download(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "Nenhum processo com formato CNJ válido", "invalidos": invalidos},
             status=400,
+        )
+
+    if len(processos) > MAX_BATCH_SIZE:
+        return web.json_response(
+            {
+                "error": f"Máximo de {MAX_BATCH_SIZE} processos por batch (enviado: {len(processos)})",
+            },
+            status=422,
         )
 
     # Verificar se já há batch em execução
@@ -417,6 +453,17 @@ async def handle_index(request: web.Request) -> web.Response:
 # ─────────────────────────────────────────────
 
 
+async def _on_cleanup(app: web.Application) -> None:
+    """Cancela batch em execução ao encerrar o servidor."""
+    if state and state._task and not state._task.done():
+        state._task.cancel()
+        try:
+            await state._task
+        except asyncio.CancelledError:
+            pass
+        log.info("dashboard.shutdown.batch_cancelled")
+
+
 def create_app(output_dir: Path) -> web.Application:
     """Cria a aplicação aiohttp."""
     global state
@@ -439,6 +486,8 @@ def create_app(output_dir: Path) -> web.Application:
     if static_dir.is_dir():
         app.router.add_static("/static", static_dir, show_index=False)
 
+    app.on_cleanup.append(_on_cleanup)
+
     return app
 
 
@@ -448,9 +497,9 @@ def create_app(output_dir: Path) -> web.Application:
 
 _rate_buckets: dict[str, list[float]] = {}
 _rate_bucket_last_seen: dict[str, float] = {}
-RATE_LIMIT_MAX = 10       # max requests
+RATE_LIMIT_MAX = 10  # max requests
 RATE_LIMIT_WINDOW = 60.0  # per N seconds
-_BUCKET_EXPIRE = 300.0    # purge IPs inactive for 5 minutes
+_BUCKET_EXPIRE = 300.0  # purge IPs inactive for 5 minutes
 
 # Restrict CORS to localhost only — this service handles sensitive judicial docs
 _ALLOWED_ORIGINS = {
@@ -464,9 +513,7 @@ _ALLOWED_ORIGINS = {
 def _purge_stale_buckets(now: float) -> None:
     """Remove buckets for IPs that haven't been seen in _BUCKET_EXPIRE seconds."""
     stale = [
-        ip
-        for ip, last in _rate_bucket_last_seen.items()
-        if now - last > _BUCKET_EXPIRE
+        ip for ip, last in _rate_bucket_last_seen.items() if now - last > _BUCKET_EXPIRE
     ]
     for ip in stale:
         _rate_buckets.pop(ip, None)
@@ -492,7 +539,9 @@ async def rate_limit_middleware(request: web.Request, handler):
     bucket[:] = [t for t in bucket if now - t < RATE_LIMIT_WINDOW]
     if len(bucket) >= RATE_LIMIT_MAX:
         return web.json_response(
-            {"error": f"Rate limit exceeded ({RATE_LIMIT_MAX}/{RATE_LIMIT_WINDOW:.0f}s)"},
+            {
+                "error": f"Rate limit exceeded ({RATE_LIMIT_MAX}/{RATE_LIMIT_WINDOW:.0f}s)"
+            },
             status=429,
         )
     bucket.append(now)
