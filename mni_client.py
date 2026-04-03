@@ -25,11 +25,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import structlog
+
+import metrics
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.mni-client")
 
@@ -128,6 +131,7 @@ class MNIClient:
         timeout: int | None = None,
     ) -> None:
         import os
+
         self.tribunal = (tribunal or os.getenv("MNI_TRIBUNAL", MNI_TRIBUNAL)).upper()
         self.username = username or os.getenv("MNI_USERNAME", MNI_USERNAME)
         self.password = password or os.getenv("MNI_PASSWORD", MNI_PASSWORD)
@@ -202,6 +206,9 @@ class MNIClient:
         """
         import asyncio
 
+        t0 = time.monotonic()
+        _op = "consultar_processo"
+
         try:
             log.info(
                 "mni.consultar_processo.start",
@@ -235,6 +242,12 @@ class MNIClient:
                     processo=numero_processo,
                     mensagem=mensagem,
                 )
+                metrics.mni_latency_seconds.labels(operation=_op).observe(
+                    time.monotonic() - t0
+                )
+                metrics.mni_requests_total.labels(
+                    operation=_op, status="mni_error"
+                ).inc()
                 return MNIResult(success=False, error=mensagem, raw_response=result)
 
             processo = self._parse_processo(result, numero_processo)
@@ -245,6 +258,10 @@ class MNIClient:
                 documentos=len(processo.documentos),
             )
 
+            metrics.mni_latency_seconds.labels(operation=_op).observe(
+                time.monotonic() - t0
+            )
+            metrics.mni_requests_total.labels(operation=_op, status="success").inc()
             return MNIResult(success=True, processo=processo, raw_response=result)
 
         except asyncio.TimeoutError:
@@ -253,9 +270,11 @@ class MNIClient:
                 processo=numero_processo,
                 timeout_s=self.timeout,
             )
-            return MNIResult(
-                success=False, error=f"SOAP timeout ({self.timeout}s)"
+            metrics.mni_latency_seconds.labels(operation=_op).observe(
+                time.monotonic() - t0
             )
+            metrics.mni_requests_total.labels(operation=_op, status="timeout").inc()
+            return MNIResult(success=False, error=f"SOAP timeout ({self.timeout}s)")
 
         except Exception as exc:
             error_msg = str(exc)
@@ -265,17 +284,24 @@ class MNIClient:
                 log.warning(
                     "mni.consultar_processo.not_found", processo=numero_processo
                 )
+                _status = "not_found"
             elif "Acesso negado" in error_msg or "Unauthorized" in error_msg:
                 log.error(
                     "mni.consultar_processo.auth_failed", processo=numero_processo
                 )
+                _status = "auth_failed"
             else:
                 log.error(
                     "mni.consultar_processo.failed",
                     processo=numero_processo,
                     error=error_msg,
                 )
+                _status = "error"
 
+            metrics.mni_latency_seconds.labels(operation=_op).observe(
+                time.monotonic() - t0
+            )
+            metrics.mni_requests_total.labels(operation=_op, status=_status).inc()
             return MNIResult(success=False, error=error_msg)
 
     def _call_consultar_processo(
@@ -508,6 +534,7 @@ class MNIClient:
         """
         import asyncio
 
+        t0 = time.monotonic()
         output_dir.mkdir(parents=True, exist_ok=True)
         saved_files: list[dict] = []
 
@@ -633,6 +660,12 @@ class MNIClient:
             total_saved=len(saved_files),
             total_download=len(all_docs),
         )
+        metrics.mni_latency_seconds.labels(operation="download_documentos").observe(
+            time.monotonic() - t0
+        )
+        metrics.mni_requests_total.labels(
+            operation="download_documentos", status="success"
+        ).inc()
         return saved_files
 
     def _save_document(self, doc: MNIDocumento, output_dir: Path) -> dict | None:

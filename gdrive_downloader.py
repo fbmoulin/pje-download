@@ -29,6 +29,8 @@ from pathlib import Path
 
 import structlog
 
+import metrics
+
 log: structlog.BoundLogger = structlog.get_logger("kratos.gdrive")
 
 
@@ -109,10 +111,15 @@ async def _try_gdown(folder_url: str, output_dir: Path) -> list[dict] | None:
                 files.append(_file_info(p))
 
         log.info("gdrive.gdown.success", count=len(files))
+        if files:
+            metrics.gdrive_attempts_total.labels(
+                strategy="gdown", status="success"
+            ).inc()
         return files if files else None
 
     except Exception as exc:
         log.warning("gdrive.gdown.failed", error=str(exc))
+        metrics.gdrive_attempts_total.labels(strategy="gdown", status="failed").inc()
         return None
 
 
@@ -237,10 +244,15 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
                 )
                 continue
 
+        if files:
+            metrics.gdrive_attempts_total.labels(
+                strategy="requests", status="success"
+            ).inc()
         return files if files else None
 
     except Exception as exc:
         log.warning("gdrive.requests.failed", error=str(exc))
+        metrics.gdrive_attempts_total.labels(strategy="requests", status="failed").inc()
         return None
 
 
@@ -363,10 +375,17 @@ async def _try_playwright_download(
                     log.warning("gdrive.playwright.link_error", index=i, error=str(exc))
 
             await browser.close()
+            if files:
+                metrics.gdrive_attempts_total.labels(
+                    strategy="playwright", status="success"
+                ).inc()
             return files if files else None
 
     except Exception as exc:
         log.warning("gdrive.playwright.failed", error=str(exc))
+        metrics.gdrive_attempts_total.labels(
+            strategy="playwright", status="failed"
+        ).inc()
         return None
 
 

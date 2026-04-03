@@ -32,6 +32,8 @@ from pathlib import Path
 
 import structlog
 
+import metrics
+
 log: structlog.BoundLogger = structlog.get_logger("kratos.batch-downloader")
 
 # NOTA: mni_client é importado DEPOIS de _load_env() para que as env vars
@@ -408,6 +410,9 @@ async def download_batch(
                             f"GDrive OK ({len(all_files)} docs), MNI falhou"
                         )
                         ps.fim = time.monotonic()
+                        metrics.batch_processos_total.labels(status="done").inc()
+                        metrics.batch_docs_total.inc(ps.docs_baixados)
+                        metrics.batch_bytes_total.inc(ps.tamanho_bytes)
                         progress.save(force=True)
                         return
                     else:
@@ -421,6 +426,7 @@ async def download_batch(
                             processo=numero,
                             error=ps.erro,
                         )
+                        metrics.batch_processos_total.labels(status="failed").inc()
                         progress.save(force=True)
                         return
 
@@ -446,6 +452,9 @@ async def download_batch(
                 ps.phase = "done"
                 ps.phase_detail = f"{ps.docs_baixados} docs, {round(ps.tamanho_bytes / 1024 / 1024, 1)} MB"
                 ps.fim = time.monotonic()
+                metrics.batch_processos_total.labels(status="done").inc()
+                metrics.batch_docs_total.inc(ps.docs_baixados)
+                metrics.batch_bytes_total.inc(ps.tamanho_bytes)
 
                 log.info(
                     "batch.processo.done",
@@ -462,6 +471,7 @@ async def download_batch(
                 ps.phase_detail = str(exc)[:100]
                 ps.erro = str(exc)
                 ps.fim = time.monotonic()
+                metrics.batch_processos_total.labels(status="failed").inc()
                 log.error(
                     "batch.processo.error",
                     processo=numero,
@@ -484,6 +494,8 @@ async def download_batch(
     # Relatório final
     total_bytes = sum(ps.tamanho_bytes for ps in progress.processos.values())
     total_docs = sum(ps.docs_baixados for ps in progress.processos.values())
+    if elapsed > 0 and total_docs > 0:
+        metrics.batch_throughput_docs_per_min.set(total_docs / (elapsed / 60.0))
     log.info(
         "batch.complete",
         total_processos=progress.total,

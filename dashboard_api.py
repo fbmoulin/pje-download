@@ -437,6 +437,17 @@ async def handle_batch_detail(request: web.Request) -> web.Response:
     )
 
 
+async def handle_metrics(request: web.Request) -> web.Response:
+    """GET /metrics — Prometheus text exposition format."""
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+    import metrics as m
+
+    return web.Response(
+        body=generate_latest(m.REGISTRY),
+        headers={"Content-Type": CONTENT_TYPE_LATEST},
+    )
+
+
 async def handle_index(request: web.Request) -> web.Response:
     """GET / — Serve a dashboard HTML."""
     html_path = Path(__file__).parent / "dashboard.html"
@@ -475,6 +486,7 @@ def create_app(output_dir: Path) -> web.Application:
     app.middlewares.append(rate_limit_middleware)
 
     app.router.add_get("/", handle_index)
+    app.router.add_get("/metrics", handle_metrics)
     app.router.add_get("/api/status", handle_status)
     app.router.add_post("/api/download", handle_download)
     app.router.add_get("/api/progress", handle_progress)

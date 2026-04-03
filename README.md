@@ -44,6 +44,7 @@ Automacao de download de documentos processuais do PJe (Processo Judicial Eletro
 | `static/js/app.js` | ~500 | Dashboard — adaptive polling, pipeline renderer, toasts, file upload |
 | `gdrive_downloader.py` | ~596 | Download de pastas Google Drive (processos antigos escaneados) |
 | `config.py` | ~61 | Configuracao centralizada — todas as variaveis env-configuraveis |
+| `metrics.py` | ~60 | Registry Prometheus dedicado — 7 metricas de latencia, throughput e erros |
 
 ## Estrategias de Download
 
@@ -169,6 +170,7 @@ python worker.py
 | `GET` | `/api/progress` | Progresso do batch atual (polling) |
 | `GET` | `/api/history` | Historico de todos os batches |
 | `GET` | `/api/batch/{id}` | Detalhes de um batch especifico |
+| `GET` | `/metrics` | Metricas Prometheus (text/plain) |
 | `GET` | `/static/*` | Arquivos estaticos (CSS, JS) |
 
 ### POST /api/download
@@ -183,7 +185,45 @@ python worker.py
 }
 ```
 
-Respostas: `201` (criado), `400` (formato CNJ invalido), `409` (batch em execucao), `429` (rate limit).
+Respostas: `201` (criado), `400` (formato CNJ invalido), `409` (batch em execucao), `422` (>500 processos), `429` (rate limit).
+
+### GET /metrics
+
+Formato Prometheus text (`text/plain; version=0.0.4`). Compativel com Prometheus scrape e Grafana.
+
+```
+# Latencia e contagem de chamadas SOAP MNI
+pje_mni_requests_total{operation="consultar_processo", status="success"} 42.0
+pje_mni_requests_total{operation="consultar_processo", status="timeout"} 1.0
+pje_mni_latency_seconds_bucket{operation="consultar_processo", le="5.0"} 40.0
+
+# Hit rate das 3 estrategias de download do Google Drive
+pje_gdrive_attempts_total{strategy="gdown", status="success"} 5.0
+pje_gdrive_attempts_total{strategy="requests", status="success"} 2.0
+pje_gdrive_attempts_total{strategy="playwright", status="success"} 1.0
+
+# Resultado dos processos no batch
+pje_batch_processos_total{status="done"} 38.0
+pje_batch_processos_total{status="failed"} 4.0
+
+# Volume acumulado
+pje_batch_docs_total 1247.0
+pje_batch_bytes_total 3.28e+09
+
+# Throughput do ultimo batch
+pje_batch_throughput_docs_per_min 8.3
+```
+
+**Labels de status para `pje_mni_requests_total`:**
+
+| Status | Causa |
+|--------|-------|
+| `success` | Chamada SOAP retornou com sucesso |
+| `mni_error` | MNI retornou `sucesso=False` na resposta |
+| `timeout` | `asyncio.wait_for` excedeu `MNI_TIMEOUT` |
+| `not_found` | Processo nao encontrado no tribunal |
+| `auth_failed` | Credenciais invalidas (`Acesso negado`/`Unauthorized`) |
+| `error` | Excecao generica (rede, parsing, etc.) |
 
 ### GET /health (Worker)
 
