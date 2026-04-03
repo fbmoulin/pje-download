@@ -1,5 +1,7 @@
 # PJe Download
 
+[![CI](https://github.com/fbmoulin/pje-download/actions/workflows/ci.yml/badge.svg)](https://github.com/fbmoulin/pje-download/actions/workflows/ci.yml)
+
 Automacao de download de documentos processuais do PJe (Processo Judicial Eletronico) via MNI SOAP, API REST e browser automation.
 
 ## Arquitetura
@@ -277,6 +279,42 @@ downloads/
   _progress.json             # Progresso em tempo real (atomic writes)
   _report.json               # Relatorio final do batch
 ```
+
+## Deploy
+
+### Docker Compose (recomendado)
+
+```bash
+cp .env.example .env   # preencher MNI_USERNAME, MNI_PASSWORD
+docker compose up -d   # dashboard + redis
+# Opcional: docker compose --profile worker up -d  (+ worker Playwright)
+```
+
+Verificacao:
+
+```bash
+curl http://localhost:8007/api/status   # {"status":"running"}
+curl http://localhost:8007/metrics      # metricas Prometheus
+```
+
+### Producao (VPS)
+
+| Recurso | Valor |
+|---------|-------|
+| Host | `191.252.204.250` |
+| Dashboard | `http://191.252.204.250:8007` |
+| Metrics | `http://191.252.204.250:8007/metrics` |
+| Path | `/opt/pje-download` |
+
+### CI/CD (GitHub Actions)
+
+| Workflow | Trigger | Etapas |
+|----------|---------|--------|
+| `ci.yml` | push / PR | ruff lint → pytest (69 testes) |
+| `deploy.yml` | push master | rsync → `docker compose up --build` no VPS |
+| `dependabot.yml` | semanal | atualiza actions + pip deps |
+
+Secrets necessarios no repositorio: `VPS_SSH_KEY`, `VPS_HOST`, `VPS_USER`.
 
 ## Integracao com Kratos Case Pipeline
 
