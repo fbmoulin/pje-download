@@ -211,7 +211,7 @@ async def test_download_batch_uses_semaphore(tmp_path, monkeypatch):
             return_value=[],
         ),
     ):
-        progress = await download_batch(
+        await download_batch(
             numeros=numeros,
             output_dir=tmp_path,
             delay_entre_processos=0.0,

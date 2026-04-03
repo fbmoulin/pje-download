@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_client():
     """Return an MNIClient with lazy init bypassed."""
     from mni_client import MNIClient
+
     client = MNIClient.__new__(MNIClient)
     client.tribunal = "TJES"
     client.username = "user"
@@ -21,6 +23,7 @@ def _make_client():
     client.wsdl_url = "https://pje.tjes.jus.br/pje/intercomunicacao?wsdl"
     client._client = None
     import threading
+
     client._client_lock = threading.Lock()
     client._seen_checksums = set()
     return client
@@ -29,6 +32,7 @@ def _make_client():
 # ---------------------------------------------------------------------------
 # 403 / Forbidden classification
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_consultar_processo_403_classified_as_auth_failed():
@@ -52,9 +56,6 @@ async def test_consultar_processo_403_classified_as_auth_failed():
     assert "pje.tjes.jus.br" not in result.error
     # Must mention the tribunal
     assert "TJES" in result.error
-    # Metrics counter incremented with auth_failed label
-    from metrics import mni_requests_total
-    labels = {"operation": "consultar_processo", "status": "auth_failed"}
     # Just verify the call completed without raising
     assert result.error  # non-empty user-friendly message
 
@@ -76,7 +77,11 @@ async def test_consultar_processo_not_found_message():
     """'Processo não encontrado' yields clean not_found error."""
     client = _make_client()
 
-    with patch.object(client, "_get_client", side_effect=Exception("Processo não encontrado no sistema")):
+    with patch.object(
+        client,
+        "_get_client",
+        side_effect=Exception("Processo não encontrado no sistema"),
+    ):
         result = await client.consultar_processo("5000003-00.2024.8.08.0001")
 
     assert result.success is False
@@ -88,7 +93,9 @@ async def test_consultar_processo_acesso_negado_message():
     """'Acesso negado' yields clean auth_failed error."""
     client = _make_client()
 
-    with patch.object(client, "_get_client", side_effect=Exception("Acesso negado ao processo")):
+    with patch.object(
+        client, "_get_client", side_effect=Exception("Acesso negado ao processo")
+    ):
         result = await client.consultar_processo("5000004-00.2024.8.08.0001")
 
     assert result.success is False

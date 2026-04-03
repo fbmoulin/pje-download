@@ -155,11 +155,14 @@ class PJeSessionWorker:
                             latency_ms=health["latency_ms"],
                         )
                     else:
+                        # Keep the client alive — health check failure may be transient
+                        # (e.g. WSDL fetch blocked at startup). Individual process
+                        # requests will retry and produce proper per-request errors.
                         log.warning(
-                            "pje.mni.unhealthy",
+                            "pje.mni.unhealthy_at_startup",
                             error=health.get("error"),
+                            note="client kept alive — will retry on first process request",
                         )
-                        self.mni_client = None
                 except Exception as exc:
                     log.warning("pje.mni.init_failed", error=str(exc))
                     self.mni_client = None
