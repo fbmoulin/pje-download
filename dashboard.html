@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&family=Oswald:wght@600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
   <title>Kratos PJe — Dashboard de Downloads</title>
   <link rel="stylesheet" href="/static/css/style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>K</text></svg>">
@@ -12,9 +15,13 @@
 <div class="container">
 
   <!-- ── Header ── -->
-  <header class="header">
+  <header class="header" data-animate data-delay="0">
     <div class="header__logo">
-      <div class="header__icon">K</div>
+      <div class="header__icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 4l8 8-8 8M12 20h8"/>
+        </svg>
+      </div>
       <h1 class="header__title"><span>Kratos</span> PJe Downloads</h1>
     </div>
     <span id="status-badge" class="badge badge--idle">Idle</span>
@@ -23,27 +30,31 @@
   </header>
 
   <!-- ── KPIs ── -->
-  <section class="kpi-grid">
+  <section class="kpi-grid" data-animate data-delay="1">
     <div class="kpi">
+      <div class="kpi__stripe"></div>
       <div class="kpi__value" id="kpi-processos">0</div>
       <div class="kpi__label">Processos</div>
     </div>
     <div class="kpi">
+      <div class="kpi__stripe"></div>
       <div class="kpi__value" id="kpi-docs">0</div>
       <div class="kpi__label">Documentos</div>
     </div>
     <div class="kpi">
+      <div class="kpi__stripe"></div>
       <div class="kpi__value" id="kpi-size">0 B</div>
       <div class="kpi__label">Tamanho Total</div>
     </div>
     <div class="kpi">
+      <div class="kpi__stripe"></div>
       <div class="kpi__value" id="kpi-batches">0</div>
       <div class="kpi__label">Batches</div>
     </div>
   </section>
 
   <!-- ── Submit + Progress ── -->
-  <section class="grid-2">
+  <section class="grid-2" data-animate data-delay="2">
 
     <!-- Submit Form -->
     <div class="card">
@@ -88,7 +99,11 @@
       </div>
       <div id="progress-area">
         <div class="empty-state">
-          <div class="empty-state__icon">&darr;</div>
+          <div class="empty-state__icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 5v14M5 12l7 7 7-7"/>
+            </svg>
+          </div>
           <div class="empty-state__text">Nenhum download em andamento</div>
           <div class="empty-state__sub">Submeta processos para iniciar</div>
         </div>
@@ -97,7 +112,7 @@
   </section>
 
   <!-- ── Batch Detail ── -->
-  <section id="batch-card" class="card batch-detail hidden">
+  <section id="batch-card" class="card batch-detail hidden" data-animate data-delay="3">
     <div class="card__header">
       <h2 class="card__title">Processos do Batch</h2>
       <button class="btn btn--ghost btn--sm" onclick="document.getElementById('batch-card').classList.add('hidden')">
@@ -125,7 +140,7 @@
   </section>
 
   <!-- ── History ── -->
-  <section class="card">
+  <section class="card" data-animate data-delay="4">
     <div class="card__header">
       <h2 class="card__title">Historico de Batches</h2>
     </div>
@@ -145,7 +160,11 @@
       </table>
     </div>
     <div id="history-empty" class="empty-state hidden">
-      <div class="empty-state__icon">&empty;</div>
+      <div class="empty-state__icon">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="12" rx="10" ry="6"/><path d="M4 8l16 8"/>
+          </svg>
+        </div>
       <div class="empty-state__text">Nenhum batch no historico</div>
       <div class="empty-state__sub">Batches concluidos aparecerao aqui</div>
     </div>

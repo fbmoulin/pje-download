@@ -139,12 +139,13 @@ function renderPhase(p, isAntigoProc) {
 
   let html = '<div class="pipeline">';
   steps.forEach((step, i) => {
-    if (i > 0) html += '<span class="pipeline__arrow">\u203A</span>';
+    if (i > 0) html += '<span class="pipeline__connector"><svg width="20" height="10" viewBox="0 0 20 10" fill="none" xmlns="http://www.w3.org/2000/svg"><line x1="0" y1="5" x2="14" y2="5" stroke="rgba(90,99,128,.4)" stroke-width="1"/><polygon points="14,2 20,5 14,8" fill="rgba(90,99,128,.35)"/></svg></span>';
     let cls = 'pipeline__step--inactive';
     if (phase === 'done' || (phase === 'saving' && step === 'done')) cls = 'pipeline__step--done';
     else if (i < currentIdx) cls = 'pipeline__step--done';
     else if (i === currentIdx) cls = 'pipeline__step--active';
-    html += `<span class="pipeline__step ${cls}">${labels[step]}</span>`;
+    const dot = cls === 'pipeline__step--active' ? '<span class="pipeline__dot"></span>' : '';
+    html += `<span class="pipeline__step ${cls}">${dot}${labels[step]}</span>`;
   });
   html += '</div>';
 
