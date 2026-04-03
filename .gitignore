@@ -5,3 +5,4 @@ downloads_batch/
 downloads/
 *.session.json
 .ruff_cache/
+.worktrees/
