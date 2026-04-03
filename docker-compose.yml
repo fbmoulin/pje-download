@@ -24,8 +24,6 @@ services:
       --requirepass ${REDIS_PASSWORD:-pje_redis_2026}
       --maxmemory 96mb
       --maxmemory-policy allkeys-lru
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
