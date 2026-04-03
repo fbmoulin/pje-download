@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -132,6 +133,7 @@ class MNIClient:
         self.password = password or os.getenv("MNI_PASSWORD", MNI_PASSWORD)
         self.timeout = timeout or int(os.getenv("MNI_TIMEOUT", str(MNI_TIMEOUT)))
         self._client: Any | None = None
+        self._client_lock = threading.Lock()
         self._seen_checksums: set[str] = set()
 
         endpoint = TRIBUNAL_ENDPOINTS.get(self.tribunal)
@@ -143,8 +145,13 @@ class MNIClient:
         self.wsdl_url = endpoint
 
     def _get_client(self):
-        """Inicializa o cliente zeep (lazy)."""
-        if self._client is None:
+        """Inicializa o cliente zeep (lazy, thread-safe)."""
+        if self._client is not None:
+            return self._client
+        with self._client_lock:
+            # Double-checked locking: another thread may have initialized while waiting
+            if self._client is not None:
+                return self._client
             from zeep import Client
             from zeep.transports import Transport
             from requests import Session

@@ -141,22 +141,32 @@ class BatchProgress:
     def load(cls, path: Path) -> "BatchProgress":
         """Carrega progresso de execução anterior para retomada."""
         progress = cls(progress_file=path)
-        if path.exists():
+        if not path.exists():
+            return progress
+        try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            for num, info in data.get("processos", {}).items():
-                ps = ProcessoStatus(numero=num)
-                ps.status = info.get("status", "pending")
-                ps.phase = info.get("phase", "waiting")
-                ps.phase_detail = info.get("phase_detail", "")
-                ps.total_docs = info.get("total_docs", 0)
-                ps.docs_baixados = info.get("docs_baixados", 0)
-                ps.tamanho_bytes = info.get("tamanho_bytes", 0)
-                ps.erro = info.get("erro")
-                # Se já concluído, manter; senão, resetar para pending
-                if ps.status not in ("done", "skipped"):
-                    ps.status = "pending"
-                    ps.phase = "waiting"
-                progress.processos[num] = ps
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning(
+                "batch.progress.corrupt",
+                path=str(path),
+                error=str(exc),
+                note="Starting fresh — corrupt progress file ignored",
+            )
+            return progress
+        for num, info in data.get("processos", {}).items():
+            ps = ProcessoStatus(numero=num)
+            ps.status = info.get("status", "pending")
+            ps.phase = info.get("phase", "waiting")
+            ps.phase_detail = info.get("phase_detail", "")
+            ps.total_docs = info.get("total_docs", 0)
+            ps.docs_baixados = info.get("docs_baixados", 0)
+            ps.tamanho_bytes = info.get("tamanho_bytes", 0)
+            ps.erro = info.get("erro")
+            # Se já concluído, manter; senão, resetar para pending
+            if ps.status not in ("done", "skipped"):
+                ps.status = "pending"
+                ps.phase = "waiting"
+            progress.processos[num] = ps
         return progress
 
 
@@ -259,6 +269,23 @@ async def download_batch(
 
     if gdrive_url_map is None:
         gdrive_url_map = {}
+
+    # Validar credenciais MNI antes de tentar qualquer chamada SOAP
+    import os
+
+    mni_user = os.getenv("MNI_USERNAME", "")
+    mni_pass = os.getenv("MNI_PASSWORD", "")
+    if not mni_user or not mni_pass:
+        error_msg = "MNI_USERNAME ou MNI_PASSWORD não configurados"
+        log.error("batch.mni_credentials_missing")
+        for ps in progress.processos.values():
+            if ps.status == "pending":
+                ps.status = "failed"
+                ps.phase = "failed"
+                ps.phase_detail = error_msg
+                ps.erro = error_msg
+        progress.save(force=True)
+        return progress
 
     # Inicializar cliente MNI
     client = MNIClient()

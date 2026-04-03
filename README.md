@@ -73,7 +73,10 @@ Automacao de download de documentos processuais do PJe (Processo Judicial Eletro
 |---------|-----------|
 | Path traversal prevention | Sanitizacao + `is_relative_to()` guard |
 | CNJ format validation | Regex `NNNNNNN-DD.YYYY.J.TR.OOOO` na API |
-| Rate limiting | 10 POST/60s por IP (in-memory sliding window) |
+| CORS localhost-only | Dashboard restringe `Access-Control-Allow-Origin` a origens localhost (whitelist `_ALLOWED_ORIGINS`) |
+| Rate limiting | 10 POST/60s por IP (sliding window + expurgo de IPs inativos apos 5min) |
+| MNI credentials fail-fast | Valida `MNI_USERNAME`/`MNI_PASSWORD` antes de qualquer chamada SOAP |
+| Thread-safe SOAP client | `_get_client()` usa double-checked locking (`threading.Lock`) para init concorrente |
 | Redis resilience | Retry com backoff em `ConnectionError`/`TimeoutError` |
 | Job schema validation | Requer `jobId` + `numeroProcesso` antes de processar |
 | SOAP timeout | `asyncio.wait_for` previne hangs infinitos |
@@ -85,6 +88,7 @@ Automacao de download de documentos processuais do PJe (Processo Judicial Eletro
 | Deep health checks | `/health` verifica MNI, Redis e espaco em disco |
 | Adaptive polling | Frontend backoff 1.5s-15s com reset em sucesso |
 | Partial failure recovery | Dashboard preserva progresso parcial em erros |
+| Progress file resilience | `BatchProgress.load()` ignora arquivos `_progress.json` corrompidos e reinicia limpo |
 
 ## Setup
 

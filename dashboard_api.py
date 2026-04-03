@@ -447,8 +447,30 @@ def create_app(output_dir: Path) -> web.Application:
 # ─────────────────────────────────────────────
 
 _rate_buckets: dict[str, list[float]] = {}
+_rate_bucket_last_seen: dict[str, float] = {}
 RATE_LIMIT_MAX = 10       # max requests
 RATE_LIMIT_WINDOW = 60.0  # per N seconds
+_BUCKET_EXPIRE = 300.0    # purge IPs inactive for 5 minutes
+
+# Restrict CORS to localhost only — this service handles sensitive judicial docs
+_ALLOWED_ORIGINS = {
+    "http://localhost",
+    "http://127.0.0.1",
+    "http://localhost:8007",
+    "http://127.0.0.1:8007",
+}
+
+
+def _purge_stale_buckets(now: float) -> None:
+    """Remove buckets for IPs that haven't been seen in _BUCKET_EXPIRE seconds."""
+    stale = [
+        ip
+        for ip, last in _rate_bucket_last_seen.items()
+        if now - last > _BUCKET_EXPIRE
+    ]
+    for ip in stale:
+        _rate_buckets.pop(ip, None)
+        _rate_bucket_last_seen.pop(ip, None)
 
 
 @web.middleware
@@ -459,7 +481,13 @@ async def rate_limit_middleware(request: web.Request, handler):
 
     ip = request.remote or "unknown"
     now = time.monotonic()
+
+    # Periodic cleanup of stale buckets (every ~100 requests on average)
+    if len(_rate_buckets) > 50:
+        _purge_stale_buckets(now)
+
     bucket = _rate_buckets.setdefault(ip, [])
+    _rate_bucket_last_seen[ip] = now
     # Prune old entries
     bucket[:] = [t for t in bucket if now - t < RATE_LIMIT_WINDOW]
     if len(bucket) >= RATE_LIMIT_MAX:
@@ -473,17 +501,22 @@ async def rate_limit_middleware(request: web.Request, handler):
 
 @web.middleware
 async def cors_middleware(request: web.Request, handler):
-    """Middleware para CORS — permite acesso da dashboard local."""
+    """Middleware para CORS — restringe a origens localhost."""
+    origin = request.headers.get("Origin", "")
+    allow_origin = origin if origin in _ALLOWED_ORIGINS else "http://localhost"
+
     if request.method == "OPTIONS":
         return web.Response(
             headers={
-                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Origin": allow_origin,
                 "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type",
+                "Vary": "Origin",
             }
         )
     response = await handler(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Origin"] = allow_origin
+    response.headers["Vary"] = "Origin"
     return response
 
 
