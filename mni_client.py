@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -49,7 +50,7 @@ TRIBUNAL_ENDPOINTS: dict[str, str] = {
     "TRT17": "https://pje.trt17.jus.br/pje/intercomunicacao?wsdl",
 }
 
-from config import MNI_USERNAME, MNI_PASSWORD, MNI_TRIBUNAL, MNI_TIMEOUT
+from config import MNI_USERNAME, MNI_PASSWORD, MNI_TRIBUNAL, MNI_TIMEOUT, MNI_PROXY
 
 
 # ─────────────────────────────────────────────
@@ -161,6 +162,10 @@ class MNIClient:
             from requests import Session
 
             session = Session()
+            proxy = MNI_PROXY or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+            if proxy:
+                session.proxies = {"http": proxy, "https": proxy}
+                log.info("mni.client.proxy", proxy=proxy.split("@")[-1])
             transport = Transport(session=session, timeout=self.timeout)
 
             log.info(

@@ -52,6 +52,9 @@ MNI_USERNAME = os.getenv("MNI_USERNAME", "")
 MNI_PASSWORD = os.getenv("MNI_PASSWORD", "")
 MNI_TRIBUNAL = os.getenv("MNI_TRIBUNAL", "TJES")
 MNI_TIMEOUT = int(os.getenv("MNI_TIMEOUT", "60"))
+# Proxy for MNI SOAP calls (optional — needed when VPS IP is blocked by tribunal)
+# Format: http://user:pass@host:port  or  socks5://user:pass@host:port
+MNI_PROXY = os.getenv("MNI_PROXY", "")
 
 # Batch Downloader
 BATCH_SIZE_DEFAULT = int(os.getenv("MNI_BATCH_SIZE", "5"))

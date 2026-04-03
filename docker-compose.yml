@@ -54,6 +54,7 @@ services:
       MNI_TRIBUNAL: ${MNI_TRIBUNAL:-TJES}
       MNI_TIMEOUT: ${MNI_TIMEOUT:-60}
       MNI_BATCH_SIZE: ${MNI_BATCH_SIZE:-5}
+      MNI_PROXY: ${MNI_PROXY:-}
     ports:
       - "${DASHBOARD_PORT:-8007}:8007"
     volumes:
