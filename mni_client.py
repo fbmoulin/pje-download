@@ -254,7 +254,20 @@ class MNIClient:
                 ).inc()
                 return MNIResult(success=False, error=mensagem, raw_response=result)
 
-            processo = self._parse_processo(result, numero_processo)
+            try:
+                processo = self._parse_processo(result, numero_processo)
+            except Exception as parse_exc:
+                metrics.mni_latency_seconds.labels(operation=_op).observe(
+                    time.monotonic() - t0
+                )
+                metrics.mni_requests_total.labels(
+                    operation=_op, status="parse_error"
+                ).inc()
+                return MNIResult(
+                    success=False,
+                    error=f"Erro ao parsear resposta MNI: {parse_exc}",
+                    raw_response=result,
+                )
 
             log.info(
                 "mni.consultar_processo.success",
@@ -509,11 +522,12 @@ class MNIClient:
                 )
 
         except Exception as exc:
-            log.warning(
-                "mni.parse.partial_failure",
+            log.error(
+                "mni.parse.failure",
                 processo=numero_processo,
                 error=str(exc),
             )
+            raise  # Let caller handle — silent swallow causes data loss
 
         return processo
 
