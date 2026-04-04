@@ -1,7 +1,6 @@
 """Tests for config module — CNJ validation and env loading."""
 
 import os
-import pytest
 from config import is_valid_processo, load_env
 
 
@@ -40,19 +39,21 @@ class TestLoadEnv:
     def test_loads_from_dotenv(self, tmp_path, monkeypatch):
         """Create a .env in the project dir candidate path and verify load_env reads it."""
         import config
+
         env_file = tmp_path / ".env"
         env_file.write_text("PJE_TEST_LOAD_VAR=loaded_ok\n")
         monkeypatch.delenv("PJE_TEST_LOAD_VAR", raising=False)
 
-        original = config.load_env
         def patched_load():
             for line in env_file.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     import re as _re
+
                     key, _, val = line.partition("=")
                     val = _re.split(r"\s+#\s", val, maxsplit=1)[0].strip()
                     os.environ.setdefault(key.strip(), val)
+
         monkeypatch.setattr(config, "load_env", patched_load)
 
         config.load_env()
@@ -61,6 +62,7 @@ class TestLoadEnv:
     def test_comment_stripping(self, tmp_path, monkeypatch):
         """Verify inline comments after # are stripped from values."""
         import config
+
         env_file = tmp_path / ".env"
         env_file.write_text("STRIP_TEST=value # this is a comment\n")
         monkeypatch.delenv("STRIP_TEST", raising=False)
@@ -70,9 +72,11 @@ class TestLoadEnv:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     import re as _re
+
                     key, _, val = line.partition("=")
                     val = _re.split(r"\s+#\s", val, maxsplit=1)[0].strip()
                     os.environ.setdefault(key.strip(), val)
+
         monkeypatch.setattr(config, "load_env", patched_load)
 
         config.load_env()

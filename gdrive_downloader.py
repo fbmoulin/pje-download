@@ -181,7 +181,11 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
                     # URL de download direto do Google Drive
                     dl_url = f"https://drive.google.com/uc?export=download&id={file_id}"
                     dl_resp = await asyncio.to_thread(
-                        session.get, dl_url, stream=True, allow_redirects=True, timeout=30
+                        session.get,
+                        dl_url,
+                        stream=True,
+                        allow_redirects=True,
+                        timeout=30,
                     )
 
                     if dl_resp.status_code != 200:
@@ -206,7 +210,9 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
                         # Google Drive pede confirmação para arquivos grandes.
                         # Versões modernas usam confirm=t (cookie-based); versões antigas
                         # emitem confirm=<token> no corpo — fallback para 't' se não encontrado.
-                        confirm_match = re.search(r"confirm=([a-zA-Z0-9_-]+)", dl_resp.text)
+                        confirm_match = re.search(
+                            r"confirm=([a-zA-Z0-9_-]+)", dl_resp.text
+                        )
                         confirm_token = confirm_match.group(1) if confirm_match else "t"
                         confirm_url = (
                             f"https://drive.google.com/uc?export=download"
@@ -232,7 +238,9 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
                                 total += len(chunk)
                         return total
 
-                    total_bytes = await asyncio.to_thread(_stream_to_disk, dl_resp, dest)
+                    total_bytes = await asyncio.to_thread(
+                        _stream_to_disk, dl_resp, dest
+                    )
 
                     files.append(_file_info(dest))
                     log.info(

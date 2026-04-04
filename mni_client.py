@@ -662,7 +662,9 @@ class MNIClient:
                     for doc_id in batch_ids:
                         fetched = fetched_docs.get(doc_id)
                         if fetched and fetched.has_content:
-                            saved = self._save_document(fetched, output_dir, seen_checksums)
+                            saved = self._save_document(
+                                fetched, output_dir, seen_checksums
+                            )
                             if saved:
                                 saved_files.append(saved)
                         else:
@@ -697,7 +699,9 @@ class MNIClient:
         ).inc()
         return saved_files
 
-    def _save_document(self, doc: MNIDocumento, output_dir: Path, seen_checksums: set[str]) -> dict | None:
+    def _save_document(
+        self, doc: MNIDocumento, output_dir: Path, seen_checksums: set[str]
+    ) -> dict | None:
         """Salva um documento com conteúdo em disco. Skips duplicates by checksum."""
         try:
             ext = _mimetype_to_ext(doc.mimetype)

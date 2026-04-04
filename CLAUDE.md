@@ -29,7 +29,7 @@ export MNI_TRIBUNAL="TJES"        # TJES | TJES_2G | TJBA | TJBA_2G | TJCE | TRT
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest (73 tests) — run with `pytest tests/ -q` before any commit
+- Test suite: pytest (101 tests) — run with `pytest tests/ -q` before any commit
 
 ## Env Loading (critical gotcha)
 - `config.py` constants are module-level — they may be empty strings if `.env` not yet loaded
@@ -65,7 +65,7 @@ P0/P1 Hardening Sprint (2026-04-04):
 - Spec: `docs/superpowers/specs/2026-04-04-p0p1-hardening-design.md`
 - Plan: `docs/superpowers/plans/2026-04-04-p0p1-hardening.md`
 - Scope: 12 bug fixes (3 CRITICAL, 9 HIGH) + 28 new tests (test_config.py, test_pje_session.py)
-- Status: PLANNED — not yet executed
+- Status: DONE — 12 bugs fixed, 101 tests passing (73→101)
 
 ## Known Issues (pre-sprint)
 

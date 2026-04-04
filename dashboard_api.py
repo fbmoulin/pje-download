@@ -347,6 +347,7 @@ async def handle_download(request: web.Request) -> web.Response:
         )
     # Validate each URL is a GDrive folder (prevents SSRF)
     from gdrive_downloader import extract_folder_id
+
     invalid_urls = [url for url in gdrive_map.values() if not extract_folder_id(url)]
     if invalid_urls:
         return web.json_response(
@@ -469,6 +470,7 @@ async def handle_session_status(request: web.Request) -> web.Response:
     modified_at: str | None = None
     if exists:
         import os
+
         modified_at = datetime.fromtimestamp(
             os.path.getmtime(SESSION_FILE), tz=UTC
         ).isoformat()
@@ -493,7 +495,9 @@ async def handle_session_verify(request: web.Request) -> web.Response:
         valid = await client.is_valid()
         return web.json_response({"valid": valid})
     except FileNotFoundError:
-        return web.json_response({"valid": False, "error": "Sessão não encontrada"}, status=404)
+        return web.json_response(
+            {"valid": False, "error": "Sessão não encontrada"}, status=404
+        )
     except Exception as exc:
         log.error("dashboard.session.verify_error", error=str(exc))
         return web.json_response({"valid": False, "error": str(exc)}, status=500)
