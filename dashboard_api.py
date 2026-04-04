@@ -487,9 +487,11 @@ async def handle_session_login(request: web.Request) -> web.Response:
     if _login_running:
         return web.json_response({"error": "Login já em andamento"}, status=409)
 
+    # Set flag BEFORE create_task to prevent TOCTOU race
+    _login_running = True
+
     async def _do_login() -> None:
         global _login_running, _login_last_ok
-        _login_running = True
         try:
             from pje_session import interactive_login
 
