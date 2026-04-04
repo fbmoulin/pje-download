@@ -8,44 +8,47 @@ import pytest
 
 class TestSafeFilename:
     def test_strips_special_chars(self):
-        from pje_session import _safe_filename
+        from config import sanitize_filename
 
-        assert _safe_filename("doc:name/with\\bad*chars") == "doc_name_with_bad_chars"
+        assert (
+            sanitize_filename("doc:name/with\\bad*chars", maxlen=120)
+            == "doc_name_with_bad_chars"
+        )
 
     def test_length_limited(self):
-        from pje_session import _safe_filename
+        from config import sanitize_filename
 
         long_name = "a" * 200
-        assert len(_safe_filename(long_name)) <= 120
+        assert len(sanitize_filename(long_name, maxlen=120)) <= 120
 
     def test_empty_returns_empty(self):
-        from pje_session import _safe_filename
+        from config import sanitize_filename
 
-        assert _safe_filename("") == ""
+        assert sanitize_filename("", maxlen=120) == ""
 
 
 class TestUniquePath:
     def test_no_collision(self, tmp_path):
-        from pje_session import _unique_path
+        from config import unique_path
 
         p = tmp_path / "file.pdf"
-        assert _unique_path(p) == p
+        assert unique_path(p) == p
 
     def test_collision_adds_suffix(self, tmp_path):
-        from pje_session import _unique_path
+        from config import unique_path
 
         p = tmp_path / "file.pdf"
         p.write_bytes(b"existing")
-        result = _unique_path(p)
+        result = unique_path(p)
         assert result == tmp_path / "file_1.pdf"
 
     def test_multiple_collisions(self, tmp_path):
-        from pje_session import _unique_path
+        from config import unique_path
 
         p = tmp_path / "file.pdf"
         p.write_bytes(b"existing")
         (tmp_path / "file_1.pdf").write_bytes(b"existing")
-        result = _unique_path(p)
+        result = unique_path(p)
         assert result == tmp_path / "file_2.pdf"
 
 

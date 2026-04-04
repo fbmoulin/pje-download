@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -34,7 +33,7 @@ log = structlog.get_logger("kratos.pje-session")
 # CONFIGURAÇÃO
 # ─────────────────────────────────────────────
 
-from config import PJE_BASE_URL, SESSION_STATE_PATH
+from config import PJE_BASE_URL, SESSION_STATE_PATH, sanitize_filename, unique_path
 
 SESSION_FILE = SESSION_STATE_PATH
 LOGIN_URL = (
@@ -99,8 +98,11 @@ async def interactive_login(session_file: Path = SESSION_FILE) -> bool:
             # Salva estado da sessão
             state = await ctx.storage_state()
             import os as _os
+
             content = json.dumps(state, indent=2, ensure_ascii=False)
-            fd = _os.open(str(session_file), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)
+            fd = _os.open(
+                str(session_file), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600
+            )
             with _os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(content)
             log.info("pje.session.saved", path=str(session_file))
@@ -238,8 +240,9 @@ class PJeSessionClient:
                     continue
 
                 doc_id = doc.get("id") or doc.get("idDocumento")
-                nome = _safe_filename(
-                    doc.get("nome") or doc.get("descricao") or f"doc_{doc_id}"
+                nome = sanitize_filename(
+                    doc.get("nome") or doc.get("descricao") or f"doc_{doc_id}",
+                    maxlen=120,
                 )
 
                 bin_url = DOCUMENT_BINARY.format(id=doc_id)
@@ -248,7 +251,7 @@ class PJeSessionClient:
                     content = await bin_resp.body()
                     ext = _guess_ext(bin_resp.headers.get("content-type", ""), nome)
                     dest = output_dir / f"{nome}{ext}"
-                    dest = _unique_path(dest)
+                    dest = unique_path(dest)
                     dest.write_bytes(content)
                     downloaded.append(
                         {
@@ -300,10 +303,14 @@ class PJeSessionClient:
                         "a[id*='download'], button[id*='download'], a[title*='Download']"
                     )
                 dl = await dl_info.value
-                safe_name = _safe_filename(dl.suggested_filename or "download.pdf")
-                dest = _unique_path(output_dir / safe_name)
+                safe_name = sanitize_filename(
+                    dl.suggested_filename or "download.pdf", maxlen=120
+                )
+                dest = unique_path(output_dir / safe_name)
                 if not dest.resolve().is_relative_to(output_dir.resolve()):
-                    raise ValueError(f"Path traversal in filename: {dl.suggested_filename}")
+                    raise ValueError(
+                        f"Path traversal in filename: {dl.suggested_filename}"
+                    )
                 await dl.save_as(dest)
                 downloaded.append(
                     {
@@ -324,20 +331,6 @@ class PJeSessionClient:
 # ─────────────────────────────────────────────
 # UTILITÁRIOS
 # ─────────────────────────────────────────────
-
-
-def _safe_filename(name: str) -> str:
-    return re.sub(r'[\\/:*?"<>|]', "_", name).strip()[:120]
-
-
-def _unique_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    stem, suffix = path.stem, path.suffix
-    i = 1
-    while (path.parent / f"{stem}_{i}{suffix}").exists():
-        i += 1
-    return path.parent / f"{stem}_{i}{suffix}"
 
 
 def _guess_ext(content_type: str, nome: str) -> str:

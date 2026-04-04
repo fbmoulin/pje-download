@@ -23,7 +23,6 @@ import argparse
 import asyncio
 import csv
 import json
-import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -266,6 +265,7 @@ async def download_batch(
         is_processo_antigo,
         download_gdrive_folder,
     )
+    from config import sanitize_filename
 
     if gdrive_url_map is None:
         gdrive_url_map = {}
@@ -359,7 +359,7 @@ async def download_batch(
             ps.inicio = time.monotonic()
             progress.save()
 
-            safe_name = re.sub(r'[<>:"/\\|?*]', "_", numero)
+            safe_name = sanitize_filename(numero)
             proc_dir = output_dir / safe_name
             if not proc_dir.resolve().is_relative_to(output_dir.resolve()):
                 raise ValueError(f"Path traversal detected: {numero}")

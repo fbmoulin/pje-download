@@ -1,7 +1,13 @@
 """Tests for config module — CNJ validation and env loading."""
 
 import os
-from config import is_valid_processo, load_env
+from config import (
+    is_valid_processo,
+    load_env,
+    sanitize_filename,
+    unique_path,
+    atomic_write_text,
+)
 
 
 class TestIsValidProcesso:
@@ -85,3 +91,48 @@ class TestLoadEnv:
     def test_missing_file_no_error(self):
         """load_env() should not raise when no .env file exists."""
         load_env()
+
+
+class TestSanitizeFilename:
+    def test_strips_dangerous_chars(self):
+        assert (
+            sanitize_filename("doc:name/with\\bad*chars") == "doc_name_with_bad_chars"
+        )
+
+    def test_strips_null_and_control(self):
+        assert sanitize_filename("file\x00name\x1f.pdf") == "file_name_.pdf"
+
+    def test_length_limited(self):
+        assert len(sanitize_filename("a" * 200)) <= 100
+
+    def test_custom_maxlen(self):
+        assert len(sanitize_filename("a" * 200, maxlen=50)) <= 50
+
+    def test_strips_edge_dots(self):
+        assert sanitize_filename("...file...") == "file"
+
+    def test_empty(self):
+        assert sanitize_filename("") == ""
+
+
+class TestUniquePath:
+    def test_no_collision(self, tmp_path):
+        p = tmp_path / "file.pdf"
+        assert unique_path(p) == p
+
+    def test_collision(self, tmp_path):
+        p = tmp_path / "file.pdf"
+        p.write_bytes(b"x")
+        assert unique_path(p) == tmp_path / "file_1.pdf"
+
+
+class TestAtomicWriteText:
+    def test_writes_content(self, tmp_path):
+        p = tmp_path / "test.json"
+        atomic_write_text(p, '{"key": "value"}')
+        assert p.read_text() == '{"key": "value"}'
+
+    def test_no_tmp_file_left(self, tmp_path):
+        p = tmp_path / "test.json"
+        atomic_write_text(p, "content")
+        assert not (tmp_path / "test.json.tmp").exists()

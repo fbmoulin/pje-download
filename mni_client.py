@@ -51,6 +51,7 @@ TRIBUNAL_ENDPOINTS: dict[str, str] = {
 }
 
 from config import MNI_USERNAME, MNI_PASSWORD, MNI_TRIBUNAL, MNI_TIMEOUT, MNI_PROXY
+from config import sanitize_filename as _sanitize_filename
 
 
 # ─────────────────────────────────────────────
@@ -804,13 +805,3 @@ def _mimetype_to_ext(mimetype: str) -> str:
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     }
     return mapping.get(mimetype, ".bin")
-
-
-def _sanitize_filename(name: str) -> str:
-    """Remove caracteres inválidos de nomes de arquivo."""
-    import re
-
-    # Substituir caracteres problemáticos
-    sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
-    # Limitar tamanho
-    return sanitized[:100].strip(". ")

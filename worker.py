@@ -21,7 +21,6 @@ O foco é REDUZIR a exposição ao CAPTCHA, não combatê-lo.
 import asyncio
 import hashlib
 import json
-import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -49,22 +48,16 @@ from config import (
     HEALTH_PORT,
     CONCURRENT_DOWNLOADS,
     MNI_ENABLED,
+    sanitize_filename,
+    unique_path,
 )
 
 DOWNLOAD_BASE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _unique_filename(directory: Path, filename: str) -> str:
-    """Return filename, appending counter if it already exists in directory."""
-    dest = directory / filename
-    if not dest.exists():
-        return filename
-    stem = dest.stem
-    suffix = dest.suffix
-    counter = 1
-    while (directory / f"{stem}_{counter}{suffix}").exists():
-        counter += 1
-    return f"{stem}_{counter}{suffix}"
+    """Return a non-colliding filename in directory."""
+    return unique_path(directory / filename).name
 
 
 # Padrões conhecidos de CAPTCHA no PJe
@@ -319,7 +312,7 @@ class PJeSessionWorker:
 
         self._health_status = "processing"
 
-        safe_name = re.sub(r'[<>:"/\\|?*\.\s]+', "_", numero_processo).strip("_")
+        safe_name = sanitize_filename(numero_processo)
         output_dir = DOWNLOAD_BASE_DIR / safe_name
         if not output_dir.resolve().is_relative_to(DOWNLOAD_BASE_DIR.resolve()):
             raise ValueError(f"Path traversal detected: {numero_processo}")

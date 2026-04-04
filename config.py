@@ -31,6 +31,30 @@ def is_valid_processo(numero: str) -> bool:
     return bool(CNJ_PATTERN.match(numero.strip()))
 
 
+def sanitize_filename(name: str, maxlen: int = 100) -> str:
+    """Sanitize a string for use as a filename. Strips dangerous chars, limits length."""
+    sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+    return sanitized[:maxlen].strip(". ")
+
+
+def unique_path(path: Path) -> Path:
+    """Return a non-colliding path by appending _1, _2, etc. if path exists."""
+    if not path.exists():
+        return path
+    stem, suffix = path.stem, path.suffix
+    i = 1
+    while (path.parent / f"{stem}_{i}{suffix}").exists():
+        i += 1
+    return path.parent / f"{stem}_{i}{suffix}"
+
+
+def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """Write text to file atomically via tmp+rename."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding=encoding)
+    tmp.replace(path)
+
+
 # ─────────────────────────────────────────────
 # Centralized defaults (all env-configurable)
 # ─────────────────────────────────────────────
