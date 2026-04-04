@@ -970,6 +970,7 @@ class PJeSessionWorker:
 
         # MNI connectivity (cached 30s — prevents 503 cascade during tribunal slowness)
         import time
+
         now = time.monotonic()
         if self.mni_client is not None:
             if self._health_cache and (now - self._health_cache_time) < 30.0:

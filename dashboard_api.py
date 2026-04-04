@@ -100,13 +100,18 @@ class DashboardState:
                 )
                 self.batches[batch_id] = job
             except Exception as exc:
-                log.warning("dashboard.history.load_failed", file=str(report_file), error=str(exc))
+                log.warning(
+                    "dashboard.history.load_failed",
+                    file=str(report_file),
+                    error=str(exc),
+                )
         self._evict_old_batches()
 
     def _evict_old_batches(self) -> None:
         """Remove oldest completed batches when history exceeds limit."""
         completed = [
-            (bid, job) for bid, job in self.batches.items()
+            (bid, job)
+            for bid, job in self.batches.items()
             if job.status in ("done", "failed") and bid != self.current_batch_id
         ]
         if len(completed) <= MAX_BATCH_HISTORY:
@@ -518,7 +523,9 @@ async def handle_session_verify(request: web.Request) -> web.Response:
         )
     except Exception as exc:
         log.error("dashboard.session.verify_error", error=str(exc))
-        return web.json_response({"valid": False, "error": "Erro interno na verificação"}, status=500)
+        return web.json_response(
+            {"valid": False, "error": "Erro interno na verificação"}, status=500
+        )
 
 
 async def handle_session_login(request: web.Request) -> web.Response:

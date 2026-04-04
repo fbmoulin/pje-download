@@ -29,7 +29,7 @@ export MNI_TRIBUNAL="TJES"        # TJES | TJES_2G | TJBA | TJBA_2G | TJCE | TRT
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest (101 tests) — run with `pytest tests/ -q` before any commit
+- Test suite: pytest (111 tests) — run with `pytest tests/ -q` before any commit
 
 ## Env Loading (critical gotcha)
 - `config.py` constants are module-level — they may be empty strings if `.env` not yet loaded
@@ -67,12 +67,24 @@ P0/P1 Hardening Sprint (2026-04-04):
 - Scope: 12 bug fixes (3 CRITICAL, 9 HIGH) + 28 new tests (test_config.py, test_pje_session.py)
 - Status: DONE — 12 bugs fixed, 101 tests passing (73→101)
 
-## Known Issues (pre-sprint)
+Sprint 2+3 — Security Hardening + Resilience (2026-04-04):
+- Plan: `docs/superpowers/plans/2026-04-04-sprint2-security-sprint3-resilience.md`
+- Scope: 5 CRITICAL + 15 HIGH from audit. API key auth, session lock, path traversal, DRY consolidation, batch eviction, atomic writes, health cache
+- Status: DONE — 20 issues fixed, 111 tests passing (101→111)
+
+## Security
+
+- `DASHBOARD_API_KEY` env var required for POST endpoints in production (empty = dev mode, no auth)
+- Session file written with 0600 permissions
+- `PJE_BASE_URL` validated: must be HTTPS `.jus.br` domain
+- Rate limiter parses `X-Forwarded-For` for real client IP behind proxy
+- Worker health bound to 127.0.0.1 (not exposed externally)
+
+## Known Issues (remaining)
 
 - MNI blocked by cloud IP — Playwright fallback via `pje_session.py`
-- `pje_session.py` has 0% test coverage
-- `config.py` has 0% test coverage
-- See gap analysis: `docs/plans/2026-04-03-gap-analysis.md`
+- Test coverage at ~45% (111/88 symbols) — needs Sprint 4 expansion
+- No audit trail for CNJ 615/2025 compliance — needs Sprint 5
 
 ## Paths
 - WSL: `/mnt/c/projetos-2026/pje-download`
