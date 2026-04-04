@@ -82,28 +82,28 @@ async def interactive_login(session_file: Path = SESSION_FILE) -> bool:
 
         await page.goto(LOGIN_URL)
 
-        # Aguarda redirect para o PJe (indica login bem-sucedido)
+        # Single try/finally ensures browser.close() always runs exactly once
         try:
-            await page.wait_for_url(
-                lambda url: PJE_BASE_URL in url and "login.seam" not in url,
-                timeout=300_000,  # 5 min para o usuário completar
-            )
-        except Exception:
-            # Também aceita login.seam sem parâmetros de erro como sucesso
-            current = page.url
-            if PJE_BASE_URL not in current:
-                log.error("pje.session.login_timeout")
-                await browser.close()
-                return False
+            # Aguarda redirect para o PJe (indica login bem-sucedido)
+            try:
+                await page.wait_for_url(
+                    lambda url: PJE_BASE_URL in url and "login.seam" not in url,
+                    timeout=300_000,  # 5 min para o usuário completar
+                )
+            except Exception:
+                current = page.url
+                if PJE_BASE_URL not in current:
+                    log.error("pje.session.login_timeout")
+                    return False
 
-        # Salva estado da sessão
-        state = await ctx.storage_state()
-        session_file.write_text(json.dumps(state, indent=2, ensure_ascii=False))
-        log.info("pje.session.saved", path=str(session_file))
-        print(f"\n>>> Sessão salva em {session_file}")
-
-        await browser.close()
-        return True
+            # Salva estado da sessão
+            state = await ctx.storage_state()
+            session_file.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+            log.info("pje.session.saved", path=str(session_file))
+            print(f"\n>>> Sessão salva em {session_file}")
+            return True
+        finally:
+            await browser.close()
 
 
 # ─────────────────────────────────────────────
