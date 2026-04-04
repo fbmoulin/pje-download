@@ -114,10 +114,17 @@ class PJeSessionWorker:
             self._session_lock_fh = open(lock_path, "w")
             fcntl.flock(self._session_lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             return True
-        except (ImportError, OSError):
-            # fcntl unavailable (Windows) or lock held by another process
-            log.warning("pje.session.lock_failed", path=str(lock_path))
-            return True  # proceed anyway on platforms without fcntl
+        except ImportError:
+            # fcntl unavailable (Windows) — proceed without locking
+            log.warning("pje.session.lock_unavailable", reason="fcntl not available")
+            return True
+        except OSError as exc:
+            # Lock held by another process — do NOT proceed
+            log.error("pje.session.lock_held", path=str(lock_path), error=str(exc))
+            if self._session_lock_fh:
+                self._session_lock_fh.close()
+                self._session_lock_fh = None
+            return False
 
     def _release_session_lock(self) -> None:
         """Release session state file lock."""
