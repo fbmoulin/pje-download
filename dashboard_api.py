@@ -242,6 +242,7 @@ class DashboardState:
 # ─────────────────────────────────────────────
 
 state: DashboardState | None = None
+_batch_lock = asyncio.Lock()
 
 # ── Session login state ──
 _login_running: bool = False
@@ -335,22 +336,40 @@ async def handle_download(request: web.Request) -> web.Response:
             status=422,
         )
 
-    # Verificar se já há batch em execução
-    if state.current_batch_id:
-        current = state.batches.get(state.current_batch_id)
-        if current and current.status == "running":
-            return web.json_response(
-                {
-                    "error": "Já existe um batch em execução",
-                    "batch_id": state.current_batch_id,
-                },
-                status=409,
-            )
-
+    # ── gdrive_map validation (BUG-10) — done BEFORE lock ──
     gdrive_map = body.get("gdrive_map", {})
+    if not isinstance(gdrive_map, dict):
+        return web.json_response({"error": "gdrive_map deve ser um objeto"}, status=400)
+    if len(gdrive_map) > MAX_BATCH_SIZE:
+        return web.json_response(
+            {"error": f"gdrive_map excede limite de {MAX_BATCH_SIZE} entradas"},
+            status=422,
+        )
+    # Validate each URL is a GDrive folder (prevents SSRF)
+    from gdrive_downloader import extract_folder_id
+    invalid_urls = [url for url in gdrive_map.values() if not extract_folder_id(url)]
+    if invalid_urls:
+        return web.json_response(
+            {"error": "gdrive_map contém URLs inválidas", "invalid": invalid_urls[:3]},
+            status=400,
+        )
+
     include_anexos = body.get("include_anexos", True)
 
-    job = await state.submit_batch(processos, include_anexos, gdrive_map)
+    # ── Check + submit under lock (BUG-3) ──
+    async with _batch_lock:
+        if state.current_batch_id:
+            current = state.batches.get(state.current_batch_id)
+            if current and current.status in ("queued", "running"):
+                return web.json_response(
+                    {
+                        "error": "Já existe um batch em execução",
+                        "batch_id": state.current_batch_id,
+                    },
+                    status=409,
+                )
+
+        job = await state.submit_batch(processos, include_anexos, gdrive_map)
 
     return web.json_response(
         {
