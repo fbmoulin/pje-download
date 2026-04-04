@@ -37,16 +37,17 @@ Automacao de download de documentos processuais do PJe (Processo Judicial Eletro
 
 | Arquivo | Linhas | Funcao |
 |---------|--------|--------|
-| `worker.py` | ~1076 | Worker PJe com 3 estrategias em cascata, downloads paralelos, deep health checks |
-| `mni_client.py` | ~743 | Cliente SOAP para MNI — download em 2 fases com dedup por checksum |
-| `batch_downloader.py` | ~631 | Download em lote via CLI com progresso atomico, retomada e relatorio |
+| `worker.py` | ~1111 | Worker PJe com 3 estrategias em cascata, downloads paralelos, deep health checks |
+| `mni_client.py` | ~798 | Cliente SOAP para MNI — download em 2 fases com dedup por checksum |
+| `batch_downloader.py` | ~744 | Download em lote via CLI com progresso atomico, retomada e relatorio |
 | `dashboard_api.py` | ~701 | API REST (aiohttp) com rate limiting, validacao CNJ, recuperacao parcial e gestao de sessao PJe |
+| `pje_session.py` | ~393 | Login interativo PJe (Playwright), persistencia de sessao Keycloak, API REST + browser fallback |
 | `dashboard.html` | ~193 | Frontend HTML com Google Fonts, data-animate attrs e card de sessao PJe |
 | `static/css/style.css` | ~685 | Design system — glassmorphism, Oswald KPIs, dot-grid bg, staggered animations |
 | `static/js/app.js` | ~618 | Dashboard — adaptive polling, pipeline renderer (SVG), toasts, file upload, sessao PJe |
-| `gdrive_downloader.py` | ~596 | Download de pastas Google Drive (processos antigos escaneados) |
-| `config.py` | ~61 | Configuracao centralizada — todas as variaveis env-configuraveis |
-| `metrics.py` | ~60 | Registry Prometheus dedicado — 7 metricas de latencia, throughput e erros |
+| `gdrive_downloader.py` | ~628 | Download de pastas Google Drive (processos antigos escaneados) |
+| `config.py` | ~64 | Configuracao centralizada — todas as variaveis env-configuraveis |
+| `metrics.py` | ~108 | Registry Prometheus dedicado — 7 metricas de latencia, throughput e erros |
 
 ## Estrategias de Download
 
@@ -339,7 +340,7 @@ curl http://localhost:8007/metrics      # metricas Prometheus
 
 | Workflow | Trigger | Etapas |
 |----------|---------|--------|
-| `ci.yml` | push / PR | ruff lint → pytest (69 testes) — badge acima |
+| `ci.yml` | push / PR | ruff lint → pytest (73 testes) — badge acima |
 | `deploy.yml` | push master | rsync → `docker compose up --build` no VPS |
 | `dependabot.yml` | semanal | atualiza actions + pip deps |
 

@@ -1,6 +1,7 @@
 # Action Plan: pje-download — Gap Analysis & Optimization
 
 > Created: 2026-04-03 | Status: APPROVED
+> Sprint plan: `docs/superpowers/plans/2026-04-04-p0p1-hardening.md` (covers items 1-6, 8-9 partially)
 
 | # | Gap | File | Effort | Priority | Dependencies |
 |---|-----|------|--------|----------|--------------|
