@@ -29,7 +29,7 @@ export MNI_TRIBUNAL="TJES"        # TJES | TJES_2G | TJBA | TJBA_2G | TJCE | TRT
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest (111 tests) — run with `pytest tests/ -q` before any commit
+- Test suite: pytest (183 tests) — run with `pytest tests/ -q` before any commit
 
 ## Env Loading (critical gotcha)
 - `config.py` constants are module-level — they may be empty strings if `.env` not yet loaded
@@ -59,18 +59,20 @@ export MNI_TRIBUNAL="TJES"        # TJES | TJES_2G | TJBA | TJBA_2G | TJCE | TRT
 - **env var propagation in worker tests**: use `importlib.reload(w)` after `monkeypatch.setenv`
 - **aiohttp test client**: `async with TestClient(TestServer(create_app(tmp_path))) as client:`
 
-## Active Sprint
+## Completed Sprints
 
-P0/P1 Hardening Sprint (2026-04-04):
-- Spec: `docs/superpowers/specs/2026-04-04-p0p1-hardening-design.md`
-- Plan: `docs/superpowers/plans/2026-04-04-p0p1-hardening.md`
-- Scope: 12 bug fixes (3 CRITICAL, 9 HIGH) + 28 new tests (test_config.py, test_pje_session.py)
-- Status: DONE — 12 bugs fixed, 101 tests passing (73→101)
+Sprint 1 — P0/P1 Hardening (2026-04-04):
+- Scope: 12 bug fixes (3 CRITICAL, 9 HIGH) + 28 new tests
+- Status: DONE — 73→101 tests
 
-Sprint 2+3 — Security Hardening + Resilience (2026-04-04):
-- Plan: `docs/superpowers/plans/2026-04-04-sprint2-security-sprint3-resilience.md`
-- Scope: 5 CRITICAL + 15 HIGH from audit. API key auth, session lock, path traversal, DRY consolidation, batch eviction, atomic writes, health cache
-- Status: DONE — 20 issues fixed, 111 tests passing (101→111)
+Sprint 2+3 — Security + Resilience (2026-04-04):
+- Scope: 5 CRITICAL + 15 HIGH. API key auth, session lock, path traversal, DRY, eviction
+- Status: DONE — 101→111 tests
+
+Sprint 4 — Test Coverage Expansion (2026-04-04):
+- Plan: `docs/superpowers/plans/2026-04-04-sprint4-test-expansion.md`
+- Scope: +72 tests across 5 test files. Pure functions, middleware, handlers, SOAP parser, eviction
+- Status: DONE — 111→183 tests, ~68% symbol coverage
 
 ## Security
 
@@ -83,7 +85,7 @@ Sprint 2+3 — Security Hardening + Resilience (2026-04-04):
 ## Known Issues (remaining)
 
 - MNI blocked by cloud IP — Playwright fallback via `pje_session.py`
-- Test coverage at ~45% (111/88 symbols) — needs Sprint 4 expansion
+- Test coverage ~68% (77/113 symbols) — HARD symbols (browser/SOAP/Redis) remain untested
 - No audit trail for CNJ 615/2025 compliance — needs Sprint 5
 
 ## Paths
