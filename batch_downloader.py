@@ -361,6 +361,8 @@ async def download_batch(
 
             safe_name = re.sub(r'[<>:"/\\|?*]', "_", numero)
             proc_dir = output_dir / safe_name
+            if not proc_dir.resolve().is_relative_to(output_dir.resolve()):
+                raise ValueError(f"Path traversal detected: {numero}")
             proc_dir.mkdir(parents=True, exist_ok=True)
 
             log.info(
