@@ -234,8 +234,11 @@ class PJeSessionWorker:
             # Se MNI está disponível, pode continuar sem browser
             return self.mni_client is not None
 
-        # Salvar estado da sessão para reuso (with lock)
-        self._acquire_session_lock()
+        # Salvar estado da sessão para reuso.
+        # Lock may not be held yet (else-branch: no session file existed).
+        # Only acquire if not already held to avoid opening a second file handle (H15).
+        if self._session_lock_fh is None:
+            self._acquire_session_lock()
         await self.context.storage_state(path=str(SESSION_STATE_PATH))
         log.info("pje.session.saved", path=str(SESSION_STATE_PATH))
 
