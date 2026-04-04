@@ -695,8 +695,9 @@ class MNIClient:
         metrics.mni_latency_seconds.labels(operation="download_documentos").observe(
             time.monotonic() - t0
         )
+        _status = "success" if saved_files else "no_docs_saved"
         metrics.mni_requests_total.labels(
-            operation="download_documentos", status="success"
+            operation="download_documentos", status=_status
         ).inc()
         return saved_files
 
@@ -739,6 +740,13 @@ class MNIClient:
                 "checksum": checksum,
                 "fonte": "mni_soap",
             }
+        except OSError as exc:
+            log.error(
+                "mni.download.save_failed_disk",
+                doc_id=doc.id,
+                error=str(exc),
+            )
+            raise  # Disk-full must propagate
         except Exception as exc:
             log.warning(
                 "mni.download.save_failed",
