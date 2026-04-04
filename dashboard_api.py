@@ -67,6 +67,7 @@ class BatchJob:
 
 
 MAX_BATCH_SIZE = 500  # máximo de processos por batch
+MAX_BATCH_HISTORY = 100  # max completed batches kept in memory
 
 
 class DashboardState:
@@ -100,6 +101,21 @@ class DashboardState:
                 self.batches[batch_id] = job
             except Exception as exc:
                 log.warning("dashboard.history.load_failed", file=str(report_file), error=str(exc))
+        self._evict_old_batches()
+
+    def _evict_old_batches(self) -> None:
+        """Remove oldest completed batches when history exceeds limit."""
+        completed = [
+            (bid, job) for bid, job in self.batches.items()
+            if job.status in ("done", "failed") and bid != self.current_batch_id
+        ]
+        if len(completed) <= MAX_BATCH_HISTORY:
+            return
+        completed.sort(key=lambda x: x[1].finished_at or "")
+        to_remove = len(completed) - MAX_BATCH_HISTORY
+        for bid, _ in completed[:to_remove]:
+            del self.batches[bid]
+        log.info("dashboard.evicted_batches", count=to_remove)
 
     async def submit_batch(
         self,
@@ -192,6 +208,7 @@ class DashboardState:
                 done=progress.done,
                 failed=progress.failed,
             )
+            self._evict_old_batches()
 
         except Exception as exc:
             # Recover partial progress if available
@@ -205,6 +222,7 @@ class DashboardState:
             job.error = str(exc)
             job.finished_at = datetime.now(UTC).isoformat()
             log.error("dashboard.batch.failed", batch_id=job.id, error=str(exc))
+            self._evict_old_batches()
 
     def get_current_progress(self) -> dict | None:
         """Retorna progresso do batch atual — em memória (TTL 1s) durante execução."""
