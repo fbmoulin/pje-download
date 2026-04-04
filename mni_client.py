@@ -220,7 +220,7 @@ class MNIClient:
                 tribunal=self.tribunal,
             )
 
-            client = self._get_client()
+            client = await asyncio.to_thread(self._get_client)
 
             # Executa chamada SOAP em thread separada (zeep é síncrono)
             result = await asyncio.wait_for(
