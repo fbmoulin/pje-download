@@ -1,7 +1,8 @@
 __pycache__/
 *.pyc
 .env
-*.Zone.Identifier
+*Zone.Identifier
+*:Zone.Identifier
 downloads_batch/
 downloads/
 *.session.json
