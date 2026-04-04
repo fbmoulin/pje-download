@@ -654,7 +654,8 @@ async def rate_limit_middleware(request: web.Request, handler):
     if request.method != "POST":
         return await handler(request)
 
-    ip = request.remote or "unknown"
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    ip = forwarded.split(",")[0].strip() if forwarded else (request.remote or "unknown")
     now = time.monotonic()
 
     # Periodic cleanup of stale buckets (every ~100 requests on average)

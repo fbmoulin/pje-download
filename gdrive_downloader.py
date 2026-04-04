@@ -242,9 +242,15 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
                                 total += len(chunk)
                         return total
 
-                    total_bytes = await asyncio.to_thread(
-                        _stream_to_disk, dl_resp, dest
-                    )
+                    try:
+                        total_bytes = await asyncio.wait_for(
+                            asyncio.to_thread(_stream_to_disk, dl_resp, dest),
+                            timeout=300,  # 5 min max per file
+                        )
+                    except asyncio.TimeoutError:
+                        log.warning("gdrive.requests.stream_timeout", file_id=file_id)
+                        dest.unlink(missing_ok=True)
+                        continue
 
                     files.append(_file_info(dest))
                     log.info(
