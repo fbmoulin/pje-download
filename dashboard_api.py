@@ -98,8 +98,8 @@ class DashboardState:
                     progress=data,
                 )
                 self.batches[batch_id] = job
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("dashboard.history.load_failed", file=str(report_file), error=str(exc))
 
     async def submit_batch(
         self,
@@ -278,7 +278,7 @@ async def handle_status(request: web.Request) -> web.Response:
             "total_batches": len(state.batches),
             "current_batch": state.current_batch_id,
             "current_status": current["status"] if current else "idle",
-            "output_dir": str(state.output_dir.resolve()),
+            "output_dir": state.output_dir.name,
             "worker_status": worker_status,
         }
     )
@@ -482,7 +482,6 @@ async def handle_session_status(request: web.Request) -> web.Response:
             "login_running": _login_running,
             "last_login_ok": _login_last_ok,
             "modified_at": modified_at,
-            "session_file": str(SESSION_FILE),
         }
     )
 
@@ -501,7 +500,7 @@ async def handle_session_verify(request: web.Request) -> web.Response:
         )
     except Exception as exc:
         log.error("dashboard.session.verify_error", error=str(exc))
-        return web.json_response({"valid": False, "error": str(exc)}, status=500)
+        return web.json_response({"valid": False, "error": "Erro interno na verificação"}, status=500)
 
 
 async def handle_session_login(request: web.Request) -> web.Response:
