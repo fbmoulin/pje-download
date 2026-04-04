@@ -141,114 +141,121 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
 
         # Acessar página da pasta
         folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
-        session = requests.Session()
-        session.headers.update(
-            {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-        )
+        with requests.Session() as session:
+            session.headers.update(
+                {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                }
+            )
 
-        resp = await asyncio.to_thread(session.get, folder_url, timeout=30)
-        if resp.status_code != 200:
-            log.warning("gdrive.requests.folder_error", status=resp.status_code)
-            return None
+            resp = await asyncio.to_thread(session.get, folder_url, timeout=30)
+            if resp.status_code != 200:
+                log.warning("gdrive.requests.folder_error", status=resp.status_code)
+                return None
 
-        # Extrair file IDs do HTML da pasta
-        # Google Drive embeds file data em scripts JS na página
-        # Pattern: /file/d/FILE_ID ou "FILE_ID" em contextos de dados
-        file_ids = set()
+            # Extrair file IDs do HTML da pasta
+            # Google Drive embeds file data em scripts JS na página
+            # Pattern: /file/d/FILE_ID ou "FILE_ID" em contextos de dados
+            file_ids = set()
 
-        # Padrão 1: links de arquivo no HTML
-        for match in re.finditer(r"/file/d/([a-zA-Z0-9_-]{20,})", resp.text):
-            file_ids.add(match.group(1))
+            # Padrão 1: links de arquivo no HTML
+            for match in re.finditer(r"/file/d/([a-zA-Z0-9_-]{20,})", resp.text):
+                file_ids.add(match.group(1))
 
-        # Padrão 2: IDs em arrays JavaScript da página (28-44 chars = intervalo real de file IDs)
-        for match in re.finditer(r'\["([a-zA-Z0-9_-]{28,44})"', resp.text):
-            candidate = match.group(1)
-            if candidate != folder_id:
-                file_ids.add(candidate)
+            # Padrão 2: IDs em arrays JavaScript da página (28-44 chars = intervalo real de file IDs)
+            for match in re.finditer(r'\["([a-zA-Z0-9_-]{28,44})"', resp.text):
+                candidate = match.group(1)
+                if candidate != folder_id:
+                    file_ids.add(candidate)
 
-        if not file_ids:
-            log.warning("gdrive.requests.no_files_found")
-            return None
+            if not file_ids:
+                log.warning("gdrive.requests.no_files_found")
+                return None
 
-        log.info("gdrive.requests.files_found", count=len(file_ids))
+            log.info("gdrive.requests.files_found", count=len(file_ids))
 
-        # Baixar cada arquivo
-        files = []
-        for i, file_id in enumerate(file_ids):
-            try:
-                # URL de download direto do Google Drive
-                dl_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-                dl_resp = await asyncio.to_thread(
-                    session.get, dl_url, stream=True, allow_redirects=True, timeout=30
-                )
+            # Baixar cada arquivo
+            files = []
+            for i, file_id in enumerate(file_ids):
+                try:
+                    # URL de download direto do Google Drive
+                    dl_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                    dl_resp = await asyncio.to_thread(
+                        session.get, dl_url, stream=True, allow_redirects=True, timeout=30
+                    )
 
-                if dl_resp.status_code != 200:
+                    if dl_resp.status_code != 200:
+                        log.warning(
+                            "gdrive.requests.file_error",
+                            file_id=file_id,
+                            status=dl_resp.status_code,
+                        )
+                        continue
+
+                    # Extrair nome do arquivo do header Content-Disposition
+                    cd = dl_resp.headers.get("Content-Disposition", "")
+                    filename_match = re.search(r'filename="?([^";\n]+)"?', cd)
+                    if filename_match:
+                        filename = filename_match.group(1).strip()
+                    else:
+                        filename = f"gdrive_{file_id}.pdf"
+
+                    # Verificar se é página de confirmação (arquivos grandes)
+                    content_type = dl_resp.headers.get("Content-Type", "")
+                    if "text/html" in content_type:
+                        # Google Drive pede confirmação para arquivos grandes.
+                        # Versões modernas usam confirm=t (cookie-based); versões antigas
+                        # emitem confirm=<token> no corpo — fallback para 't' se não encontrado.
+                        confirm_match = re.search(r"confirm=([a-zA-Z0-9_-]+)", dl_resp.text)
+                        confirm_token = confirm_match.group(1) if confirm_match else "t"
+                        confirm_url = (
+                            f"https://drive.google.com/uc?export=download"
+                            f"&confirm={confirm_token}&id={file_id}"
+                        )
+                        dl_resp = await asyncio.to_thread(
+                            session.get, confirm_url, stream=True, timeout=30
+                        )
+
+                    dest = output_dir / filename
+                    # Evitar sobrescrever — adicionar sufixo se necessário
+                    if dest.exists():
+                        stem = dest.stem
+                        suffix = dest.suffix
+                        dest = output_dir / f"{stem}_{file_id[:8]}{suffix}"
+
+                    # Stream to disk in a thread to avoid blocking event loop + RAM
+                    def _stream_to_disk(resp, path):
+                        total = 0
+                        with open(path, "wb") as f:
+                            for chunk in resp.iter_content(chunk_size=65536):
+                                f.write(chunk)
+                                total += len(chunk)
+                        return total
+
+                    total_bytes = await asyncio.to_thread(_stream_to_disk, dl_resp, dest)
+
+                    files.append(_file_info(dest))
+                    log.info(
+                        "gdrive.requests.file_saved",
+                        filename=dest.name,
+                        size=total_bytes,
+                        index=i + 1,
+                    )
+
+                    # Pausa entre downloads
+                    await asyncio.sleep(0.5)
+
+                except Exception as exc:
                     log.warning(
-                        "gdrive.requests.file_error",
-                        file_id=file_id,
-                        status=dl_resp.status_code,
+                        "gdrive.requests.file_failed", file_id=file_id, error=str(exc)
                     )
                     continue
 
-                # Extrair nome do arquivo do header Content-Disposition
-                cd = dl_resp.headers.get("Content-Disposition", "")
-                filename_match = re.search(r'filename="?([^";\n]+)"?', cd)
-                if filename_match:
-                    filename = filename_match.group(1).strip()
-                else:
-                    filename = f"gdrive_{file_id}.pdf"
-
-                # Verificar se é página de confirmação (arquivos grandes)
-                content_type = dl_resp.headers.get("Content-Type", "")
-                if "text/html" in content_type:
-                    # Google Drive pede confirmação para arquivos grandes.
-                    # Versões modernas usam confirm=t (cookie-based); versões antigas
-                    # emitem confirm=<token> no corpo — fallback para 't' se não encontrado.
-                    confirm_match = re.search(r"confirm=([a-zA-Z0-9_-]+)", dl_resp.text)
-                    confirm_token = confirm_match.group(1) if confirm_match else "t"
-                    confirm_url = (
-                        f"https://drive.google.com/uc?export=download"
-                        f"&confirm={confirm_token}&id={file_id}"
-                    )
-                    dl_resp = await asyncio.to_thread(
-                        session.get, confirm_url, stream=True, timeout=30
-                    )
-
-                dest = output_dir / filename
-                # Evitar sobrescrever — adicionar sufixo se necessário
-                if dest.exists():
-                    stem = dest.stem
-                    suffix = dest.suffix
-                    dest = output_dir / f"{stem}_{file_id[:8]}{suffix}"
-
-                # Salvar conteúdo
-                content = dl_resp.content
-                dest.write_bytes(content)
-
-                files.append(_file_info(dest))
-                log.info(
-                    "gdrive.requests.file_saved",
-                    filename=dest.name,
-                    size=len(content),
-                    index=i + 1,
-                )
-
-                # Pausa entre downloads
-                await asyncio.sleep(0.5)
-
-            except Exception as exc:
-                log.warning(
-                    "gdrive.requests.file_failed", file_id=file_id, error=str(exc)
-                )
-                continue
-
-        if files:
-            metrics.gdrive_attempts_total.labels(
-                strategy="requests", status="success"
-            ).inc()
-        return files if files else None
+            if files:
+                metrics.gdrive_attempts_total.labels(
+                    strategy="requests", status="success"
+                ).inc()
+            return files if files else None
 
     except Exception as exc:
         log.warning("gdrive.requests.failed", error=str(exc))
