@@ -23,6 +23,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import time
 import uuid
@@ -575,9 +576,10 @@ def create_app(output_dir: Path) -> web.Application:
     state = DashboardState(output_dir)
 
     app = web.Application()
-    # Middleware stack (order matters: CORS first, then rate limit)
+    # Middleware stack (order matters: CORS first, then rate limit, then auth)
     app.middlewares.append(cors_middleware)
     app.middlewares.append(rate_limit_middleware)
+    app.middlewares.append(api_key_middleware)
 
     app.router.add_get("/", handle_index)
     app.router.add_get("/metrics", handle_metrics)
@@ -654,6 +656,24 @@ async def rate_limit_middleware(request: web.Request, handler):
             status=429,
         )
     bucket.append(now)
+    return await handler(request)
+
+
+@web.middleware
+async def api_key_middleware(request: web.Request, handler):
+    """Require API key for mutating endpoints. Skipped when DASHBOARD_API_KEY is empty."""
+    from config import DASHBOARD_API_KEY
+
+    if not DASHBOARD_API_KEY:
+        return await handler(request)  # No key configured = dev mode
+
+    if request.method != "POST":
+        return await handler(request)
+
+    provided = request.headers.get("X-API-Key", "")
+    if not provided or not hmac.compare_digest(provided, DASHBOARD_API_KEY):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
     return await handler(request)
 
 
