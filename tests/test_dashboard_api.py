@@ -584,3 +584,131 @@ class TestPurgeStaleBuckets:
         # Cleanup
         dashboard_api._rate_buckets.pop(ip, None)
         dashboard_api._rate_bucket_last_seen.pop(ip, None)
+
+
+# ─────────────────────────────────────────────
+# _run_batch
+# ─────────────────────────────────────────────
+
+
+class TestRunBatch:
+    @pytest.mark.asyncio
+    async def test_run_batch_completes(self, tmp_path):
+        """_run_batch stores completion status."""
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="run_ok",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="queued",
+            output_dir=str(tmp_path / "run_ok"),
+        )
+        ds.batches["run_ok"] = job
+
+        # Mock download_batch to return a progress-like object
+        mock_progress = MagicMock()
+        mock_progress.total = 1
+        mock_progress.done = 1
+        mock_progress.failed = 0
+        mock_progress.processos = {}
+
+        with (
+            patch("batch_downloader._load_env"),
+            patch("batch_downloader.download_batch", return_value=mock_progress),
+        ):
+            await ds._run_batch(job)
+
+        assert job.status == "done"
+        assert job.finished_at is not None
+
+    @pytest.mark.asyncio
+    async def test_run_batch_handles_exception(self, tmp_path):
+        """_run_batch catches exceptions and sets failed status."""
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="run_fail",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="queued",
+            output_dir=str(tmp_path / "run_fail"),
+        )
+        ds.batches["run_fail"] = job
+
+        with (
+            patch("batch_downloader._load_env"),
+            patch(
+                "batch_downloader.download_batch",
+                side_effect=RuntimeError("connection failed"),
+            ),
+        ):
+            await ds._run_batch(job)
+
+        assert job.status == "failed"
+        assert job.error == "connection failed"
+        assert job.finished_at is not None
+
+
+# ─────────────────────────────────────────────
+# _on_cleanup
+# ─────────────────────────────────────────────
+
+
+class TestOnCleanup:
+    @pytest.mark.asyncio
+    async def test_cleanup_cancels_tasks(self, tmp_path):
+        """_on_cleanup cancels running batch tasks."""
+        from dashboard_api import _on_cleanup
+
+        ds = DashboardState(tmp_path)
+        cancelled = []
+
+        async def long_running():
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        task = asyncio.create_task(long_running())
+        ds._task = task
+        dashboard_api.state = ds
+
+        await _on_cleanup(MagicMock())
+        assert task.cancelled() or cancelled
+
+
+# ─────────────────────────────────────────────
+# Session login audit
+# ─────────────────────────────────────────────
+
+
+class TestSessionLoginAudit:
+    @pytest.mark.asyncio
+    async def test_audit_called_on_login(self, tmp_path):
+        """handle_session_login triggers audit with session_login event."""
+        # We test the _do_login inner function by patching interactive_login
+        # and audit, then triggering the task and waiting for it.
+        dashboard_api._login_running = False
+        dashboard_api._login_task = None
+        dashboard_api._login_last_ok = None
+
+        with (
+            patch("pje_session.interactive_login", return_value=True),
+            patch("audit.log_access") as mock_log_access,
+        ):
+            app = create_app(tmp_path)
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/api/session/login")
+                assert resp.status == 202
+
+                # Wait for the background task to complete
+                task = dashboard_api._login_task
+                if task:
+                    await asyncio.wait_for(task, timeout=5.0)
+
+            mock_log_access.assert_called_once()
+            entry = mock_log_access.call_args[0][0]
+            assert entry.event_type == "session_login"
+            assert entry.fonte == "dashboard"
+            assert entry.status == "success"
+
+        # Cleanup
+        dashboard_api._login_running = False

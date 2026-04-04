@@ -341,6 +341,19 @@ async def download_batch(
         processos_antigos=len(antigos),
     )
 
+    import audit
+    from config import MNI_TRIBUNAL
+
+    audit.log_access(
+        audit.AuditEntry(
+            event_type="batch_started",
+            processo_numero=",".join(numeros),
+            fonte="batch",
+            tribunal=MNI_TRIBUNAL,
+            status="success",
+        )
+    )
+
     start_time = time.monotonic()
 
     import os as _os
@@ -559,6 +572,16 @@ async def download_batch(
         total_docs=total_docs,
         total_mb=round(total_bytes / 1024 / 1024, 2),
         elapsed_s=round(elapsed, 1),
+    )
+    audit.log_access(
+        audit.AuditEntry(
+            event_type="batch_completed",
+            processo_numero=",".join(numeros),
+            fonte="batch",
+            tribunal=MNI_TRIBUNAL,
+            status="success",
+            duracao_s=round(elapsed, 1),
+        )
     )
 
     # Salvar relatório final

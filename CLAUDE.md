@@ -23,13 +23,14 @@ ruff format dashboard_api.py batch_downloader.py mni_client.py worker.py gdrive_
 export MNI_USERNAME="12345678900"  # CPF sem pontos
 export MNI_PASSWORD="senha"
 export MNI_TRIBUNAL="TJES"        # TJES | TJES_2G | TJBA | TJBA_2G | TJCE | TRT17
+export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/audit)
 # .env buscado automaticamente em: kratos-master/config/.env → ./ (via config.load_env())
 ```
 
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest (183 tests) — run with `pytest tests/ -q` before any commit
+- Test suite: pytest (248 tests) — run with `pytest tests/ -q` before any commit
 
 ## Env Loading (critical gotcha)
 - `config.py` constants are module-level — they may be empty strings if `.env` not yet loaded
@@ -74,6 +75,11 @@ Sprint 4 — Test Coverage Expansion (2026-04-04):
 - Scope: +72 tests across 5 test files. Pure functions, middleware, handlers, SOAP parser, eviction
 - Status: DONE — 111→183 tests, ~68% symbol coverage
 
+Sprint 5 — CNJ 615/2025 Audit Trail + HARD Test Coverage (2026-04-04):
+- Spec: `docs/superpowers/specs/2026-04-04-sprint5-audit-trail-hard-tests.md`
+- Scope: New audit.py module (JSON-L append-only), 8 instrumentation points, +65 tests (SOAP mocks, Playwright smoke, GDrive)
+- Status: DONE — 183→248 tests, ~85% symbol coverage
+
 ## Security
 
 - `DASHBOARD_API_KEY` env var required for POST endpoints in production (empty = dev mode, no auth)
@@ -81,12 +87,13 @@ Sprint 4 — Test Coverage Expansion (2026-04-04):
 - `PJE_BASE_URL` validated: must be HTTPS `.jus.br` domain
 - Rate limiter parses `X-Forwarded-For` for real client IP behind proxy
 - Worker health bound to 127.0.0.1 (not exposed externally)
+- CNJ 615/2025 audit trail: `audit.py` logs every document access to JSON-L (`/data/audit/audit-YYYY-MM-DD.jsonl`, 0600 perms, append-only)
 
 ## Known Issues (remaining)
 
 - MNI blocked by cloud IP — Playwright fallback via `pje_session.py`
-- Test coverage ~68% (77/113 symbols) — HARD symbols (browser/SOAP/Redis) remain untested
-- No audit trail for CNJ 615/2025 compliance — needs Sprint 5
+- Test coverage ~85% — remaining ~15% are deep Playwright integration paths (low ROI)
+- Audit trail Phase 1 (local JSON-L) done; Phase 2 (Supabase sync) deferred
 
 ## Paths
 - WSL: `/mnt/c/projetos-2026/pje-download`

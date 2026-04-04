@@ -239,3 +239,115 @@ async def test_download_batch_missing_credentials(tmp_path, monkeypatch):
     ps = progress.processos["1234567-89.2024.8.08.0001"]
     assert ps.status == "failed"
     assert "MNI_USERNAME" in ps.erro or "MNI_PASSWORD" in ps.erro
+
+
+# ─────────────────────────────────────────────
+# Batch audit trail
+# ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_batch_audit_started(tmp_path, monkeypatch):
+    """download_batch logs audit entry with event_type='batch_started'."""
+    monkeypatch.setenv("MNI_USERNAME", "u")
+    monkeypatch.setenv("MNI_PASSWORD", "p")
+
+    async def fake_consultar(numero, **kwargs):
+        result = MagicMock()
+        result.success = False
+        result.error = "fake"
+        return result
+
+    mock_client = AsyncMock()
+    mock_client.health_check.return_value = {
+        "status": "healthy",
+        "tribunal": "T",
+        "operations": [],
+        "latency_ms": 1,
+    }
+    mock_client.consultar_processo.side_effect = fake_consultar
+
+    mock_class = MagicMock(return_value=mock_client)
+    numeros = ["1000001-01.2024.8.08.0001"]
+
+    from batch_downloader import download_batch
+
+    with (
+        patch("mni_client.MNIClient", mock_class),
+        patch("gdrive_downloader.is_processo_antigo", return_value=False),
+        patch(
+            "gdrive_downloader.download_gdrive_folder",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch("audit.log_access") as mock_audit,
+    ):
+        await download_batch(
+            numeros=numeros,
+            output_dir=tmp_path,
+            delay_entre_processos=0.0,
+        )
+
+    # Find the batch_started call
+    started_calls = [
+        c for c in mock_audit.call_args_list if c[0][0].event_type == "batch_started"
+    ]
+    assert len(started_calls) == 1
+    entry = started_calls[0][0][0]
+    assert entry.fonte == "batch"
+    assert entry.status == "success"
+    assert "1000001-01.2024.8.08.0001" in entry.processo_numero
+
+
+@pytest.mark.asyncio
+async def test_batch_audit_completed(tmp_path, monkeypatch):
+    """download_batch logs audit entry with event_type='batch_completed'."""
+    monkeypatch.setenv("MNI_USERNAME", "u")
+    monkeypatch.setenv("MNI_PASSWORD", "p")
+
+    async def fake_consultar(numero, **kwargs):
+        result = MagicMock()
+        result.success = False
+        result.error = "fake"
+        return result
+
+    mock_client = AsyncMock()
+    mock_client.health_check.return_value = {
+        "status": "healthy",
+        "tribunal": "T",
+        "operations": [],
+        "latency_ms": 1,
+    }
+    mock_client.consultar_processo.side_effect = fake_consultar
+
+    mock_class = MagicMock(return_value=mock_client)
+    numeros = ["2000001-01.2024.8.08.0001"]
+
+    from batch_downloader import download_batch
+
+    with (
+        patch("mni_client.MNIClient", mock_class),
+        patch("gdrive_downloader.is_processo_antigo", return_value=False),
+        patch(
+            "gdrive_downloader.download_gdrive_folder",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch("audit.log_access") as mock_audit,
+    ):
+        await download_batch(
+            numeros=numeros,
+            output_dir=tmp_path,
+            delay_entre_processos=0.0,
+        )
+
+    # Find the batch_completed call
+    completed_calls = [
+        c for c in mock_audit.call_args_list if c[0][0].event_type == "batch_completed"
+    ]
+    assert len(completed_calls) == 1
+    entry = completed_calls[0][0][0]
+    assert entry.fonte == "batch"
+    assert entry.status == "success"
+    assert entry.duracao_s is not None
+    assert "2000001-01.2024.8.08.0001" in entry.processo_numero

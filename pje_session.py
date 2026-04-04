@@ -21,6 +21,7 @@ Uso:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -33,6 +34,8 @@ log = structlog.get_logger("kratos.pje-session")
 # CONFIGURAÇÃO
 # ─────────────────────────────────────────────
 
+import audit
+import config
 from config import PJE_BASE_URL, SESSION_STATE_PATH, sanitize_filename, unique_path
 
 SESSION_FILE = SESSION_STATE_PATH
@@ -262,6 +265,19 @@ class PJeSessionClient:
                         }
                     )
                     log.info("pje.session.doc_saved", nome=dest.name, size=len(content))
+                    audit.log_access(
+                        audit.AuditEntry(
+                            event_type="document_saved",
+                            processo_numero=numero,
+                            documento_id=str(doc_id),
+                            documento_nome=dest.name,
+                            fonte="pje_api",
+                            tribunal=config.MNI_TRIBUNAL,
+                            tamanho_bytes=len(content),
+                            checksum_sha256=hashlib.sha256(content).hexdigest(),
+                            status="success",
+                        )
+                    )
 
         except Exception as exc:
             log.warning("pje.session.api_attempt_failed", error=str(exc))
@@ -319,6 +335,18 @@ class PJeSessionClient:
                         "tamanhoBytes": dest.stat().st_size,
                         "fonte": "pje_browser",
                     }
+                )
+                audit.log_access(
+                    audit.AuditEntry(
+                        event_type="document_saved",
+                        processo_numero=numero,
+                        documento_nome=dest.name,
+                        fonte="pje_browser",
+                        tribunal=config.MNI_TRIBUNAL,
+                        tamanho_bytes=dest.stat().st_size,
+                        checksum_sha256=None,
+                        status="success",
+                    )
                 )
 
         except Exception as exc:

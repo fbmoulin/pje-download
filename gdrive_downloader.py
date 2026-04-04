@@ -29,6 +29,8 @@ from pathlib import Path
 
 import structlog
 
+import audit
+import config
 import metrics
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.gdrive")
@@ -254,12 +256,25 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
                         dest.unlink(missing_ok=True)
                         continue
 
-                    files.append(_file_info(dest))
+                    info = _file_info(dest)
+                    files.append(info)
                     log.info(
                         "gdrive.requests.file_saved",
                         filename=dest.name,
                         size=total_bytes,
                         index=i + 1,
+                    )
+                    audit.log_access(
+                        audit.AuditEntry(
+                            event_type="document_saved",
+                            processo_numero="",
+                            documento_nome=dest.name,
+                            fonte="google_drive",
+                            tribunal=config.MNI_TRIBUNAL,
+                            tamanho_bytes=info.get("tamanhoBytes"),
+                            checksum_sha256=info.get("checksum"),
+                            status="success",
+                        )
                     )
 
                     # Pausa entre downloads
@@ -363,11 +378,24 @@ async def _try_playwright_download(
                                 output_dir / f"{dest.stem}_{file_id[:8]}{dest.suffix}"
                             )
                         await download.save_as(str(dest))
-                        files.append(_file_info(dest))
+                        info = _file_info(dest)
+                        files.append(info)
                         log.info(
                             "gdrive.playwright.file_saved",
                             filename=dest.name,
                             index=i + 1,
+                        )
+                        audit.log_access(
+                            audit.AuditEntry(
+                                event_type="document_saved",
+                                processo_numero="",
+                                documento_nome=dest.name,
+                                fonte="google_drive",
+                                tribunal=config.MNI_TRIBUNAL,
+                                tamanho_bytes=info.get("tamanhoBytes"),
+                                checksum_sha256=info.get("checksum"),
+                                status="success",
+                            )
                         )
                     except Exception:
                         # Pode ser página de confirmação — tentar clicar botão
@@ -387,7 +415,20 @@ async def _try_playwright_download(
                                 )
                                 dest2 = output_dir / filename2
                                 await download2.save_as(str(dest2))
-                                files.append(_file_info(dest2))
+                                info2 = _file_info(dest2)
+                                files.append(info2)
+                                audit.log_access(
+                                    audit.AuditEntry(
+                                        event_type="document_saved",
+                                        processo_numero="",
+                                        documento_nome=dest2.name,
+                                        fonte="google_drive",
+                                        tribunal=config.MNI_TRIBUNAL,
+                                        tamanho_bytes=info2.get("tamanhoBytes"),
+                                        checksum_sha256=info2.get("checksum"),
+                                        status="success",
+                                    )
+                                )
                         except Exception as inner_exc:
                             log.warning(
                                 "gdrive.playwright.file_failed",

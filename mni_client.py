@@ -33,6 +33,7 @@ from typing import Any
 
 import structlog
 
+import audit
 import metrics
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.mni-client")
@@ -613,7 +614,9 @@ class MNIClient:
 
         # ── Salvar docs que já têm conteúdo (raro na fase 1, mas possível) ──
         for doc in docs_with_content:
-            saved = self._save_document(doc, output_dir, seen_checksums)
+            saved = self._save_document(
+                doc, output_dir, seen_checksums, processo.numero
+            )
             if saved:
                 saved_files.append(saved)
 
@@ -664,7 +667,7 @@ class MNIClient:
                         fetched = fetched_docs.get(doc_id)
                         if fetched and fetched.has_content:
                             saved = self._save_document(
-                                fetched, output_dir, seen_checksums
+                                fetched, output_dir, seen_checksums, processo.numero
                             )
                             if saved:
                                 saved_files.append(saved)
@@ -702,7 +705,11 @@ class MNIClient:
         return saved_files
 
     def _save_document(
-        self, doc: MNIDocumento, output_dir: Path, seen_checksums: set[str]
+        self,
+        doc: MNIDocumento,
+        output_dir: Path,
+        seen_checksums: set[str],
+        processo_numero: str = "",
     ) -> dict | None:
         """Salva um documento com conteúdo em disco. Skips duplicates by checksum."""
         try:
@@ -720,6 +727,17 @@ class MNIClient:
                     doc_id=doc.id,
                     checksum=checksum[:12],
                 )
+                audit.log_access(
+                    audit.AuditEntry(
+                        event_type="document_saved",
+                        processo_numero=processo_numero,
+                        documento_id=doc.id,
+                        fonte="mni_soap",
+                        tribunal=self.tribunal,
+                        status="duplicate_skipped",
+                        checksum_sha256=checksum,
+                    )
+                )
                 return None
             seen_checksums.add(checksum)
 
@@ -730,6 +748,20 @@ class MNIClient:
                 filename=filename,
                 size=len(content_bytes),
                 doc_id=doc.id,
+            )
+            audit.log_access(
+                audit.AuditEntry(
+                    event_type="document_saved",
+                    processo_numero=processo_numero,
+                    documento_id=doc.id,
+                    documento_tipo=doc.tipo,
+                    documento_nome=filename,
+                    fonte="mni_soap",
+                    tribunal=self.tribunal,
+                    tamanho_bytes=len(content_bytes),
+                    checksum_sha256=checksum,
+                    status="success",
+                )
             )
 
             return {
@@ -745,6 +777,17 @@ class MNIClient:
                 "mni.download.save_failed_disk",
                 doc_id=doc.id,
                 error=str(exc),
+            )
+            audit.log_access(
+                audit.AuditEntry(
+                    event_type="document_saved",
+                    processo_numero=processo_numero,
+                    documento_id=doc.id,
+                    fonte="mni_soap",
+                    tribunal=self.tribunal,
+                    status="error",
+                    erro=str(exc),
+                )
             )
             raise  # Disk-full must propagate
         except Exception as exc:

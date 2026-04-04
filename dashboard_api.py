@@ -546,6 +546,18 @@ async def handle_session_login(request: web.Request) -> web.Response:
             ok = await interactive_login()
             _login_last_ok = ok
             log.info("dashboard.session.login_done", ok=ok)
+            import audit
+            import config
+
+            audit.log_access(
+                audit.AuditEntry(
+                    event_type="session_login",
+                    processo_numero="",
+                    fonte="dashboard",
+                    tribunal=config.MNI_TRIBUNAL,
+                    status="success" if ok else "error",
+                )
+            )
         except Exception as exc:
             _login_last_ok = False
             log.error("dashboard.session.login_error", error=str(exc))

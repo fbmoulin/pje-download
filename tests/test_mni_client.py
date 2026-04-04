@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 from pathlib import Path
@@ -349,3 +350,489 @@ class TestParseProcesso:
         result = client._parse_processo(resp, "5000001-00.2024.8.08.0001")
         assert result.documentos[0].has_content is True
         assert result.documentos[0].tamanho_bytes == len(b"binary pdf content")
+
+
+# ---------------------------------------------------------------------------
+# _save_document audit integration
+# ---------------------------------------------------------------------------
+
+
+class TestSaveDocumentAudit:
+    """Verify audit.log_access is called with correct fields during _save_document."""
+
+    def _make_doc(self, content: bytes = b"PDF content", doc_id: str = "doc42"):
+        from mni_client import MNIDocumento
+
+        return MNIDocumento(
+            id=doc_id,
+            nome="Peticao Inicial",
+            tipo="peticao",
+            mimetype="application/pdf",
+            conteudo_base64=base64.b64encode(content).decode("ascii"),
+            tamanho_bytes=len(content),
+        )
+
+    def test_audit_called_on_save(self, tmp_path):
+        """audit.log_access called with event_type='document_saved' and status='success'."""
+        client = _make_client()
+        doc = self._make_doc()
+        with patch("audit.log_access") as mock_audit:
+            result = client._save_document(
+                doc, tmp_path, set(), processo_numero="5000001-00.2024.8.08.0001"
+            )
+        assert result is not None
+        mock_audit.assert_called_once()
+        entry = mock_audit.call_args[0][0]
+        assert entry.event_type == "document_saved"
+        assert entry.status == "success"
+        assert entry.processo_numero == "5000001-00.2024.8.08.0001"
+        assert entry.documento_id == "doc42"
+        assert entry.documento_tipo == "peticao"
+        assert entry.tribunal == "TJES"
+        assert entry.fonte == "mni_soap"
+        assert entry.tamanho_bytes == len(b"PDF content")
+        assert entry.checksum_sha256 is not None
+
+    def test_audit_called_on_duplicate_skip(self, tmp_path):
+        """audit.log_access called with status='duplicate_skipped' for duplicates."""
+        client = _make_client()
+        content = b"duplicate content"
+        doc = self._make_doc(content=content)
+        checksum = hashlib.sha256(content).hexdigest()
+        seen = {checksum}
+        with patch("audit.log_access") as mock_audit:
+            result = client._save_document(
+                doc, tmp_path, seen, processo_numero="5000002-00.2024.8.08.0001"
+            )
+        assert result is None
+        mock_audit.assert_called_once()
+        entry = mock_audit.call_args[0][0]
+        assert entry.event_type == "document_saved"
+        assert entry.status == "duplicate_skipped"
+        assert entry.checksum_sha256 == checksum
+
+    def test_audit_called_on_disk_error(self, tmp_path):
+        """audit.log_access called with status='error' on OSError."""
+        client = _make_client()
+        doc = self._make_doc()
+        readonly_dir = tmp_path / "readonly"
+        readonly_dir.mkdir()
+        readonly_dir.chmod(0o444)
+        try:
+            with patch("audit.log_access") as mock_audit:
+                with pytest.raises(OSError):
+                    client._save_document(
+                        doc,
+                        readonly_dir,
+                        set(),
+                        processo_numero="5000003-00.2024.8.08.0001",
+                    )
+            mock_audit.assert_called_once()
+            entry = mock_audit.call_args[0][0]
+            assert entry.event_type == "document_saved"
+            assert entry.status == "error"
+            assert entry.erro is not None
+        finally:
+            readonly_dir.chmod(0o755)
+
+    def test_processo_numero_passed_through(self, tmp_path):
+        """processo_numero parameter appears in audit entry."""
+        client = _make_client()
+        doc = self._make_doc()
+        with patch("audit.log_access") as mock_audit:
+            client._save_document(
+                doc, tmp_path, set(), processo_numero="9999999-00.2024.8.08.0001"
+            )
+        entry = mock_audit.call_args[0][0]
+        assert entry.processo_numero == "9999999-00.2024.8.08.0001"
+
+    def test_audit_not_called_without_processo_numero_uses_default(self, tmp_path):
+        """Without processo_numero, default empty string is used."""
+        client = _make_client()
+        doc = self._make_doc()
+        with patch("audit.log_access") as mock_audit:
+            client._save_document(doc, tmp_path, set())
+        entry = mock_audit.call_args[0][0]
+        assert entry.processo_numero == ""
+
+
+# ---------------------------------------------------------------------------
+# SOAP mock helper
+# ---------------------------------------------------------------------------
+
+
+def _make_soap_response(
+    sucesso=True, mensagem="", docs=None, processo_numero="5000001-00.2024.8.08.0001"
+):
+    """Build a mock SOAP response object mimicking MNI consultarProcesso."""
+    resp = MagicMock()
+    resp.sucesso = sucesso
+    resp.mensagem = mensagem
+
+    if docs is None:
+        doc = MagicMock()
+        doc.idDocumento = "doc1"
+        doc.descricao = "Peticao Inicial"
+        doc.tipoDocumento = "peticao"
+        doc.mimetype = "application/pdf"
+        doc.conteudo = None
+        doc.documentoVinculado = []
+        docs = [doc]
+
+    dados = MagicMock()
+    dados.classeProcessual = "Execucao"
+    dados.assunto = []
+    dados.polo = []
+
+    proc = MagicMock()
+    proc.dadosBasicos = dados
+    proc.documento = docs
+    proc.movimento = []
+
+    resp.processo = proc
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# _get_client (zeep lazy init)
+# ---------------------------------------------------------------------------
+
+
+class TestGetClient:
+    def test_first_call_creates_zeep_client(self):
+        """First _get_client() call should create zeep.Client and cache it."""
+        client = _make_client()
+        mock_client_instance = MagicMock()
+
+        with (
+            patch("zeep.Client", return_value=mock_client_instance),
+            patch("zeep.transports.Transport", return_value=MagicMock()),
+            patch("requests.Session", return_value=MagicMock()),
+        ):
+            result = client._get_client()
+
+        assert result is mock_client_instance
+        assert client._client is mock_client_instance
+
+    def test_cached_second_call(self):
+        """Second _get_client() call returns cached client."""
+        client = _make_client()
+        sentinel = MagicMock()
+        client._client = sentinel
+        result = client._get_client()
+        assert result is sentinel
+
+    def test_wsdl_failure_propagates(self):
+        """If zeep.Client raises, the error should propagate."""
+        client = _make_client()
+        with (
+            patch("zeep.Client", side_effect=ConnectionError("WSDL unreachable")),
+            patch("zeep.transports.Transport", return_value=MagicMock()),
+            patch("requests.Session", return_value=MagicMock()),
+        ):
+            with pytest.raises(ConnectionError, match="WSDL unreachable"):
+                client._get_client()
+
+
+# ---------------------------------------------------------------------------
+# consultar_processo (async SOAP)
+# ---------------------------------------------------------------------------
+
+
+class TestConsultarProcesso:
+    @pytest.mark.asyncio
+    async def test_success(self):
+        """Successful SOAP call returns MNIResult with success=True."""
+        client = _make_client()
+        soap_resp = _make_soap_response(sucesso=True)
+
+        with (
+            patch.object(client, "_get_client", return_value=MagicMock()),
+            patch.object(client, "_call_consultar_processo", return_value=soap_resp),
+        ):
+            result = await client.consultar_processo("5000001-00.2024.8.08.0001")
+
+        assert result.success is True
+        assert result.processo is not None
+        assert result.processo.numero == "5000001-00.2024.8.08.0001"
+
+    @pytest.mark.asyncio
+    async def test_mni_error(self):
+        """MNI returns sucesso=False → MNIResult with success=False."""
+        client = _make_client()
+        soap_resp = _make_soap_response(sucesso=False, mensagem="Erro interno MNI")
+
+        with (
+            patch.object(client, "_get_client", return_value=MagicMock()),
+            patch.object(client, "_call_consultar_processo", return_value=soap_resp),
+        ):
+            result = await client.consultar_processo("5000001-00.2024.8.08.0001")
+
+        assert result.success is False
+        assert "Erro interno MNI" in result.error
+
+    @pytest.mark.asyncio
+    async def test_not_found(self):
+        """'Processo não encontrado' exception maps to not_found."""
+        client = _make_client()
+        with patch.object(
+            client, "_get_client", side_effect=Exception("Processo não encontrado")
+        ):
+            result = await client.consultar_processo("5000001-00.2024.8.08.0001")
+        assert result.success is False
+        assert "não encontrado" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_auth_failed(self):
+        """'Acesso negado' exception maps to auth_failed."""
+        client = _make_client()
+        with patch.object(
+            client, "_get_client", side_effect=Exception("Acesso negado")
+        ):
+            result = await client.consultar_processo("5000001-00.2024.8.08.0001")
+        assert result.success is False
+        assert "credenciais" in result.error.lower() or "acesso" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_timeout(self):
+        """asyncio.TimeoutError maps to timeout status."""
+        client = _make_client()
+
+        async def slow_get_client():
+            await asyncio.sleep(100)
+
+        with (
+            patch.object(client, "_get_client", return_value=MagicMock()),
+            patch.object(
+                client, "_call_consultar_processo", side_effect=asyncio.TimeoutError()
+            ),
+        ):
+            # Patch asyncio.wait_for to raise TimeoutError
+            result = await client.consultar_processo("5000001-00.2024.8.08.0001")
+
+        assert result.success is False
+        assert "timeout" in result.error.lower()
+
+
+# ---------------------------------------------------------------------------
+# _call_consultar_processo (sync SOAP shim)
+# ---------------------------------------------------------------------------
+
+
+class TestCallConsultarProcesso:
+    def test_normal_call(self):
+        """Normal call passes correct params to client.service.consultarProcesso."""
+        client = _make_client()
+        mock_soap_client = MagicMock()
+        mock_soap_client.service.consultarProcesso.return_value = "response"
+
+        result = client._call_consultar_processo(
+            mock_soap_client,
+            "5000001-00.2024.8.08.0001",
+            incluir_documentos=True,
+            incluir_cabecalho=True,
+            incluir_movimentacoes=False,
+            documento_ids=None,
+        )
+        assert result == "response"
+        mock_soap_client.service.consultarProcesso.assert_called_once_with(
+            idConsultante="user",
+            senhaConsultante="pass",
+            numeroProcesso="5000001-00.2024.8.08.0001",
+            movimentos=False,
+            incluirCabecalho=True,
+            incluirDocumentos=True,
+        )
+
+    def test_with_documento_ids(self):
+        """When documento_ids is provided, it's passed as 'documento' param."""
+        client = _make_client()
+        mock_soap_client = MagicMock()
+        mock_soap_client.service.consultarProcesso.return_value = "response"
+
+        client._call_consultar_processo(
+            mock_soap_client,
+            "5000001-00.2024.8.08.0001",
+            incluir_documentos=True,
+            incluir_cabecalho=True,
+            incluir_movimentacoes=False,
+            documento_ids=["doc1", "doc2"],
+        )
+        call_kwargs = mock_soap_client.service.consultarProcesso.call_args[1]
+        assert call_kwargs["documento"] == ["doc1", "doc2"]
+
+    def test_zeep_fault_propagates(self):
+        """zeep Fault exception propagates to caller."""
+        client = _make_client()
+        mock_soap_client = MagicMock()
+        mock_soap_client.service.consultarProcesso.side_effect = Exception(
+            "Server fault: invalid request"
+        )
+
+        with pytest.raises(Exception, match="Server fault"):
+            client._call_consultar_processo(
+                mock_soap_client,
+                "5000001-00.2024.8.08.0001",
+                incluir_documentos=True,
+                incluir_cabecalho=True,
+                incluir_movimentacoes=False,
+            )
+
+    def test_generic_exception_propagates(self):
+        """Generic exceptions propagate to caller."""
+        client = _make_client()
+        mock_soap_client = MagicMock()
+        mock_soap_client.service.consultarProcesso.side_effect = RuntimeError(
+            "network down"
+        )
+
+        with pytest.raises(RuntimeError, match="network down"):
+            client._call_consultar_processo(
+                mock_soap_client,
+                "5000001-00.2024.8.08.0001",
+                incluir_documentos=True,
+                incluir_cabecalho=True,
+                incluir_movimentacoes=False,
+            )
+
+
+# ---------------------------------------------------------------------------
+# download_documentos (2-phase SOAP download)
+# ---------------------------------------------------------------------------
+
+
+class TestDownloadDocumentos:
+    @pytest.mark.asyncio
+    async def test_single_doc_with_content(self, tmp_path):
+        """Doc with content is saved directly without phase-2 fetch."""
+        from mni_client import MNIProcesso, MNIDocumento
+
+        content = b"PDF binary data"
+        doc = MNIDocumento(
+            id="doc1",
+            nome="Peticao",
+            tipo="peticao",
+            conteudo_base64=base64.b64encode(content).decode("ascii"),
+            tamanho_bytes=len(content),
+        )
+        processo = MNIProcesso(numero="5000001-00.2024.8.08.0001", documentos=[doc])
+        client = _make_client()
+
+        with patch("audit.log_access"):
+            saved = await client.download_documentos(processo, tmp_path)
+
+        assert len(saved) == 1
+        assert saved[0]["tamanhoBytes"] == len(content)
+        assert saved[0]["fonte"] == "mni_soap"
+
+    @pytest.mark.asyncio
+    async def test_multi_batch_fetch(self, tmp_path):
+        """Docs without content trigger phase-2 fetch in batches."""
+        from mni_client import MNIProcesso, MNIDocumento, MNIResult
+
+        # Metadata-only docs (no content)
+        docs = [
+            MNIDocumento(id=f"doc{i}", nome=f"Doc {i}", tipo="doc") for i in range(3)
+        ]
+        processo = MNIProcesso(numero="5000001-00.2024.8.08.0001", documentos=docs)
+        client = _make_client()
+
+        # Phase-2 response: return docs with content
+        async def fake_consultar(numero, **kwargs):
+            doc_ids = kwargs.get("documento_ids", [])
+            fetched = []
+            for did in doc_ids:
+                content = f"content-{did}".encode()
+                fetched.append(
+                    MNIDocumento(
+                        id=did,
+                        nome=f"Doc {did}",
+                        tipo="doc",
+                        conteudo_base64=base64.b64encode(content).decode("ascii"),
+                        tamanho_bytes=len(content),
+                    )
+                )
+            fetched_proc = MNIProcesso(numero=numero, documentos=fetched)
+            return MNIResult(success=True, processo=fetched_proc)
+
+        with (
+            patch.object(client, "consultar_processo", side_effect=fake_consultar),
+            patch("audit.log_access"),
+        ):
+            saved = await client.download_documentos(processo, tmp_path, batch_size=2)
+
+        assert len(saved) == 3
+
+    @pytest.mark.asyncio
+    async def test_dedup_skip(self, tmp_path):
+        """Duplicate content across docs is skipped by checksum."""
+        from mni_client import MNIProcesso, MNIDocumento
+
+        content = b"same content"
+        b64 = base64.b64encode(content).decode("ascii")
+        docs = [
+            MNIDocumento(
+                id="doc1",
+                nome="Doc A",
+                tipo="doc",
+                conteudo_base64=b64,
+                tamanho_bytes=len(content),
+            ),
+            MNIDocumento(
+                id="doc2",
+                nome="Doc B",
+                tipo="doc",
+                conteudo_base64=b64,
+                tamanho_bytes=len(content),
+            ),
+        ]
+        processo = MNIProcesso(numero="5000001-00.2024.8.08.0001", documentos=docs)
+        client = _make_client()
+
+        with patch("audit.log_access"):
+            saved = await client.download_documentos(processo, tmp_path)
+
+        # Only 1 saved, other skipped as duplicate
+        assert len(saved) == 1
+
+
+# ---------------------------------------------------------------------------
+# health_check
+# ---------------------------------------------------------------------------
+
+
+class TestHealthCheck:
+    @pytest.mark.asyncio
+    async def test_healthy(self):
+        """Healthy check returns status='healthy' with operations list."""
+        client = _make_client()
+        mock_wsdl_client = MagicMock()
+
+        # Mock WSDL service structure
+        mock_op = MagicMock()
+        mock_port = MagicMock()
+        mock_port.binding._operations = {"consultarProcesso": mock_op}
+        mock_service = MagicMock()
+        mock_service.ports.values.return_value = [mock_port]
+        mock_wsdl_client.wsdl.services.values.return_value = [mock_service]
+
+        with patch.object(client, "_get_client", return_value=mock_wsdl_client):
+            result = await client.health_check()
+
+        assert result["status"] == "healthy"
+        assert result["tribunal"] == "TJES"
+        assert "consultarProcesso" in result["operations"]
+        assert "latency_ms" in result
+
+    @pytest.mark.asyncio
+    async def test_timeout(self):
+        """Unhealthy when _get_client raises."""
+        client = _make_client()
+
+        with patch.object(
+            client, "_get_client", side_effect=TimeoutError("WSDL timeout")
+        ):
+            result = await client.health_check()
+
+        assert result["status"] == "unhealthy"
+        assert "timeout" in result["error"].lower()
