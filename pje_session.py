@@ -296,7 +296,10 @@ class PJeSessionClient:
                         "a[id*='download'], button[id*='download'], a[title*='Download']"
                     )
                 dl = await dl_info.value
-                dest = output_dir / dl.suggested_filename
+                safe_name = _safe_filename(dl.suggested_filename or "download.pdf")
+                dest = _unique_path(output_dir / safe_name)
+                if not dest.resolve().is_relative_to(output_dir.resolve()):
+                    raise ValueError(f"Path traversal in filename: {dl.suggested_filename}")
                 await dl.save_as(dest)
                 downloaded.append(
                     {

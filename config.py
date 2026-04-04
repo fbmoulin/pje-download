@@ -36,7 +36,12 @@ def is_valid_processo(numero: str) -> bool:
 # ─────────────────────────────────────────────
 
 # PJe / Worker
-PJE_BASE_URL = os.getenv("PJE_BASE_URL", "https://pje.tjes.jus.br/pje")
+_pje_url = os.getenv("PJE_BASE_URL", "https://pje.tjes.jus.br/pje")
+if _pje_url != "https://pje.tjes.jus.br/pje" and (
+    not _pje_url.startswith("https://") or ".jus.br" not in _pje_url
+):
+    raise ValueError(f"PJE_BASE_URL must be HTTPS .jus.br URL, got: {_pje_url}")
+PJE_BASE_URL = _pje_url
 SESSION_STATE_PATH = Path(os.getenv("SESSION_STATE_PATH", "/data/pje-session.json"))
 DOWNLOAD_BASE_DIR = Path(os.getenv("DOWNLOAD_BASE_DIR", "/data/downloads"))
 SESSION_TIMEOUT_MINUTES = int(os.getenv("SESSION_TIMEOUT_MINUTES", "60"))
@@ -62,3 +67,4 @@ BATCH_DELAY_DEFAULT = float(os.getenv("BATCH_DELAY_SECS", "2.0"))
 
 # Dashboard
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8007"))
+DASHBOARD_API_KEY = os.getenv("DASHBOARD_API_KEY", "")

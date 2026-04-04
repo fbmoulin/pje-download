@@ -201,6 +201,10 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
                     filename_match = re.search(r'filename="?([^";\n]+)"?', cd)
                     if filename_match:
                         filename = filename_match.group(1).strip()
+                        # Sanitize to prevent path traversal
+                        filename = re.sub(r'[\\/:*?"<>|\x00-\x1f]', '_', filename).strip()[:120]
+                        if '..' in filename or filename.startswith('/'):
+                            filename = f"gdrive_{file_id}.pdf"
                     else:
                         filename = f"gdrive_{file_id}.pdf"
 
