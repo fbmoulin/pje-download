@@ -544,10 +544,8 @@ async def handle_index(request: web.Request) -> web.Response:
     """GET / — Serve a dashboard HTML."""
     html_path = Path(__file__).parent / "dashboard.html"
     if html_path.exists():
-        return web.Response(
-            text=html_path.read_text(encoding="utf-8"),
-            content_type="text/html",
-        )
+        text = await asyncio.to_thread(html_path.read_text, "utf-8")
+        return web.Response(text=text, content_type="text/html")
     return web.Response(text="Dashboard HTML não encontrado", status=404)
 
 
