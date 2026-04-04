@@ -139,7 +139,6 @@ class MNIClient:
         self.timeout = timeout or int(os.getenv("MNI_TIMEOUT", str(MNI_TIMEOUT)))
         self._client: Any | None = None
         self._client_lock = threading.Lock()
-        self._seen_checksums: set[str] = set()
 
         endpoint = TRIBUNAL_ENDPOINTS.get(self.tribunal)
         if not endpoint:
@@ -566,6 +565,7 @@ class MNIClient:
         t0 = time.monotonic()
         output_dir.mkdir(parents=True, exist_ok=True)
         saved_files: list[dict] = []
+        seen_checksums: set[str] = set()
 
         # Montar lista de docs principais (MNI só retorna conteúdo destes).
         # Documentos vinculados (anexos) NÃO são acessíveis via parâmetro
@@ -612,7 +612,7 @@ class MNIClient:
 
         # ── Salvar docs que já têm conteúdo (raro na fase 1, mas possível) ──
         for doc in docs_with_content:
-            saved = self._save_document(doc, output_dir)
+            saved = self._save_document(doc, output_dir, seen_checksums)
             if saved:
                 saved_files.append(saved)
 
@@ -662,7 +662,7 @@ class MNIClient:
                     for doc_id in batch_ids:
                         fetched = fetched_docs.get(doc_id)
                         if fetched and fetched.has_content:
-                            saved = self._save_document(fetched, output_dir)
+                            saved = self._save_document(fetched, output_dir, seen_checksums)
                             if saved:
                                 saved_files.append(saved)
                         else:
@@ -697,7 +697,7 @@ class MNIClient:
         ).inc()
         return saved_files
 
-    def _save_document(self, doc: MNIDocumento, output_dir: Path) -> dict | None:
+    def _save_document(self, doc: MNIDocumento, output_dir: Path, seen_checksums: set[str]) -> dict | None:
         """Salva um documento com conteúdo em disco. Skips duplicates by checksum."""
         try:
             ext = _mimetype_to_ext(doc.mimetype)
@@ -708,14 +708,14 @@ class MNIClient:
             content_bytes = base64.b64decode(doc.conteudo_base64)
             checksum = hashlib.sha256(content_bytes).hexdigest()
 
-            if checksum in self._seen_checksums:
+            if checksum in seen_checksums:
                 log.info(
                     "mni.download.duplicate_skipped",
                     doc_id=doc.id,
                     checksum=checksum[:12],
                 )
                 return None
-            self._seen_checksums.add(checksum)
+            seen_checksums.add(checksum)
 
             dest.write_bytes(content_bytes)
 
