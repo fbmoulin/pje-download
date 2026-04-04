@@ -11,3 +11,4 @@ os.environ.setdefault("CONCURRENT_DOWNLOADS", "3")
 # worker.py creates DOWNLOAD_BASE_DIR at module level — point to /tmp to avoid /data perms
 os.environ.setdefault("DOWNLOAD_BASE_DIR", "/tmp/pje-test-downloads")
 os.environ.setdefault("SESSION_STATE_PATH", "/tmp/pje-test-session.json")
+os.environ.setdefault("AUDIT_LOG_DIR", "/tmp/pje-test-audit")
