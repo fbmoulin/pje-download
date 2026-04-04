@@ -584,10 +584,10 @@ async def download_batch(
             for num, ps in progress.processos.items()
         },
     }
+    from config import atomic_write_text
+
     report_path = output_dir / "_report.json"
-    report_path.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    atomic_write_text(report_path, json.dumps(report, indent=2, ensure_ascii=False))
     log.info("batch.report_saved", path=str(report_path))
 
     return progress
