@@ -596,7 +596,26 @@ async def handle_index(request: web.Request) -> web.Response:
 
 
 async def _on_cleanup(app: web.Application) -> None:
-    """Cancela batch em execução ao encerrar o servidor."""
+    """Cancela batch em execução ao encerrar o servidor. Saves progress first."""
+    if state and state.current_batch_id:
+        job = state.batches.get(state.current_batch_id)
+        if job and job.progress:
+            try:
+                progress_path = Path(job.output_dir) / "_progress.json"
+                from config import atomic_write_text
+
+                atomic_write_text(
+                    progress_path,
+                    json.dumps(job.progress, ensure_ascii=False, indent=2),
+                )
+                log.info(
+                    "dashboard.shutdown.progress_saved",
+                    batch_id=state.current_batch_id,
+                    path=str(progress_path),
+                )
+            except Exception as exc:
+                log.warning("dashboard.shutdown.progress_save_failed", error=str(exc))
+
     if state and state._task and not state._task.done():
         state._task.cancel()
         try:

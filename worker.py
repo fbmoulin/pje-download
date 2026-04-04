@@ -21,6 +21,8 @@ O foco é REDUZIR a exposição ao CAPTCHA, não combatê-lo.
 import asyncio
 import hashlib
 import json
+import random
+import signal
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -133,8 +135,23 @@ class PJeSessionWorker:
             self._session_lock_fh.close()
             self._session_lock_fh = None
 
-    async def init(self) -> None:
-        self.redis = redis.from_url(REDIS_URL, decode_responses=True)
+    async def init(self, max_redis_retries: int = 5) -> None:
+        for attempt in range(max_redis_retries):
+            try:
+                self.redis = redis.from_url(REDIS_URL, decode_responses=True)
+                await self.redis.ping()
+                break
+            except (redis.ConnectionError, redis.TimeoutError, OSError) as exc:
+                if attempt == max_redis_retries - 1:
+                    raise
+                delay = min(2**attempt + random.uniform(0, 1), 30)
+                log.warning(
+                    "pje.redis.init_retry",
+                    attempt=attempt + 1,
+                    delay=round(delay, 1),
+                    error=str(exc),
+                )
+                await asyncio.sleep(delay)
 
         # Inicializar cliente MNI se habilitado e credenciais configuradas
         if MNI_ENABLED:
@@ -878,17 +895,44 @@ class PJeSessionWorker:
     # QUEUE CONSUMER
     # ──────────────────────
 
-    async def consume_queue(self) -> None:
+    async def _publish_result(self, result_data: dict, max_retries: int = 3) -> None:
+        """Publish job result to Redis with retry. Falls back to local log on failure."""
+        result_json = json.dumps(result_data)
+        for attempt in range(max_retries):
+            try:
+                await self.redis.lpush("kratos:pje:results", result_json)
+                return
+            except (redis.ConnectionError, redis.TimeoutError, OSError) as exc:
+                if attempt == max_retries - 1:
+                    log.error(
+                        "pje.queue.result_publish_failed",
+                        job_id=result_data.get("jobId"),
+                        error=str(exc),
+                        note="result saved to local log only",
+                    )
+                    self._log_job_result(result_data)
+                    return
+                delay = min(2**attempt + random.uniform(0, 0.5), 10)
+                log.warning(
+                    "pje.queue.result_publish_retry",
+                    attempt=attempt + 1,
+                    delay=round(delay, 1),
+                )
+                await asyncio.sleep(delay)
+
+    async def consume_queue(self, shutdown_event: asyncio.Event | None = None) -> None:
         """
         Consome jobs da fila Redis (alimentada pelo n8n control plane).
+        Exits gracefully when shutdown_event is set.
         """
         if self.redis is None:
             raise RuntimeError("Worker not initialized — call init() first")
 
         log.info("pje.queue.waiting")
         self._health_status = "consuming"
+        consecutive_errors = 0
 
-        while True:
+        while not (shutdown_event and shutdown_event.is_set()):
             # Verificar expiração de sessão (MNI não depende de sessão)
             if self.mni_client is None and self.is_session_expired():
                 log.warning("pje.queue.session_timeout", action="shutting_down")
@@ -899,10 +943,18 @@ class PJeSessionWorker:
             # BLPOP: aguarda até 5s por um job
             try:
                 result = await self.redis.blpop("kratos:pje:jobs", timeout=5)
+                consecutive_errors = 0  # reset on success
             except (redis.ConnectionError, redis.TimeoutError) as exc:
-                log.error("pje.queue.redis_error", error=str(exc))
+                consecutive_errors += 1
+                delay = min(2**consecutive_errors + random.uniform(0, 1), 60)
+                log.error(
+                    "pje.queue.redis_error",
+                    error=str(exc),
+                    retry_in=round(delay, 1),
+                    consecutive=consecutive_errors,
+                )
                 self._last_error = f"redis:{exc}"
-                await asyncio.sleep(5)
+                await asyncio.sleep(delay)
                 continue
 
             if not result:
@@ -927,11 +979,8 @@ class PJeSessionWorker:
 
             result_data = await self.download_process(job)
 
-            # Publicar resultado para o n8n
-            await self.redis.lpush(
-                "kratos:pje:results",
-                json.dumps(result_data),
-            )
+            # Publicar resultado para o n8n (com retry)
+            await self._publish_result(result_data)
 
             # Encerrar se sessão expirou e MNI não disponível
             if result_data["status"] == "session_expired" and self.mni_client is None:
@@ -942,6 +991,9 @@ class PJeSessionWorker:
             if result_data["status"] == "captcha_required" and self.mni_client is None:
                 log.warning("pje.queue.captcha_detected", action="shutting_down")
                 break
+
+        if shutdown_event and shutdown_event.is_set():
+            log.info("pje.queue.shutdown_requested", status="draining")
 
     # ──────────────────────
     # HEALTH ENDPOINT
@@ -1103,6 +1155,17 @@ async def main() -> None:
     # Iniciar health endpoint em background
     await worker.start_health_server()
 
+    # Graceful shutdown via signal
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _signal_handler(sig: int) -> None:
+        log.info("pje.signal.received", signal=sig)
+        shutdown_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _signal_handler, sig)
+
     async with async_playwright() as playwright:
         session_ok = await worker.load_session(playwright)
         if not session_ok:
@@ -1110,7 +1173,7 @@ async def main() -> None:
             return
 
         try:
-            await worker.consume_queue()
+            await worker.consume_queue(shutdown_event)
         finally:
             await worker.close()
 

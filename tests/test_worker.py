@@ -11,12 +11,17 @@ def _load_worker_module():
     import importlib
     import os
 
+    import redis as _real_redis
+
     # Ensure DOWNLOAD_BASE_DIR points somewhere writable before module-level mkdir runs
     os.environ.setdefault("DOWNLOAD_BASE_DIR", "/tmp/pje-test-downloads")
     os.environ.setdefault("SESSION_STATE_PATH", "/tmp/pje-test-session.json")
 
     mock_redis_module = MagicMock()
     mock_redis_module.from_url = MagicMock(return_value=AsyncMock())
+    # Preserve real exception classes so `except redis.ConnectionError` works
+    mock_redis_module.ConnectionError = _real_redis.ConnectionError
+    mock_redis_module.TimeoutError = _real_redis.TimeoutError
     mock_playwright_module = MagicMock()
 
     with patch.dict(
@@ -96,7 +101,12 @@ class TestWorkerInit:
         worker_log = MagicMock()
         worker_log.error = fake_error
 
-        with patch.object(w, "log", worker_log):
+        mock_redis = AsyncMock()
+        mock_redis.ping = AsyncMock(return_value=True)
+        with (
+            patch.object(w, "log", worker_log),
+            patch.object(w.redis, "from_url", return_value=mock_redis),
+        ):
             await worker.init()
 
         assert any("credentials" in e for e in logged)
@@ -111,7 +121,12 @@ class TestWorkerInit:
         w.MNI_ENABLED = True
 
         worker = w.PJeSessionWorker()
-        with patch.object(w, "log", MagicMock()):
+        mock_redis = AsyncMock()
+        mock_redis.ping = AsyncMock(return_value=True)
+        with (
+            patch.object(w, "log", MagicMock()),
+            patch.object(w.redis, "from_url", return_value=mock_redis),
+        ):
             await worker.init()
 
         assert worker.mni_client is None
@@ -279,3 +294,175 @@ class TestWorkerClose:
         worker._browser = None
         worker.redis = None
         await worker.close()  # Should not raise
+
+
+def _patch_redis_exceptions(w):
+    """Ensure worker module's redis mock has real exception classes."""
+    from redis.exceptions import ConnectionError, TimeoutError
+
+    w.redis.ConnectionError = ConnectionError
+    w.redis.TimeoutError = TimeoutError
+
+
+class TestRedisInitRetry:
+    """init() retries Redis connection with exponential backoff."""
+
+    @pytest.mark.asyncio
+    async def test_init_succeeds_on_first_try(self):
+        w = _load_worker_module()
+        _patch_redis_exceptions(w)
+        w.MNI_ENABLED = False
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        mock_r.ping = AsyncMock(return_value=True)
+        with patch.object(w.redis, "from_url", return_value=mock_r):
+            await worker.init()
+        assert worker.redis is mock_r
+
+    @pytest.mark.asyncio
+    async def test_init_retries_on_connection_error(self):
+        from redis import ConnectionError as RedisConnectionError
+
+        w = _load_worker_module()
+        _patch_redis_exceptions(w)
+        w.MNI_ENABLED = False
+        worker = w.PJeSessionWorker()
+        mock_r_fail = AsyncMock()
+        mock_r_fail.ping = AsyncMock(side_effect=RedisConnectionError("down"))
+        mock_r_ok = AsyncMock()
+        mock_r_ok.ping = AsyncMock(return_value=True)
+        with (
+            patch.object(w.redis, "from_url", side_effect=[mock_r_fail, mock_r_ok]),
+            patch.object(w, "log", MagicMock()),
+            patch("worker.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await worker.init(max_redis_retries=2)
+        assert worker.redis is mock_r_ok
+
+    @pytest.mark.asyncio
+    async def test_init_raises_after_max_retries(self):
+        from redis import ConnectionError as RedisConnectionError
+
+        w = _load_worker_module()
+        _patch_redis_exceptions(w)
+        w.MNI_ENABLED = False
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        mock_r.ping = AsyncMock(side_effect=RedisConnectionError("down"))
+        with (
+            patch.object(w.redis, "from_url", return_value=mock_r),
+            patch.object(w, "log", MagicMock()),
+            patch("worker.asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(RedisConnectionError),
+        ):
+            await worker.init(max_redis_retries=2)
+
+
+class TestConsumeQueueShutdown:
+    """consume_queue() exits gracefully on shutdown_event."""
+
+    @pytest.mark.asyncio
+    async def test_shutdown_event_breaks_loop(self):
+        import asyncio
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        mock_r.blpop = AsyncMock(return_value=None)
+        worker.redis = mock_r
+
+        shutdown = asyncio.Event()
+        shutdown.set()  # immediate shutdown
+
+        with patch.object(w, "log", MagicMock()):
+            await worker.consume_queue(shutdown)
+        # Should return without hanging
+
+    @pytest.mark.asyncio
+    async def test_backoff_logged_with_consecutive_count(self):
+        import asyncio
+        from redis import ConnectionError as RedisConnectionError
+
+        w = _load_worker_module()
+        _patch_redis_exceptions(w)
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        call_count = 0
+
+        async def fail_twice_then_stop(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 3:
+                raise asyncio.CancelledError
+            raise RedisConnectionError("down")
+
+        mock_r.blpop = fail_twice_then_stop
+        worker.redis = mock_r
+        worker.mni_client = MagicMock()  # prevent session expiry check
+
+        logged_errors = []
+        mock_log = MagicMock()
+        mock_log.error = lambda event, **kw: logged_errors.append(kw)
+        mock_log.info = MagicMock()
+        mock_log.warning = MagicMock()
+
+        with patch.object(w, "log", mock_log):
+            try:
+                await worker.consume_queue()
+            except asyncio.CancelledError:
+                pass
+
+        # Should have 2 error logs with increasing consecutive count
+        assert len(logged_errors) == 2
+        assert logged_errors[0]["consecutive"] == 1
+        assert logged_errors[1]["consecutive"] == 2
+        # Retry_in should increase (backoff)
+        assert logged_errors[1]["retry_in"] > logged_errors[0]["retry_in"]
+
+
+class TestPublishResult:
+    """_publish_result() retries on Redis failure."""
+
+    @pytest.mark.asyncio
+    async def test_publish_succeeds(self):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        worker.redis = mock_r
+        await worker._publish_result({"jobId": "J1", "status": "success"})
+        mock_r.lpush.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_publish_retries_on_failure(self):
+        from redis import ConnectionError as RedisConnectionError
+
+        w = _load_worker_module()
+        _patch_redis_exceptions(w)
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        mock_r.lpush = AsyncMock(side_effect=[RedisConnectionError("down"), None])
+        worker.redis = mock_r
+        with (
+            patch.object(w, "log", MagicMock()),
+            patch("worker.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await worker._publish_result({"jobId": "J1"})
+        assert mock_r.lpush.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_publish_falls_back_to_local_log(self, tmp_path):
+        from redis import ConnectionError as RedisConnectionError
+
+        w = _load_worker_module()
+        _patch_redis_exceptions(w)
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        mock_r.lpush = AsyncMock(side_effect=RedisConnectionError("down"))
+        worker.redis = mock_r
+        with (
+            patch.object(w, "log", MagicMock()),
+            patch("worker.asyncio.sleep", new_callable=AsyncMock),
+            patch.object(worker, "_log_job_result") as mock_log_local,
+        ):
+            await worker._publish_result({"jobId": "J1"}, max_retries=2)
+        mock_log_local.assert_called_once()

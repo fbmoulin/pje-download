@@ -712,3 +712,32 @@ class TestSessionLoginAudit:
 
         # Cleanup
         dashboard_api._login_running = False
+
+
+class TestCleanupSavesProgress:
+    @pytest.mark.asyncio
+    async def test_progress_saved_on_shutdown(self, tmp_path):
+        """_on_cleanup persists batch progress to disk before cancelling."""
+        from dashboard_api import _on_cleanup
+
+        batch_dir = tmp_path / "batch-001"
+        batch_dir.mkdir()
+
+        ds = DashboardState(tmp_path)
+        ds.current_batch_id = "batch-001"
+        ds.batches["batch-001"] = BatchJob(
+            id="batch-001",
+            processos=["001"],
+            status="running",
+            output_dir=str(batch_dir),
+            progress={"total": 5, "done": 3},
+        )
+        ds._task = None  # no running task
+        dashboard_api.state = ds
+
+        await _on_cleanup(MagicMock())
+
+        progress_file = batch_dir / "_progress.json"
+        assert progress_file.exists()
+        data = json.loads(progress_file.read_text())
+        assert data["done"] == 3
