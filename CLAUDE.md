@@ -30,7 +30,7 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest (248 tests) — run with `pytest tests/ -q` before any commit
+- Test suite: pytest (257 tests) — run with `pytest tests/ -q` before any commit
 
 ## Env Loading (critical gotcha)
 - `config.py` constants are module-level — they may be empty strings if `.env` not yet loaded
@@ -79,6 +79,10 @@ Sprint 5 — CNJ 615/2025 Audit Trail + HARD Test Coverage (2026-04-04):
 - Spec: `docs/superpowers/specs/2026-04-04-sprint5-audit-trail-hard-tests.md`
 - Scope: New audit.py module (JSON-L append-only), 8 instrumentation points, +65 tests (SOAP mocks, Playwright smoke, GDrive)
 - Status: DONE — 183→248 tests, ~85% symbol coverage
+
+Sprint 6 — Graceful Shutdown + Redis Retry (2026-04-04):
+- Scope: Signal handlers (SIGTERM/SIGINT), Redis init retry (5x backoff), blpop exponential backoff, lpush retry with local fallback, dashboard progress save on shutdown
+- Status: DONE — 248→257 tests
 
 ## Security
 
