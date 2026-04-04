@@ -34,9 +34,9 @@ log = structlog.get_logger("kratos.pje-session")
 # CONFIGURAÇÃO
 # ─────────────────────────────────────────────
 
-from config import PJE_BASE_URL
+from config import PJE_BASE_URL, SESSION_STATE_PATH
 
-SESSION_FILE = Path("pje_session.json")
+SESSION_FILE = SESSION_STATE_PATH
 LOGIN_URL = (
     "https://sso.cloud.pje.jus.br/auth/realms/pje/protocol/openid-connect/auth"
     "?response_type=code&client_id=pje-tjes-1g"
