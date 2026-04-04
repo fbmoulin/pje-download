@@ -78,6 +78,21 @@ class TestGuessExt:
 
         assert _guess_ext("", "doc") == ".bin"
 
+    def test_xml_content_type(self):
+        from pje_session import _guess_ext
+
+        assert _guess_ext("application/xml", "data") == ".xml"
+
+    def test_empty_content_type_noext_name(self):
+        from pje_session import _guess_ext
+
+        assert _guess_ext("", "noext") == ".bin"
+
+    def test_name_with_dot_ignores_content_type(self):
+        from pje_session import _guess_ext
+
+        assert _guess_ext("text/html", "file.html") == ""
+
 
 class TestLoadState:
     def test_loads_existing_file(self, tmp_path):
@@ -178,3 +193,31 @@ class TestInteractiveLogin:
         assert result is False
         assert not sf.exists()
         mock_browser.close.assert_awaited_once()
+
+
+class TestPJeSessionClientLoadState:
+    def test_missing_file_raises_fnf(self, tmp_path):
+        from pje_session import PJeSessionClient
+
+        client = PJeSessionClient(session_file=tmp_path / "nonexistent.json")
+        with pytest.raises(FileNotFoundError, match="Sessão não encontrada"):
+            client._load_state()
+
+    def test_corrupt_json_raises(self, tmp_path):
+        from pje_session import PJeSessionClient
+
+        f = tmp_path / "session.json"
+        f.write_text("not valid json")
+        client = PJeSessionClient(session_file=f)
+        with pytest.raises(Exception):
+            client._load_state()
+
+    def test_valid_json_returns_dict(self, tmp_path):
+        from pje_session import PJeSessionClient
+
+        f = tmp_path / "session.json"
+        f.write_text('{"cookies": [], "origins": []}')
+        client = PJeSessionClient(session_file=f)
+        state = client._load_state()
+        assert isinstance(state, dict)
+        assert "cookies" in state

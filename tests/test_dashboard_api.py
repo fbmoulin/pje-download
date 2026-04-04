@@ -10,7 +10,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from dashboard_api import MAX_BATCH_SIZE, DashboardState, create_app
+import dashboard_api
+from dashboard_api import (
+    MAX_BATCH_SIZE,
+    MAX_BATCH_HISTORY,
+    BatchJob,
+    DashboardState,
+    create_app,
+)
 
 
 # ─────────────────────────────────────────────
@@ -227,3 +234,353 @@ async def test_graceful_shutdown_cancels_task(tmp_path):
 
     await _on_cleanup(MagicMock())
     assert task.cancelled() or cancelled
+
+
+# ─────────────────────────────────────────────
+# Rate limit middleware
+# ─────────────────────────────────────────────
+
+
+class TestRateLimitMiddleware:
+    @pytest.mark.asyncio
+    async def test_get_not_rate_limited(self, app):
+        """GET requests bypass the rate limiter — 15 requests all succeed."""
+        async with TestClient(TestServer(app)) as client:
+            for _ in range(15):
+                resp = await client.get("/api/progress")
+                assert resp.status == 200
+
+    @pytest.mark.asyncio
+    async def test_post_rate_limit_exceeded(self, app):
+        """After 10 POST requests in window, 429 is returned."""
+        # Use a unique X-Forwarded-For IP to isolate this test from others
+        async with TestClient(TestServer(app)) as client:
+            # Use a unique IP so other tests don't pollute the bucket
+            headers = {"X-Forwarded-For": "10.99.99.1"}
+            # Clear any leftover state for this IP
+            dashboard_api._rate_buckets.pop("10.99.99.1", None)
+            dashboard_api._rate_bucket_last_seen.pop("10.99.99.1", None)
+
+            statuses = []
+            for _ in range(12):
+                resp = await client.post(
+                    "/api/download",
+                    json={"processos": ["invalid"]},
+                    headers=headers,
+                )
+                statuses.append(resp.status)
+            # At least one request beyond limit should get 429
+            assert 429 in statuses
+
+
+# ─────────────────────────────────────────────
+# CORS middleware
+# ─────────────────────────────────────────────
+
+
+class TestCorsMiddleware:
+    @pytest.mark.asyncio
+    async def test_allowed_origin_reflected(self, app):
+        """An origin in _ALLOWED_ORIGINS is echoed back in the response header."""
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get(
+                "/api/progress", headers={"Origin": "http://localhost:8007"}
+            )
+            assert (
+                resp.headers.get("Access-Control-Allow-Origin")
+                == "http://localhost:8007"
+            )
+
+    @pytest.mark.asyncio
+    async def test_disallowed_origin_defaults_to_localhost(self, app):
+        """An unknown origin falls back to 'http://localhost'."""
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get(
+                "/api/progress", headers={"Origin": "https://evil.com"}
+            )
+            assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost"
+
+    @pytest.mark.asyncio
+    async def test_options_preflight_returns_correct_headers(self, app):
+        """OPTIONS preflight returns 200 with CORS method headers."""
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.options(
+                "/api/download", headers={"Origin": "http://localhost"}
+            )
+            assert resp.status == 200
+            assert "Access-Control-Allow-Methods" in resp.headers
+            assert "Access-Control-Allow-Origin" in resp.headers
+
+
+# ─────────────────────────────────────────────
+# API key middleware
+# ─────────────────────────────────────────────
+
+
+class TestApiKeyMiddleware:
+    @pytest.mark.asyncio
+    async def test_no_key_configured_passes(self, app, monkeypatch):
+        """When DASHBOARD_API_KEY is empty (dev mode), requests are not blocked."""
+        import config
+
+        monkeypatch.setattr(config, "DASHBOARD_API_KEY", "")
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/download", json={"processos": ["not-a-processo"]}
+            )
+            assert resp.status != 401
+
+    @pytest.mark.asyncio
+    async def test_wrong_key_returns_401(self, tmp_path, monkeypatch):
+        """When DASHBOARD_API_KEY is set and wrong key is sent, return 401."""
+        import config
+
+        monkeypatch.setattr(config, "DASHBOARD_API_KEY", "correct-key")
+        _app = create_app(tmp_path)
+        async with TestClient(TestServer(_app)) as client:
+            resp = await client.post(
+                "/api/download",
+                json={"processos": ["0000001-01.2024.8.08.0001"]},
+                headers={"X-API-Key": "wrong-key"},
+            )
+            assert resp.status == 401
+
+
+# ─────────────────────────────────────────────
+# handle_batch_detail
+# ─────────────────────────────────────────────
+
+
+class TestHandleBatchDetail:
+    @pytest.mark.asyncio
+    async def test_unknown_batch_returns_404(self, app):
+        """GET /api/batch/<nonexistent> returns 404."""
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/batch/nonexistent-batch-id")
+            assert resp.status == 404
+
+    @pytest.mark.asyncio
+    async def test_known_batch_returns_200_with_data(self, app, tmp_path):
+        """GET /api/batch/<id> returns 200 with full batch payload."""
+        job = BatchJob(
+            id="test123",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="done",
+            created_at="2024-01-01T00:00:00",
+            output_dir=str(tmp_path),
+            progress={"total": 1, "done": 1},
+        )
+        dashboard_api.state.batches["test123"] = job
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/batch/test123")
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["batch_id"] == "test123"
+            assert body["status"] == "done"
+            assert body["processos"] == ["5000001-00.2024.8.08.0001"]
+
+
+# ─────────────────────────────────────────────
+# handle_session_status
+# ─────────────────────────────────────────────
+
+
+class TestHandleSessionStatus:
+    @pytest.mark.asyncio
+    async def test_returns_expected_fields(self, app):
+        """GET /api/session/status returns file_exists, login_running, last_login_ok."""
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/session/status")
+            assert resp.status == 200
+            body = await resp.json()
+            assert "file_exists" in body
+            assert "login_running" in body
+            assert "last_login_ok" in body
+
+
+# ─────────────────────────────────────────────
+# handle_index
+# ─────────────────────────────────────────────
+
+
+class TestHandleIndex:
+    @pytest.mark.asyncio
+    async def test_returns_200_or_404(self, app):
+        """GET / returns 200 (HTML served) or 404 (dashboard.html not present)."""
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/")
+            assert resp.status in (200, 404)
+
+    @pytest.mark.asyncio
+    async def test_returns_404_when_html_missing(self, app, monkeypatch):
+        """When dashboard.html does not exist, endpoint returns 404."""
+        from pathlib import Path
+
+        monkeypatch.setattr(
+            Path,
+            "exists",
+            lambda self: False if "dashboard.html" in str(self) else True,
+        )
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/")
+            # With patched Path.exists, dashboard.html is not found → 404
+            assert resp.status == 404
+
+
+# ─────────────────────────────────────────────
+# handle_metrics
+# ─────────────────────────────────────────────
+
+
+class TestHandleMetrics:
+    @pytest.mark.asyncio
+    async def test_returns_prometheus_text_format(self, app):
+        """GET /metrics returns 200 with Prometheus exposition format."""
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/metrics")
+            assert resp.status == 200
+            text = await resp.text()
+            # Prometheus format contains HELP or TYPE comment lines
+            assert "HELP" in text or "TYPE" in text or "#" in text
+
+
+# ─────────────────────────────────────────────
+# _evict_old_batches
+# ─────────────────────────────────────────────
+
+
+class TestEvictOldBatches:
+    def test_evicts_oldest_completed_over_limit(self, tmp_path):
+        """When done batches exceed MAX_BATCH_HISTORY, oldest are evicted."""
+        ds = DashboardState(tmp_path)
+        for i in range(MAX_BATCH_HISTORY + 10):
+            job = BatchJob(
+                id=f"batch_{i:04d}",
+                processos=["x"],
+                status="done",
+                finished_at=f"2024-01-{(i % 28) + 1:02d}T00:00:00",
+            )
+            ds.batches[job.id] = job
+        ds._evict_old_batches()
+        done_count = sum(1 for b in ds.batches.values() if b.status == "done")
+        assert done_count <= MAX_BATCH_HISTORY
+
+    def test_does_not_evict_current_batch(self, tmp_path):
+        """current_batch_id is protected from eviction even if it is 'done'."""
+        ds = DashboardState(tmp_path)
+        for i in range(MAX_BATCH_HISTORY + 5):
+            job = BatchJob(
+                id=f"b{i}",
+                processos=["x"],
+                status="done",
+                finished_at=f"2024-01-{(i % 28) + 1:02d}T00:00:00",
+            )
+            ds.batches[job.id] = job
+        ds.current_batch_id = "b0"
+        ds._evict_old_batches()
+        assert "b0" in ds.batches
+
+    def test_running_batches_not_evicted(self, tmp_path):
+        """Batches with status 'running' or 'queued' are never evicted."""
+        ds = DashboardState(tmp_path)
+        for i in range(MAX_BATCH_HISTORY + 5):
+            job = BatchJob(
+                id=f"done_{i}",
+                processos=["x"],
+                status="done",
+                finished_at=f"2024-01-{(i % 28) + 1:02d}T00:00:00",
+            )
+            ds.batches[job.id] = job
+        running = BatchJob(id="running_1", processos=["x"], status="running")
+        ds.batches["running_1"] = running
+        ds._evict_old_batches()
+        assert "running_1" in ds.batches
+
+
+# ─────────────────────────────────────────────
+# submit_batch
+# ─────────────────────────────────────────────
+
+
+class TestSubmitBatch:
+    @pytest.mark.asyncio
+    async def test_creates_batch_with_correct_fields(self, tmp_path):
+        """submit_batch creates a queued BatchJob and sets current_batch_id."""
+        ds = DashboardState(tmp_path)
+
+        # Replace _run_batch with a no-op to avoid real download attempts
+        async def noop_run(job: BatchJob):
+            pass
+
+        ds._run_batch = noop_run
+
+        processos = ["5000001-00.2024.8.08.0001"]
+        job = await ds.submit_batch(processos)
+
+        assert job.status == "queued"
+        assert job.processos == processos
+        assert ds.current_batch_id == job.id
+        assert job.id in ds.batches
+
+    @pytest.mark.asyncio
+    async def test_creates_background_task(self, tmp_path):
+        """submit_batch schedules an asyncio task."""
+        ds = DashboardState(tmp_path)
+
+        async def noop_run(job: BatchJob):
+            pass
+
+        ds._run_batch = noop_run
+
+        await ds.submit_batch(["5000001-00.2024.8.08.0001"])
+        assert ds._task is not None
+        # Cancel the task to clean up
+        ds._task.cancel()
+        try:
+            await ds._task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+# ─────────────────────────────────────────────
+# _purge_stale_buckets
+# ─────────────────────────────────────────────
+
+
+class TestPurgeStaleBuckets:
+    def test_removes_stale_ips(self):
+        """IPs inactive for >300s are removed from both dicts."""
+        now = time.monotonic()
+        stale_ip = "10.0.0.1"
+        active_ip = "10.0.0.2"
+
+        dashboard_api._rate_buckets[stale_ip] = [now - 400]
+        dashboard_api._rate_bucket_last_seen[stale_ip] = now - 400
+        dashboard_api._rate_buckets[active_ip] = [now]
+        dashboard_api._rate_bucket_last_seen[active_ip] = now
+
+        dashboard_api._purge_stale_buckets(now)
+
+        assert stale_ip not in dashboard_api._rate_buckets
+        assert stale_ip not in dashboard_api._rate_bucket_last_seen
+        assert active_ip in dashboard_api._rate_buckets
+
+        # Cleanup
+        dashboard_api._rate_buckets.pop(active_ip, None)
+        dashboard_api._rate_bucket_last_seen.pop(active_ip, None)
+
+    def test_keeps_recently_seen_ips(self):
+        """IPs seen within the expiry window are retained."""
+        now = time.monotonic()
+        ip = "10.0.0.3"
+
+        dashboard_api._rate_buckets[ip] = [now - 10]
+        dashboard_api._rate_bucket_last_seen[ip] = now - 10
+
+        dashboard_api._purge_stale_buckets(now)
+
+        assert ip in dashboard_api._rate_buckets
+
+        # Cleanup
+        dashboard_api._rate_buckets.pop(ip, None)
+        dashboard_api._rate_bucket_last_seen.pop(ip, None)

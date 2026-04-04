@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import re
+from unittest.mock import patch
 
+import pytest
 
-from gdrive_downloader import extract_folder_id, is_processo_antigo
+from gdrive_downloader import (
+    _file_info,
+    download_gdrive_folder,
+    extract_folder_id,
+    is_processo_antigo,
+)
 
 
 # ─────────────────────────────────────────────
@@ -131,3 +138,82 @@ class TestConfirmTokenFallback:
         match = re.search(r"confirm=([a-zA-Z0-9_-]+)", html)
         token = match.group(1) if match else "t"
         assert token == "t"
+
+
+# ─────────────────────────────────────────────
+# _file_info
+# ─────────────────────────────────────────────
+
+
+class TestFileInfo:
+    def test_returns_correct_structure(self, tmp_path):
+        f = tmp_path / "test.pdf"
+        f.write_bytes(b"PDF content here")
+        info = _file_info(f)
+        assert info["nome"] == "test.pdf"
+        assert info["tipo"] == "pdf"
+        assert info["tamanhoBytes"] == 16
+        assert info["fonte"] == "google_drive"
+        assert len(info["checksum"]) == 64
+
+    def test_no_extension_returns_bin(self, tmp_path):
+        f = tmp_path / "noext"
+        f.write_bytes(b"data")
+        info = _file_info(f)
+        assert info["tipo"] == "bin"
+
+    def test_checksum_is_deterministic(self, tmp_path):
+        f = tmp_path / "same.pdf"
+        f.write_bytes(b"same content")
+        assert _file_info(f)["checksum"] == _file_info(f)["checksum"]
+
+
+# ─────────────────────────────────────────────
+# download_gdrive_folder orchestration
+# ─────────────────────────────────────────────
+
+
+class TestDownloadGdriveFolderOrchestration:
+    @pytest.mark.asyncio
+    async def test_invalid_url_returns_empty(self, tmp_path):
+        result = await download_gdrive_folder(
+            "https://example.com/not-gdrive", tmp_path
+        )
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_gdown_strategy_success(self, tmp_path):
+        expected = [{"nome": "doc.pdf", "fonte": "google_drive"}]
+        with patch("gdrive_downloader._try_gdown", return_value=expected):
+            result = await download_gdrive_folder(
+                "https://drive.google.com/drive/folders/ABC123",
+                tmp_path,
+                strategy="gdown",
+            )
+        assert result == expected
+
+    @pytest.mark.asyncio
+    async def test_auto_fallback_to_requests(self, tmp_path):
+        expected = [{"nome": "doc.pdf", "fonte": "google_drive"}]
+        with (
+            patch("gdrive_downloader._try_gdown", return_value=None),
+            patch("gdrive_downloader._try_requests_parse", return_value=expected),
+        ):
+            result = await download_gdrive_folder(
+                "https://drive.google.com/drive/folders/ABC123",
+                tmp_path,
+            )
+        assert result == expected
+
+    @pytest.mark.asyncio
+    async def test_all_strategies_fail_returns_empty(self, tmp_path):
+        with (
+            patch("gdrive_downloader._try_gdown", return_value=None),
+            patch("gdrive_downloader._try_requests_parse", return_value=None),
+            patch("gdrive_downloader._try_playwright_download", return_value=None),
+        ):
+            result = await download_gdrive_folder(
+                "https://drive.google.com/drive/folders/ABC123",
+                tmp_path,
+            )
+        assert result == []
