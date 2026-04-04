@@ -98,7 +98,11 @@ async def interactive_login(session_file: Path = SESSION_FILE) -> bool:
 
             # Salva estado da sessão
             state = await ctx.storage_state()
-            session_file.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+            import os as _os
+            content = json.dumps(state, indent=2, ensure_ascii=False)
+            fd = _os.open(str(session_file), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)
+            with _os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
             log.info("pje.session.saved", path=str(session_file))
             print(f"\n>>> Sessão salva em {session_file}")
             return True
@@ -126,7 +130,7 @@ class PJeSessionClient:
                 f"Sessão não encontrada: {self.session_file}\n"
                 "Execute: python pje_session.py login"
             )
-        return json.loads(self.session_file.read_text())
+        return json.loads(self.session_file.read_text(encoding="utf-8"))
 
     async def is_valid(self) -> bool:
         """Verifica se a sessão salva ainda é válida."""
