@@ -96,6 +96,8 @@ class PJeSessionWorker:
         self._health_status: str = "starting"
         self._last_error: str | None = None
         self._session_lock_fh: Any | None = None
+        self._health_cache: dict | None = None
+        self._health_cache_time: float = 0.0
 
     def _acquire_session_lock(self) -> bool:
         """Acquire advisory lock on session state file (prevents multi-instance corruption)."""
@@ -951,7 +953,7 @@ class PJeSessionWorker:
 
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", HEALTH_PORT)
+        site = web.TCPSite(runner, "127.0.0.1", HEALTH_PORT)
         await site.start()
         log.info("pje.health.started", port=HEALTH_PORT)
 
@@ -963,18 +965,23 @@ class PJeSessionWorker:
         checks: dict = {}
         healthy = self._health_status in ("ready", "consuming")
 
-        # MNI connectivity
+        # MNI connectivity (cached 30s — prevents 503 cascade during tribunal slowness)
+        import time
+        now = time.monotonic()
         if self.mni_client is not None:
-            try:
-                mni_health = await asyncio.wait_for(
-                    self.mni_client.health_check(), timeout=5.0
-                )
-                checks["mni"] = mni_health["status"]
-                if mni_health["status"] != "healthy":
-                    healthy = False
-            except Exception:
-                checks["mni"] = "unreachable"
-                healthy = False
+            if self._health_cache and (now - self._health_cache_time) < 30.0:
+                checks["mni"] = self._health_cache.get("status", "unknown")
+            else:
+                try:
+                    mni_health = await asyncio.wait_for(
+                        self.mni_client.health_check(), timeout=5.0
+                    )
+                    self._health_cache = mni_health
+                    self._health_cache_time = now
+                    checks["mni"] = mni_health["status"]
+                except Exception:
+                    checks["mni"] = "unreachable"
+            # MNI status does NOT affect overall healthy — worker can process from Redis
         else:
             checks["mni"] = "disabled"
 
@@ -1011,7 +1018,6 @@ class PJeSessionWorker:
             "mni_enabled": self.mni_client is not None,
             "session_valid": self.session_valid,
             "docs_downloaded": self.docs_downloaded_count,
-            "last_error": self._last_error,
             "uptime_minutes": round(
                 (datetime.now(UTC) - self.session_started_at).total_seconds() / 60, 1
             )
