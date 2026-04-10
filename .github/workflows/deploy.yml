@@ -82,6 +82,12 @@ jobs:
             set -e
             cd /opt/pje-download
             docker compose up -d --build dashboard
+            if docker ps --format '{{.Names}}' | grep -qx 'pje-worker'; then
+              echo "Worker running on VPS; rebuilding worker too"
+              docker compose --profile worker up -d --build worker
+            else
+              echo "Worker not running on VPS; skipping worker deploy"
+            fi
             echo "Waiting for healthcheck..."
             sleep 5
             curl -sf http://localhost:8007/api/status
