@@ -117,6 +117,38 @@ class TestDashboardState:
         ds = DashboardState(tmp_path)
         assert "20240101_120000_abc123" in ds.batches
 
+    def test_progress_event_updates_phase_without_completing_batch(self, tmp_path):
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="batch-progress",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="running",
+            output_dir=str(tmp_path / "batch-progress"),
+            progress=ds._build_initial_progress(
+                BatchJob(
+                    id="batch-progress",
+                    processos=["5000001-00.2024.8.08.0001"],
+                    output_dir=str(tmp_path / "batch-progress"),
+                )
+            ),
+        )
+
+        ds._apply_progress_event(
+            job,
+            {
+                "numeroProcesso": "5000001-00.2024.8.08.0001",
+                "phase": "mni_metadata",
+                "phase_detail": "Consultando metadados",
+                "docs_baixados": 0,
+                "tamanho_bytes": 0,
+            },
+        )
+
+        proc = job.progress["processos"]["5000001-00.2024.8.08.0001"]
+        assert proc["status"] == "running"
+        assert proc["phase"] == "mni_metadata"
+        assert job.progress["summary"]["pending"] == 1
+
 
 # ─────────────────────────────────────────────
 # HTTP endpoint tests
@@ -209,7 +241,24 @@ class FakeRedis:
             for raw in values:
                 payload = json.loads(raw)
                 result_queue = payload["replyQueue"]
-                self.queues.setdefault(result_queue, []).append(
+                queue = self.queues.setdefault(result_queue, [])
+                queue.append(
+                    json.dumps(
+                        {
+                            "eventType": "progress",
+                            "jobId": payload["jobId"],
+                            "batchId": payload["batchId"],
+                            "numeroProcesso": payload["numeroProcesso"],
+                            "status": "running",
+                            "phase": "mni_metadata",
+                            "phase_detail": "Consultando metadados",
+                            "total_docs": 0,
+                            "docs_baixados": 0,
+                            "tamanho_bytes": 0,
+                        }
+                    )
+                )
+                queue.append(
                     json.dumps(
                         {
                             "jobId": payload["jobId"],

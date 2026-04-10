@@ -293,6 +293,92 @@ class DashboardState:
         }
         return worker_status
 
+    def _apply_progress_event(self, job: BatchJob, event: dict) -> None:
+        numero = event.get("numeroProcesso", "")
+        processos = job.progress.setdefault("processos", {})
+        current = processos.get(numero) or {
+            "status": "queued",
+            "phase": "waiting",
+            "phase_detail": "Aguardando worker",
+            "total_docs": 0,
+            "docs_baixados": 0,
+            "tamanho_bytes": 0,
+            "erro": None,
+            "duracao_s": None,
+        }
+        current.update(
+            {
+                "status": event.get("status", current.get("status", "running")),
+                "phase": event.get("phase", current.get("phase", "starting")),
+                "phase_detail": event.get(
+                    "phase_detail", current.get("phase_detail", "")
+                ),
+                "total_docs": event.get("total_docs", current.get("total_docs", 0)),
+                "docs_baixados": event.get(
+                    "docs_baixados", current.get("docs_baixados", 0)
+                ),
+                "tamanho_bytes": event.get(
+                    "tamanho_bytes", current.get("tamanho_bytes", 0)
+                ),
+                "erro": event.get("erro", current.get("erro")),
+            }
+        )
+        processos[numero] = current
+
+        done = sum(1 for proc in processos.values() if proc.get("status") == "done")
+        failed = sum(
+            1 for proc in processos.values() if proc.get("status") in {"failed"}
+        )
+        total = len(job.processos)
+        job.progress["summary"] = {
+            "total": total,
+            "done": done,
+            "failed": failed,
+            "pending": max(total - done - failed, 0),
+        }
+
+    def _apply_progress_event(self, job: BatchJob, event: dict) -> None:
+        numero = event.get("numeroProcesso", "")
+        processos = job.progress.setdefault("processos", {})
+        current = processos.setdefault(
+            numero,
+            {
+                "status": "queued",
+                "phase": "waiting",
+                "phase_detail": "Aguardando worker",
+                "total_docs": 0,
+                "docs_baixados": 0,
+                "tamanho_bytes": 0,
+                "erro": None,
+                "duracao_s": None,
+            },
+        )
+        current.update(
+            {
+                "status": "running",
+                "phase": event.get("phase", current.get("phase", "starting")),
+                "phase_detail": event.get("phase_detail", current.get("phase_detail")),
+                "total_docs": int(event.get("total_docs", current.get("total_docs", 0)))
+                if event.get("total_docs") is not None
+                else current.get("total_docs", 0),
+                "docs_baixados": int(
+                    event.get("docs_baixados", current.get("docs_baixados", 0))
+                ),
+                "tamanho_bytes": int(
+                    event.get("tamanho_bytes", current.get("tamanho_bytes", 0))
+                ),
+            }
+        )
+        done = sum(1 for proc in processos.values() if proc.get("status") == "done")
+        failed = sum(1 for proc in processos.values() if proc.get("status") == "failed")
+        total = len(job.processos)
+        job.progress["summary"] = {
+            "total": total,
+            "done": done,
+            "failed": failed,
+            "pending": max(total - done - failed, 0),
+        }
+
     def _fail_remaining_processes(
         self,
         job: BatchJob,
@@ -373,6 +459,12 @@ class DashboardState:
 
                 _, result_json = item
                 result = json.loads(result_json)
+                if result.get("eventType") == "progress":
+                    self._apply_progress_event(job, result)
+                    last_result_at = time.monotonic()
+                    self._persist_progress(job)
+                    continue
+
                 numero = result.get("numeroProcesso")
                 if numero not in pending:
                     continue

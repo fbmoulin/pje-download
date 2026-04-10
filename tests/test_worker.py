@@ -546,7 +546,7 @@ class TestPublishResult:
         mock_r = AsyncMock()
         worker.redis = mock_r
         await worker._publish_result({"jobId": "J1", "status": "success"})
-        mock_r.lpush.assert_awaited_once()
+        mock_r.rpush.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_publish_can_target_batch_reply_queue(self):
@@ -560,7 +560,7 @@ class TestPublishResult:
             queue_name="kratos:pje:results:batch-123",
         )
 
-        mock_r.lpush.assert_awaited_once_with(
+        mock_r.rpush.assert_awaited_once_with(
             "kratos:pje:results:batch-123",
             ANY,
         )
@@ -573,14 +573,14 @@ class TestPublishResult:
         _patch_redis_exceptions(w)
         worker = w.PJeSessionWorker()
         mock_r = AsyncMock()
-        mock_r.lpush = AsyncMock(side_effect=[RedisConnectionError("down"), None])
+        mock_r.rpush = AsyncMock(side_effect=[RedisConnectionError("down"), None])
         worker.redis = mock_r
         with (
             patch.object(w, "log", MagicMock()),
             patch("worker.asyncio.sleep", new_callable=AsyncMock),
         ):
             await worker._publish_result({"jobId": "J1"})
-        assert mock_r.lpush.await_count == 2
+        assert mock_r.rpush.await_count == 2
 
     @pytest.mark.asyncio
     async def test_publish_falls_back_to_local_log(self, tmp_path):
@@ -590,7 +590,7 @@ class TestPublishResult:
         _patch_redis_exceptions(w)
         worker = w.PJeSessionWorker()
         mock_r = AsyncMock()
-        mock_r.lpush = AsyncMock(side_effect=RedisConnectionError("down"))
+        mock_r.rpush = AsyncMock(side_effect=RedisConnectionError("down"))
         worker.redis = mock_r
         local_log = AsyncMock()
         with (
@@ -610,6 +610,29 @@ class TestPublishResult:
             "J1",
             "5000001-00.2024.8.08.0001",
             [{"nome": "doc.pdf"}],
+        )
+
+    @pytest.mark.asyncio
+    async def test_publish_progress_uses_reply_queue(self):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        worker.redis = mock_r
+
+        await worker._publish_progress(
+            {
+                "jobId": "J1",
+                "batchId": "batch-1",
+                "numeroProcesso": "5000001-00.2024.8.08.0001",
+                "replyQueue": "kratos:pje:results:batch-1",
+            },
+            "mni_metadata",
+            "Consultando metadados",
+        )
+
+        mock_r.rpush.assert_awaited_once_with(
+            "kratos:pje:results:batch-1",
+            ANY,
         )
 
 
@@ -647,6 +670,48 @@ class TestDownloadProcess:
 
         assert result["status"] == "success"
         assert (tmp_path / "batch-1" / "proc").is_dir()
+
+    @pytest.mark.asyncio
+    async def test_gdrive_url_is_downloaded_before_other_strategies(self, tmp_path):
+        w = _load_worker_module()
+        w.DOWNLOAD_BASE_DIR = tmp_path
+        worker = w.PJeSessionWorker()
+        worker.mni_client = None
+        worker.page = None
+        worker.context = None
+        worker._try_official_api = AsyncMock(return_value=None)
+        worker._download_via_browser = AsyncMock(return_value=None)
+        worker._log_job_result = AsyncMock()
+        worker.is_session_expired = MagicMock(return_value=False)
+        worker._publish_progress = AsyncMock()
+
+        with patch(
+            "gdrive_downloader.download_gdrive_folder",
+            AsyncMock(
+                return_value=[
+                    {
+                        "nome": "scan.pdf",
+                        "checksum": "g1",
+                        "tamanhoBytes": 10,
+                        "fonte": "google_drive",
+                    }
+                ]
+            ),
+        ) as mock_gdrive:
+            result = await worker.download_process(
+                {
+                    "jobId": "JG",
+                    "numeroProcesso": "0126923-56.2011.8.08.0012",
+                    "gdriveUrl": "https://drive.google.com/drive/folders/ABC123",
+                }
+            )
+
+        mock_gdrive.assert_awaited_once()
+        assert result["status"] == "success"
+        assert any(
+            item["fonte"] == "google_drive" for item in result["arquivosDownloaded"]
+        )
+        worker._publish_progress.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_mni_pending_annexes_returns_warning(self):
