@@ -16,6 +16,22 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _patch_asyncio_to_thread(monkeypatch):
+    """Make async thread offloading deterministic in unit tests.
+
+    In this sandbox, real ``asyncio.to_thread`` can keep pytest alive after the
+    assertions already passed. These tests validate classification and parsing
+    logic, not Python's threadpool executor behavior, so a synchronous shim is
+    sufficient here.
+    """
+
+    async def _fake_to_thread(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _fake_to_thread)
+
+
 def _make_client():
     """Return an MNIClient with lazy init bypassed."""
     from mni_client import MNIClient

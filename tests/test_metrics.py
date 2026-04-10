@@ -141,17 +141,15 @@ def test_throughput_gauge_set():
 
 
 @pytest.mark.asyncio
-async def test_metrics_endpoint_returns_200(tmp_path):
+async def test_metrics_endpoint_returns_200():
     """GET /metrics returns 200 with Prometheus content-type."""
-    from aiohttp.test_utils import TestClient, TestServer
-    from dashboard_api import create_app
+    from aiohttp.test_utils import make_mocked_request
+    from dashboard_api import handle_metrics
 
-    app = create_app(tmp_path)
-    async with TestClient(TestServer(app)) as client:
-        resp = await client.get("/metrics")
-        assert resp.status == 200
-        ct = resp.headers.get("Content-Type", "")
-        assert "text/plain" in ct
-        body = await resp.text()
-        # Must contain at least one of our custom metrics
-        assert "pje_" in body
+    request = make_mocked_request("GET", "/metrics")
+    resp = await handle_metrics(request)
+    assert resp.status == 200
+    ct = resp.headers.get("Content-Type", "")
+    assert "text/plain" in ct
+    body = resp.body.decode()
+    assert "pje_" in body

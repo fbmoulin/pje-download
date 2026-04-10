@@ -25,6 +25,16 @@ from gdrive_downloader import (
 # ─────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _patch_asyncio_to_thread(monkeypatch):
+    """Make thread-offloaded unit tests deterministic in this sandbox."""
+
+    async def _fake_to_thread(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _fake_to_thread)
+
+
 class TestExtractFolderId:
     def test_standard_folders_url(self):
         url = "https://drive.google.com/drive/folders/1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P"
@@ -580,13 +590,13 @@ class TestTryPlaywrightDownload:
             return_value="/file/d/FILE_ID_TIMEOUT_XXXXXXXXXX/view"
         )
 
-        page = AsyncMock()
+        page = MagicMock()
         page.goto = AsyncMock()
         file_links_loc = MagicMock()
         file_links_loc.all = AsyncMock(return_value=[link])
-        page.locator.return_value = file_links_loc
+        page.locator = MagicMock(return_value=file_links_loc)
 
-        dl_page = AsyncMock()
+        dl_page = MagicMock()
         # expect_download raises TimeoutError
         dl_cm = AsyncMock()
         dl_cm.__aenter__ = AsyncMock(side_effect=TimeoutError("Download timed out"))
@@ -600,18 +610,18 @@ class TestTryPlaywrightDownload:
         btn_loc.count = AsyncMock(return_value=0)
         dl_page.locator = MagicMock(return_value=btn_loc)
 
-        context = AsyncMock()
+        context = MagicMock()
         context.new_page = AsyncMock(side_effect=[page, dl_page])
 
-        browser = AsyncMock()
+        browser = MagicMock()
         browser.new_context = AsyncMock(return_value=context)
         browser.close = AsyncMock()
 
-        pw = AsyncMock()
-        pw.chromium = AsyncMock()
+        pw = MagicMock()
+        pw.chromium = MagicMock()
         pw.chromium.launch = AsyncMock(return_value=browser)
 
-        pw_cm = AsyncMock()
+        pw_cm = MagicMock()
         pw_cm.__aenter__ = AsyncMock(return_value=pw)
         pw_cm.__aexit__ = AsyncMock(return_value=False)
 
@@ -660,24 +670,24 @@ class TestTryPlaywrightDownload:
     @pytest.mark.asyncio
     async def test_no_file_links_found(self, tmp_path):
         """Returns None when page has no file links."""
-        page = AsyncMock()
+        page = MagicMock()
         page.goto = AsyncMock()
         empty_loc = MagicMock()
         empty_loc.all = AsyncMock(return_value=[])
         page.locator = MagicMock(return_value=empty_loc)
 
-        context = AsyncMock()
+        context = MagicMock()
         context.new_page = AsyncMock(return_value=page)
 
-        browser = AsyncMock()
+        browser = MagicMock()
         browser.new_context = AsyncMock(return_value=context)
         browser.close = AsyncMock()
 
-        pw = AsyncMock()
-        pw.chromium = AsyncMock()
+        pw = MagicMock()
+        pw.chromium = MagicMock()
         pw.chromium.launch = AsyncMock(return_value=browser)
 
-        pw_cm = AsyncMock()
+        pw_cm = MagicMock()
         pw_cm.__aenter__ = AsyncMock(return_value=pw)
         pw_cm.__aexit__ = AsyncMock(return_value=False)
 
