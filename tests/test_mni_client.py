@@ -6,7 +6,7 @@ import asyncio
 import base64
 import hashlib
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -762,6 +762,51 @@ class TestDownloadDocumentos:
             saved = await client.download_documentos(processo, tmp_path, batch_size=2)
 
         assert len(saved) == 3
+
+    @pytest.mark.asyncio
+    async def test_progress_callback_tracks_saved_docs(self, tmp_path):
+        """Progress callback receives cumulative doc count and bytes."""
+        from mni_client import MNIProcesso, MNIDocumento
+
+        content_a = b"1234"
+        content_b = b"abcdef"
+        docs = [
+            MNIDocumento(
+                id="doc1",
+                nome="Doc A",
+                tipo="doc",
+                conteudo_base64=base64.b64encode(content_a).decode("ascii"),
+                tamanho_bytes=len(content_a),
+            ),
+            MNIDocumento(
+                id="doc2",
+                nome="Doc B",
+                tipo="doc",
+                conteudo_base64=base64.b64encode(content_b).decode("ascii"),
+                tamanho_bytes=len(content_b),
+            ),
+        ]
+        processo = MNIProcesso(numero="5000001-00.2024.8.08.0001", documentos=docs)
+        client = _make_client()
+        progress_cb = AsyncMock()
+
+        with patch("audit.log_access"):
+            saved = await client.download_documentos(
+                processo,
+                tmp_path,
+                progress_cb=progress_cb,
+            )
+
+        assert len(saved) == 2
+        assert progress_cb.await_count == 2
+        first = progress_cb.await_args_list[0].kwargs
+        second = progress_cb.await_args_list[1].kwargs
+        assert first["completed"] == 1
+        assert first["total"] == 2
+        assert first["local_bytes"] == len(content_a)
+        assert second["completed"] == 2
+        assert second["total"] == 2
+        assert second["local_bytes"] == len(content_a) + len(content_b)
 
     @pytest.mark.asyncio
     async def test_dedup_skip(self, tmp_path):

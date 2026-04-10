@@ -85,6 +85,29 @@ function isAntigo(num) {
   return num && !num.startsWith('5');
 }
 
+function getDocStats(p = {}) {
+  const done = Number(p.docs_baixados || p.docs || 0);
+  const total = Number(p.total_docs || 0);
+  return { done, total };
+}
+
+function fmtDocProgress(p = {}) {
+  const { done, total } = getDocStats(p);
+  if (total > 0) return `${done}/${total} docs`;
+  if (done > 0) return `${done} docs`;
+  return '\u2014';
+}
+
+function inferStrategy(detail = '') {
+  const normalized = String(detail || '').toLowerCase();
+  if (!normalized) return '';
+  if (normalized.includes('api rest')) return 'API REST';
+  if (normalized.includes('browser')) return 'Browser';
+  if (normalized.includes('mni')) return 'MNI SOAP';
+  if (normalized.includes('gdrive') || normalized.includes('google drive')) return 'GDrive';
+  return '';
+}
+
 // ── Toast Notifications ──
 
 function toast(message, type = 'info') {
@@ -122,11 +145,16 @@ function updateKPIs(processos = 0, docs = 0, bytes = 0, batches = 0) {
 
 function renderPhase(p, isAntigoProc) {
   const phase = p.phase || (p.status === 'done' ? 'done' : p.status === 'failed' ? 'failed' : 'waiting');
+  const detail = p.phase_detail || '';
+  const strategy = inferStrategy(detail);
+  const docProgress = fmtDocProgress(p);
 
   if (phase === 'failed') {
-    const detail = p.phase_detail || p.erro || '';
+    const failureDetail = detail || p.erro || '';
     let html = '<span class="tag tag--failed">Falhou</span>';
-    if (detail) html += `<div class="pipeline__detail" title="${esc(detail)}">${esc(detail.substring(0, 80))}</div>`;
+    if (failureDetail) {
+      html += `<div class="pipeline__detail" title="${esc(failureDetail)}">${esc(failureDetail.substring(0, 80))}</div>`;
+    }
     return html;
   }
 
@@ -160,8 +188,15 @@ function renderPhase(p, isAntigoProc) {
   });
   html += '</div>';
 
-  if (p.phase_detail && phase !== 'done') {
-    html += `<div class="pipeline__detail" title="${esc(p.phase_detail)}">${esc(p.phase_detail)}</div>`;
+  if (phase !== 'done') {
+    const meta = [];
+    if (strategy) meta.push(`<span class="tag tag--running tag--inline">${esc(strategy)}</span>`);
+    if (docProgress !== '\u2014') meta.push(`<span class="tag tag--queued tag--inline">${esc(docProgress)}</span>`);
+    if (meta.length) html += `<div class="pipeline__meta">${meta.join('')}</div>`;
+  }
+
+  if (detail && phase !== 'done') {
+    html += `<div class="pipeline__detail" title="${esc(detail)}">${esc(detail)}</div>`;
   }
   return html;
 }
@@ -338,18 +373,20 @@ function renderProgress(data) {
   const procs = data.processos || {};
   const summary = data.summary || {};
   const total = summary.total || Object.keys(procs).length;
-  let done = 0, failed = 0, totalDocs = 0, totalBytes = 0;
+  let done = 0, failed = 0, downloadedDocs = 0, expectedDocs = 0, totalBytes = 0;
 
   for (const p of Object.values(procs)) {
     if (p.status === 'done') done++;
     if (p.status === 'failed') failed++;
-    totalDocs += p.docs_baixados || p.docs || 0;
+    const { done: procDone, total: procTotal } = getDocStats(p);
+    downloadedDocs += procDone;
+    expectedDocs += procTotal || procDone;
     totalBytes += p.tamanho_bytes || p.bytes || 0;
   }
 
   const pct = total > 0 ? Math.round((done + failed) / total * 100) : 0;
 
-  updateKPIs(total, totalDocs, totalBytes, parseInt($('#kpi-batches').textContent) || 0);
+  updateKPIs(total, downloadedDocs, totalBytes, parseInt($('#kpi-batches').textContent) || 0);
 
   const statusMsg = data.status === 'running' ? 'Baixando documentos...'
     : data.status === 'failed' ? 'Falhou'
@@ -374,7 +411,10 @@ function renderProgress(data) {
   // Show batch table
   batchCard.classList.remove('hidden');
   $('#main-progress').style.width = pct + '%';
-  $('#progress-label').textContent = `${done + failed} / ${total} processos (${pct}%) \u2014 ${totalDocs} docs, ${fmtBytes(totalBytes)}`;
+  const docLabel = expectedDocs > 0
+    ? `${downloadedDocs}/${expectedDocs} docs`
+    : `${downloadedDocs} docs`;
+  $('#progress-label').textContent = `${done + failed} / ${total} processos (${pct}%) \u2014 ${docLabel}, ${fmtBytes(totalBytes)}`;
 
   renderProcessTable($('#processos-tbody'), procs);
 }
@@ -386,7 +426,7 @@ function renderProcessTable(tbody, procs) {
   for (const [num, p] of Object.entries(procs)) {
     const antigo = isAntigo(num);
     const antigoBadge = antigo ? ' <span class="tag tag--antigo">antigo</span>' : '';
-    const docs = p.docs_baixados || p.docs || 0;
+    const docs = fmtDocProgress(p);
     const bytes = p.tamanho_bytes || p.bytes || 0;
     const dur = p.duracao_s;
     html += `<tr>
@@ -458,17 +498,22 @@ async function viewBatch(batchId) {
     batchCard.classList.remove('hidden');
 
     const procs = data.progress.processos;
-    let done = 0, totalDocs = 0, totalBytes = 0;
+    let done = 0, downloadedDocs = 0, expectedDocs = 0, totalBytes = 0;
     for (const p of Object.values(procs)) {
       if (p.status === 'done') done++;
-      totalDocs += p.docs || p.docs_baixados || 0;
+      const { done: procDone, total: procTotal } = getDocStats(p);
+      downloadedDocs += procDone;
+      expectedDocs += procTotal || procDone;
       totalBytes += p.bytes || p.tamanho_bytes || 0;
     }
 
     const total = Object.keys(procs).length;
     const pct = total > 0 ? Math.round(done / total * 100) : 0;
     $('#main-progress').style.width = pct + '%';
-    $('#progress-label').textContent = `${done} / ${total} processos (${pct}%) \u2014 ${totalDocs} docs, ${fmtBytes(totalBytes)}`;
+    const docLabel = expectedDocs > 0
+      ? `${downloadedDocs}/${expectedDocs} docs`
+      : `${downloadedDocs} docs`;
+    $('#progress-label').textContent = `${done} / ${total} processos (${pct}%) \u2014 ${docLabel}, ${fmtBytes(totalBytes)}`;
 
     renderProcessTable($('#processos-tbody'), procs);
     batchCard.scrollIntoView({ behavior: 'smooth', block: 'start' });

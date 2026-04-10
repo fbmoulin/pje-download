@@ -377,6 +377,32 @@ class PJeSessionWorker:
 
         downloaded_files: list[dict] = []
         anexos_pendentes = 0
+        expected_total_docs = 0
+
+        def _make_incremental_download_progress_cb(detail_prefix: str):
+            base_docs = len(downloaded_files)
+            base_bytes = sum(
+                int(item.get("tamanhoBytes", 0) or 0) for item in downloaded_files
+            )
+
+            async def _callback(
+                *,
+                file_info: dict,
+                completed: int,
+                total: int,
+                local_bytes: int,
+            ) -> None:
+                del file_info
+                await self._publish_progress(
+                    job,
+                    "mni_download",
+                    f"{detail_prefix}: {completed}/{max(total, completed)} docs",
+                    total_docs=base_docs + max(total, completed),
+                    docs_baixados=base_docs + completed,
+                    tamanho_bytes=base_bytes + local_bytes,
+                )
+
+            return _callback
 
         try:
             log.info("pje.download.start", processo=numero_processo, job_id=job_id)
@@ -454,11 +480,28 @@ class PJeSessionWorker:
                         for item in downloaded_files
                     ),
                 )
-                mni_files, anexos_pendentes = await self._try_mni_download(
+                mni_result = await self._try_mni_download(
                     numero_processo,
                     output_dir,
                     tipos_documento,
                     incluir_anexos=incluir_anexos,
+                    progress_cb=_make_incremental_download_progress_cb("MNI SOAP"),
+                )
+                if len(mni_result) == 3:
+                    mni_files, anexos_pendentes, expected_total_docs = mni_result
+                else:
+                    mni_files, anexos_pendentes = mni_result
+                    expected_total_docs = len(mni_files or [])
+                await self._publish_progress(
+                    job,
+                    "mni_metadata",
+                    f"Metadados MNI: {expected_total_docs} docs esperados",
+                    total_docs=max(expected_total_docs, len(downloaded_files)),
+                    docs_baixados=len(downloaded_files),
+                    tamanho_bytes=sum(
+                        int(item.get("tamanhoBytes", 0) or 0)
+                        for item in downloaded_files
+                    ),
                 )
                 if mni_files:
                     downloaded_files = _merge_downloaded_files(
@@ -468,6 +511,7 @@ class PJeSessionWorker:
                         job,
                         "mni_download",
                         f"Documentos baixados: {len(downloaded_files)}",
+                        total_docs=max(expected_total_docs, len(downloaded_files)),
                         docs_baixados=len(downloaded_files),
                         tamanho_bytes=sum(
                             int(item.get("tamanhoBytes", 0) or 0)
@@ -489,6 +533,7 @@ class PJeSessionWorker:
                             job,
                             "done",
                             f"Concluído: {len(downloaded_files)} docs",
+                            total_docs=max(expected_total_docs, len(downloaded_files)),
                             docs_baixados=len(downloaded_files),
                             tamanho_bytes=sum(
                                 int(item.get("tamanhoBytes", 0) or 0)
@@ -509,6 +554,7 @@ class PJeSessionWorker:
                     job,
                     "done",
                     warning,
+                    total_docs=max(expected_total_docs, len(downloaded_files)),
                     docs_baixados=len(downloaded_files),
                     tamanho_bytes=sum(
                         int(item.get("tamanhoBytes", 0) or 0)
@@ -545,12 +591,14 @@ class PJeSessionWorker:
                     int(item.get("tamanhoBytes", 0) or 0) for item in downloaded_files
                 ),
             )
+
             api_result = await self._try_official_api(
                 numero_processo,
                 output_dir,
                 tipos_documento=tipos_documento,
                 incluir_anexos=incluir_anexos,
                 incluir_principais=not (downloaded_files and anexos_pendentes > 0),
+                progress_cb=_make_incremental_download_progress_cb("API REST"),
             )
             if api_result:
                 downloaded_files = _merge_downloaded_files(downloaded_files, api_result)
@@ -558,6 +606,7 @@ class PJeSessionWorker:
                     job,
                     "mni_download",
                     f"Documentos baixados: {len(downloaded_files)}",
+                    total_docs=max(expected_total_docs, len(downloaded_files)),
                     docs_baixados=len(downloaded_files),
                     tamanho_bytes=sum(
                         int(item.get("tamanhoBytes", 0) or 0)
@@ -602,6 +651,7 @@ class PJeSessionWorker:
                     output_dir,
                     tipos_documento,
                     allow_full_download=not (downloaded_files and anexos_pendentes > 0),
+                    progress_cb=_make_incremental_download_progress_cb("Browser"),
                 )
                 if not browser_files:
                     if downloaded_files:
@@ -612,25 +662,37 @@ class PJeSessionWorker:
                         await self._log_job_result(
                             job_id, numero_processo, downloaded_files
                         )
+                        self._health_status = "ready"
+                        await self._publish_progress(
+                            job,
+                            "done",
+                            warning,
+                            total_docs=max(expected_total_docs, len(downloaded_files)),
+                            docs_baixados=len(downloaded_files),
+                            tamanho_bytes=sum(
+                                int(item.get("tamanhoBytes", 0) or 0)
+                                for item in downloaded_files
+                            ),
+                        )
+                        return self._result(
+                            job_id,
+                            numero_processo,
+                            "success",
+                            downloaded_files,
+                            error=warning,
+                        )
                     self._health_status = "ready"
                     await self._publish_progress(
                         job,
                         "failed",
                         "Browser fallback indisponível ou sem arquivos",
+                        total_docs=max(expected_total_docs, len(downloaded_files)),
                         docs_baixados=len(downloaded_files),
                         tamanho_bytes=sum(
                             int(item.get("tamanhoBytes", 0) or 0)
                             for item in downloaded_files
                         ),
                     )
-                    return self._result(
-                        job_id,
-                        numero_processo,
-                        "success",
-                        downloaded_files,
-                        error=warning,
-                    )
-                    self._health_status = "ready"
                     return self._result(
                         job_id,
                         numero_processo,
@@ -644,6 +706,7 @@ class PJeSessionWorker:
                     job,
                     "mni_download",
                     f"Documentos baixados: {len(downloaded_files)}",
+                    total_docs=max(expected_total_docs, len(downloaded_files)),
                     docs_baixados=len(downloaded_files),
                     tamanho_bytes=sum(
                         int(item.get("tamanhoBytes", 0) or 0)
@@ -664,6 +727,7 @@ class PJeSessionWorker:
                 job,
                 "done",
                 warning or f"Concluído: {len(downloaded_files)} docs",
+                total_docs=max(expected_total_docs, len(downloaded_files)),
                 docs_baixados=len(downloaded_files),
                 tamanho_bytes=sum(
                     int(item.get("tamanhoBytes", 0) or 0) for item in downloaded_files
@@ -695,6 +759,7 @@ class PJeSessionWorker:
                     job,
                     "failed",
                     "Sessão expirada",
+                    total_docs=max(expected_total_docs, len(downloaded_files)),
                     docs_baixados=len(downloaded_files),
                     tamanho_bytes=sum(
                         int(item.get("tamanhoBytes", 0) or 0)
@@ -708,6 +773,7 @@ class PJeSessionWorker:
                 job,
                 "failed",
                 str(e),
+                total_docs=max(expected_total_docs, len(downloaded_files)),
                 docs_baixados=len(downloaded_files),
                 tamanho_bytes=sum(
                     int(item.get("tamanhoBytes", 0) or 0) for item in downloaded_files
@@ -725,7 +791,8 @@ class PJeSessionWorker:
         output_dir: Path,
         tipos_documento: list | None = None,
         incluir_anexos: bool = True,
-    ) -> tuple[list[dict] | None, int]:
+        progress_cb=None,
+    ) -> tuple[list[dict] | None, int, int]:
         """
         Tenta baixar documentos via MNI SOAP (estratégia de 2 fases).
 
@@ -756,14 +823,22 @@ class PJeSessionWorker:
                     processo=numero_processo,
                     error=result.error,
                 )
-                return None, 0
+                return None, 0, 0
 
             if not result.processo.documentos:
                 log.warning(
                     "pje.mni.no_documents",
                     processo=numero_processo,
                 )
-                return None, 0
+                return None, 0, 0
+
+            expected_total_docs = 0
+            for doc in result.processo.documentos:
+                if tipos_normalizados and doc.tipo.lower() not in tipos_normalizados:
+                    continue
+                expected_total_docs += 1
+                if incluir_vinculados and doc.vinculados:
+                    expected_total_docs += len(doc.vinculados)
 
             anexos_pendentes = (
                 sum(len(doc.vinculados) for doc in result.processo.documentos)
@@ -775,6 +850,7 @@ class PJeSessionWorker:
                 "pje.mni.phase1_complete",
                 processo=numero_processo,
                 total_docs=len(result.processo.documentos),
+                expected_total_docs=expected_total_docs,
                 anexos_pendentes=anexos_pendentes,
             )
 
@@ -784,12 +860,13 @@ class PJeSessionWorker:
                 output_dir,
                 tipos_documento,
                 incluir_anexos=incluir_vinculados,
+                progress_cb=progress_cb,
             )
-            return (files if files else None), anexos_pendentes
+            return (files if files else None), anexos_pendentes, expected_total_docs
 
         except Exception as exc:
             log.warning("pje.mni.download_error", error=str(exc))
-            return None, 0
+            return None, 0, 0
 
     # ──────────────────────
     # ESTRATÉGIA 2: API REST
@@ -802,6 +879,7 @@ class PJeSessionWorker:
         tipos_documento: list | None = None,
         incluir_anexos: bool = True,
         incluir_principais: bool = True,
+        progress_cb=None,
     ) -> list | None:
         """
         Tenta usar a API oficial REST do PJe para download.
@@ -829,9 +907,11 @@ class PJeSessionWorker:
                 else:
                     docs_list = docs.get("content") or docs.get("documentos") or []
                 files: list[dict] = []
+                local_bytes = 0
                 tipos_normalizados = (
                     {t.lower() for t in tipos_documento} if tipos_documento else None
                 )
+                filtered_docs: list[dict] = []
                 for doc in docs_list:
                     doc_tipo = str(doc.get("tipo", "pdf")).lower()
                     if not incluir_anexos and doc_tipo == "anexo":
@@ -840,9 +920,21 @@ class PJeSessionWorker:
                         continue
                     if tipos_normalizados and doc_tipo not in tipos_normalizados:
                         continue
+                    filtered_docs.append(doc)
+
+                total_docs = len(filtered_docs)
+                for doc in filtered_docs:
                     file_info = await self._download_document_api(doc, output_dir)
                     if file_info:
                         files.append(file_info)
+                        local_bytes += int(file_info.get("tamanhoBytes", 0) or 0)
+                        if progress_cb is not None:
+                            await progress_cb(
+                                file_info=file_info,
+                                completed=len(files),
+                                total=total_docs,
+                                local_bytes=local_bytes,
+                            )
                 return files if files else None
 
         except Exception as exc:
@@ -887,6 +979,7 @@ class PJeSessionWorker:
         output_dir: Path,
         tipos_documento: list | None = None,
         allow_full_download: bool = True,
+        progress_cb=None,
     ) -> list | None:
         """
         Download via browser automation com Playwright.
@@ -911,11 +1004,23 @@ class PJeSessionWorker:
                 numero_processo, output_dir
             )
             if full_files:
+                if progress_cb is not None:
+                    await progress_cb(
+                        file_info=full_files[0],
+                        completed=len(full_files),
+                        total=len(full_files),
+                        local_bytes=sum(
+                            int(item.get("tamanhoBytes", 0) or 0) for item in full_files
+                        ),
+                    )
                 return full_files
 
         # 3b: Fallback — download individual
         return await self._download_docs_individually(
-            numero_processo, output_dir, tipos_documento
+            numero_processo,
+            output_dir,
+            tipos_documento,
+            progress_cb=progress_cb,
         )
 
     async def _try_full_download_button(
@@ -1115,6 +1220,7 @@ class PJeSessionWorker:
         numero_processo: str,
         output_dir: Path,
         tipos_documento: list | None = None,
+        progress_cb=None,
     ) -> list:
         """
         Estratégia 3b (fallback): Download individual de cada documento
@@ -1164,12 +1270,21 @@ class PJeSessionWorker:
 
         if not hrefs:
             # Fallback: sequential click-based download
-            return await self._download_docs_sequential(doc_links, output_dir)
+            return await self._download_docs_sequential(
+                doc_links,
+                output_dir,
+                progress_cb=progress_cb,
+            )
 
         # Download concurrently via separate pages
         sem = asyncio.Semaphore(CONCURRENT_DOWNLOADS)
+        progress_lock = asyncio.Lock()
+        completed = 0
+        local_bytes = 0
+        total_docs = len(hrefs)
 
         async def _fetch_one(idx: int, url: str) -> dict | None:
+            nonlocal completed, local_bytes
             async with sem:
                 try:
                     dl_page = await self.context.new_page()
@@ -1187,7 +1302,7 @@ class PJeSessionWorker:
                             filename=dest.name,
                             size=size,
                         )
-                        return {
+                        file_info = {
                             "nome": dest.name,
                             "tipo": "pdf",
                             "tamanhoBytes": size,
@@ -1195,6 +1310,17 @@ class PJeSessionWorker:
                             "checksum": checksum,
                             "fonte": "browser_individual",
                         }
+                        if progress_cb is not None:
+                            async with progress_lock:
+                                completed += 1
+                                local_bytes += size
+                                await progress_cb(
+                                    file_info=file_info,
+                                    completed=completed,
+                                    total=total_docs,
+                                    local_bytes=local_bytes,
+                                )
+                        return file_info
                     finally:
                         await dl_page.close()
                 except Exception as e:
@@ -1208,10 +1334,15 @@ class PJeSessionWorker:
         return files
 
     async def _download_docs_sequential(
-        self, doc_links: list, output_dir: Path
+        self,
+        doc_links: list,
+        output_dir: Path,
+        progress_cb=None,
     ) -> list:
         """Fallback: sequential click-based download when hrefs unavailable."""
         files: list[dict] = []
+        local_bytes = 0
+        total_docs = min(len(doc_links), MAX_DOCS_PER_SESSION)
         for i, link in enumerate(doc_links[:MAX_DOCS_PER_SESSION]):
             try:
                 if i > 0 and i % 10 == 0 and await self._detect_captcha():
@@ -1236,6 +1367,14 @@ class PJeSessionWorker:
                         "fonte": "browser_individual",
                     }
                 )
+                local_bytes += size
+                if progress_cb is not None:
+                    await progress_cb(
+                        file_info=files[-1],
+                        completed=len(files),
+                        total=total_docs,
+                        local_bytes=local_bytes,
+                    )
                 self.docs_downloaded_count += 1
                 await asyncio.sleep(DOWNLOAD_DELAY_SECS)
             except Exception as e:
@@ -1287,7 +1426,7 @@ class PJeSessionWorker:
         phase: str,
         phase_detail: str = "",
         *,
-        status: str = "running",
+        status: str | None = None,
         total_docs: int = 0,
         docs_baixados: int = 0,
         tamanho_bytes: int = 0,
@@ -1301,12 +1440,16 @@ class PJeSessionWorker:
         if not queue_name:
             return
 
+        resolved_status = status or (
+            phase if phase in {"done", "failed"} else "running"
+        )
+
         payload = {
             "eventType": "progress",
             "jobId": job.get("jobId", ""),
             "batchId": job.get("batchId"),
             "numeroProcesso": job.get("numeroProcesso", ""),
-            "status": status,
+            "status": resolved_status,
             "phase": phase,
             "phase_detail": phase_detail,
             "total_docs": total_docs,

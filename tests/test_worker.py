@@ -850,6 +850,54 @@ class TestOfficialApiFallback:
         assert worker._download_document_api.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_emits_incremental_progress_callback(self, tmp_path):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        response = AsyncMock()
+        response.status = 200
+        response.json = AsyncMock(
+            return_value=[
+                {"id": "1", "tipo": "pdf"},
+                {"id": "2", "tipo": "anexo"},
+            ]
+        )
+        worker.page = AsyncMock()
+        worker.page.request.get = AsyncMock(return_value=response)
+        worker._download_document_api = AsyncMock(
+            side_effect=[
+                {
+                    "nome": "principal.pdf",
+                    "checksum": "doc-1",
+                    "tamanhoBytes": 10,
+                    "fonte": "api_rest",
+                },
+                {
+                    "nome": "anexo.pdf",
+                    "checksum": "doc-2",
+                    "tamanhoBytes": 5,
+                    "fonte": "api_rest",
+                },
+            ]
+        )
+        progress_cb = AsyncMock()
+
+        await worker._try_official_api(
+            "5000003-00.2024.8.08.0001",
+            tmp_path,
+            incluir_anexos=True,
+            progress_cb=progress_cb,
+        )
+
+        assert progress_cb.await_count == 2
+        first = progress_cb.await_args_list[0].kwargs
+        second = progress_cb.await_args_list[1].kwargs
+        assert first["completed"] == 1
+        assert first["total"] == 2
+        assert first["local_bytes"] == 10
+        assert second["completed"] == 2
+        assert second["local_bytes"] == 15
+
+    @pytest.mark.asyncio
     async def test_skips_annex_when_disabled(self, tmp_path):
         w = _load_worker_module()
         worker = w.PJeSessionWorker()
@@ -884,6 +932,37 @@ class TestOfficialApiFallback:
 
 class TestBrowserFallback:
     @pytest.mark.asyncio
+    async def test_full_download_emits_progress_callback(self, tmp_path):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.page = AsyncMock()
+        worker.context = AsyncMock()
+        worker._try_full_download_button = AsyncMock(
+            return_value=[
+                {
+                    "nome": "full.zip",
+                    "checksum": "zip-1",
+                    "tamanhoBytes": 11,
+                    "fonte": "browser_full_download",
+                }
+            ]
+        )
+        progress_cb = AsyncMock()
+
+        files = await worker._download_via_browser(
+            "5000005-00.2024.8.08.0001",
+            tmp_path,
+            progress_cb=progress_cb,
+        )
+
+        assert len(files) == 1
+        progress_cb.assert_awaited_once()
+        kwargs = progress_cb.await_args.kwargs
+        assert kwargs["completed"] == 1
+        assert kwargs["total"] == 1
+        assert kwargs["local_bytes"] == 11
+
+    @pytest.mark.asyncio
     async def test_skips_full_download_when_only_annexes_are_pending(self, tmp_path):
         w = _load_worker_module()
         worker = w.PJeSessionWorker()
@@ -913,6 +992,55 @@ class TestBrowserFallback:
         worker._download_docs_individually.assert_awaited_once()
         assert files[0]["nome"] == "anexo.pdf"
 
+    @pytest.mark.asyncio
+    async def test_sequential_download_emits_incremental_progress(self, tmp_path):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.page = MagicMock()
+        worker._detect_captcha = AsyncMock(return_value=False)
+
+        class DownloadCtx:
+            async def __aenter__(self):
+                class Holder:
+                    value = None
+
+                holder = Holder()
+                download = AsyncMock()
+                download.suggested_filename = "doc.pdf"
+
+                async def save_as(path):
+                    from pathlib import Path as _Path
+
+                    _Path(path).write_bytes(b"abc")
+
+                download.save_as.side_effect = save_as
+
+                async def _value():
+                    return download
+
+                holder.value = _value()
+                return holder
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        worker.page.expect_download = MagicMock(return_value=DownloadCtx())
+        link = AsyncMock()
+        progress_cb = AsyncMock()
+
+        files = await worker._download_docs_sequential(
+            [link],
+            tmp_path,
+            progress_cb=progress_cb,
+        )
+
+        assert len(files) == 1
+        progress_cb.assert_awaited_once()
+        kwargs = progress_cb.await_args.kwargs
+        assert kwargs["completed"] == 1
+        assert kwargs["total"] == 1
+        assert kwargs["local_bytes"] == 3
+
 
 class TestMniOptimization:
     @pytest.mark.asyncio
@@ -932,7 +1060,7 @@ class TestMniOptimization:
         )
         worker.mni_client.download_documentos = AsyncMock(return_value=[])
 
-        files, anexos_pendentes = await worker._try_mni_download(
+        files, anexos_pendentes, total_docs = await worker._try_mni_download(
             "5000005-00.2024.8.08.0001",
             tmp_path,
             tipos_documento=["sentenca"],
@@ -941,9 +1069,52 @@ class TestMniOptimization:
 
         assert files is None
         assert anexos_pendentes == 0
+        assert total_docs == 1
         worker.mni_client.download_documentos.assert_awaited_once_with(
             processo,
             tmp_path,
             ["sentenca"],
             incluir_anexos=False,
+            progress_cb=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_try_mni_download_reports_expected_total_with_annexes(self, tmp_path):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+
+        anexo_a = MagicMock()
+        anexo_b = MagicMock()
+        processo = MagicMock(
+            documentos=[
+                MagicMock(vinculados=[anexo_a, anexo_b], tipo="sentenca"),
+                MagicMock(vinculados=[], tipo="decisao"),
+            ]
+        )
+        worker.mni_client = AsyncMock()
+        worker.mni_client.consultar_processo.return_value = MagicMock(
+            success=True,
+            processo=processo,
+        )
+        progress_cb = AsyncMock()
+        worker.mni_client.download_documentos = AsyncMock(
+            return_value=[{"nome": "a.pdf"}]
+        )
+
+        files, anexos_pendentes, total_docs = await worker._try_mni_download(
+            "5000005-00.2024.8.08.0001",
+            tmp_path,
+            incluir_anexos=True,
+            progress_cb=progress_cb,
+        )
+
+        assert files == [{"nome": "a.pdf"}]
+        assert anexos_pendentes == 2
+        assert total_docs == 4
+        worker.mni_client.download_documentos.assert_awaited_once_with(
+            processo,
+            tmp_path,
+            None,
+            incluir_anexos=True,
+            progress_cb=progress_cb,
         )

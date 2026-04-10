@@ -484,6 +484,7 @@ tbody tr.clickable { cursor: pointer; }
 .tag--queued     { background: var(--surface3); color: var(--text2); }
 .tag--antigo     { background: var(--yellow-bg); color: var(--yellow); }
 .tag--skipped    { background: var(--surface3); color: var(--text3); }
+.tag--inline     { padding: 2px 8px; font-size: .62rem; }
 
 /* ── Phase Pipeline ── */
 .pipeline {
@@ -545,6 +546,12 @@ tbody tr.clickable { cursor: pointer; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.pipeline__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
 }
 
 /* ── Empty State ── */

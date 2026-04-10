@@ -308,7 +308,12 @@ class DashboardState:
         }
         current.update(
             {
-                "status": event.get("status", current.get("status", "running")),
+                "status": event.get(
+                    "status",
+                    "running"
+                    if current.get("status") == "queued"
+                    else current.get("status", "running"),
+                ),
                 "phase": event.get("phase", current.get("phase", "starting")),
                 "phase_detail": event.get(
                     "phase_detail", current.get("phase_detail", "")
@@ -355,7 +360,12 @@ class DashboardState:
         )
         current.update(
             {
-                "status": "running",
+                "status": event.get(
+                    "status",
+                    "running"
+                    if current.get("status") == "queued"
+                    else current.get("status", "running"),
+                ),
                 "phase": event.get("phase", current.get("phase", "starting")),
                 "phase_detail": event.get("phase_detail", current.get("phase_detail")),
                 "total_docs": int(event.get("total_docs", current.get("total_docs", 0)))
@@ -367,6 +377,7 @@ class DashboardState:
                 "tamanho_bytes": int(
                     event.get("tamanho_bytes", current.get("tamanho_bytes", 0))
                 ),
+                "erro": event.get("erro", current.get("erro")),
             }
         )
         done = sum(1 for proc in processos.values() if proc.get("status") == "done")

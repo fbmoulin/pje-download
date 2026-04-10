@@ -543,6 +543,7 @@ class MNIClient:
         tipos_filtro: list[str] | None = None,
         batch_size: int = 5,
         incluir_anexos: bool = True,
+        progress_cb=None,
     ) -> list[dict]:
         """
         Salva documentos do processo em disco usando estratégia de 2 fases.
@@ -568,6 +569,7 @@ class MNIClient:
         output_dir.mkdir(parents=True, exist_ok=True)
         saved_files: list[dict] = []
         seen_checksums: set[str] = set()
+        local_bytes = 0
 
         # Montar lista de docs principais (MNI só retorna conteúdo destes).
         # Documentos vinculados (anexos) NÃO são acessíveis via parâmetro
@@ -619,6 +621,14 @@ class MNIClient:
             )
             if saved:
                 saved_files.append(saved)
+                local_bytes += int(saved.get("tamanhoBytes", 0) or 0)
+                if progress_cb is not None:
+                    await progress_cb(
+                        file_info=saved,
+                        completed=len(saved_files),
+                        total=len(all_docs),
+                        local_bytes=local_bytes,
+                    )
 
         # ── Fase 2: buscar conteúdo em batches via SOAP ──
         if docs_need_fetch:
@@ -671,6 +681,14 @@ class MNIClient:
                             )
                             if saved:
                                 saved_files.append(saved)
+                                local_bytes += int(saved.get("tamanhoBytes", 0) or 0)
+                                if progress_cb is not None:
+                                    await progress_cb(
+                                        file_info=saved,
+                                        completed=len(saved_files),
+                                        total=len(all_docs),
+                                        local_bytes=local_bytes,
+                                    )
                         else:
                             log.warning(
                                 "mni.download.doc_no_content_after_fetch",
