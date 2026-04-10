@@ -98,6 +98,13 @@ function fmtDocProgress(p = {}) {
   return '\u2014';
 }
 
+function getDocPercent(p = {}) {
+  const { done, total } = getDocStats(p);
+  if (total > 0) return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+  if (done > 0) return 100;
+  return 0;
+}
+
 function inferStrategy(detail = '') {
   const normalized = String(detail || '').toLowerCase();
   if (!normalized) return '';
@@ -206,6 +213,38 @@ function renderPhase(p, isAntigoProc) {
 function statusTag(status) {
   const s = status || 'pending';
   return `<span class="tag tag--${s}">${s}</span>`;
+}
+
+function renderBatchSummary(summary = {}) {
+  const chips = [
+    { key: 'queued', label: 'Na fila', count: Number(summary.pending || summary.queued || 0) },
+    { key: 'running', label: 'Em curso', count: Number(summary.running || 0) },
+    { key: 'done', label: 'Concluidos', count: Number(summary.done || 0) },
+    { key: 'failed', label: 'Falhas', count: Number(summary.failed || 0) },
+  ];
+  return chips.map((chip) => (
+    `<span class="summary-chip summary-chip--${chip.key}">` +
+      `<span class="summary-chip__label">${chip.label}</span>` +
+      `<span class="summary-chip__count">${chip.count}</span>` +
+    `</span>`
+  )).join('');
+}
+
+function renderDocCell(p = {}) {
+  const { done, total } = getDocStats(p);
+  const pct = getDocPercent(p);
+  const countLabel = total > 0 ? `${done}/${total}` : done > 0 ? `${done}` : '\u2014';
+  const hint = total > 0 ? `${pct}%` : done > 0 ? 'parcial' : 'sem total';
+  return `
+    <div class="doc-progress">
+      <div class="doc-progress__label">
+        <span class="doc-progress__count">${esc(countLabel)}</span>
+        <span class="doc-progress__hint">${esc(hint)}</span>
+      </div>
+      <div class="progress-track progress-track--mini">
+        <div class="progress-fill progress-fill--mini" style="width:${pct}%"></div>
+      </div>
+    </div>`;
 }
 
 // ══════════════════════════════════════════
@@ -415,6 +454,7 @@ function renderProgress(data) {
     ? `${downloadedDocs}/${expectedDocs} docs`
     : `${downloadedDocs} docs`;
   $('#progress-label').textContent = `${done + failed} / ${total} processos (${pct}%) \u2014 ${docLabel}, ${fmtBytes(totalBytes)}`;
+  $('#batch-summary').innerHTML = renderBatchSummary(summary);
 
   renderProcessTable($('#processos-tbody'), procs);
 }
@@ -426,13 +466,12 @@ function renderProcessTable(tbody, procs) {
   for (const [num, p] of Object.entries(procs)) {
     const antigo = isAntigo(num);
     const antigoBadge = antigo ? ' <span class="tag tag--antigo">antigo</span>' : '';
-    const docs = fmtDocProgress(p);
     const bytes = p.tamanho_bytes || p.bytes || 0;
     const dur = p.duracao_s;
     html += `<tr>
       <td class="td-mono">${esc(num)}${antigoBadge}</td>
       <td>${renderPhase(p, antigo)}</td>
-      <td>${docs}</td>
+      <td>${renderDocCell(p)}</td>
       <td>${fmtBytes(bytes)}</td>
       <td>${fmtDuration(dur)}</td>
     </tr>`;
@@ -514,6 +553,12 @@ async function viewBatch(batchId) {
       ? `${downloadedDocs}/${expectedDocs} docs`
       : `${downloadedDocs} docs`;
     $('#progress-label').textContent = `${done} / ${total} processos (${pct}%) \u2014 ${docLabel}, ${fmtBytes(totalBytes)}`;
+    $('#batch-summary').innerHTML = renderBatchSummary({
+      pending: Object.values(procs).filter((p) => p.status === 'queued').length,
+      running: Object.values(procs).filter((p) => p.status === 'running').length,
+      done: Object.values(procs).filter((p) => p.status === 'done').length,
+      failed: Object.values(procs).filter((p) => p.status === 'failed').length,
+    });
 
     renderProcessTable($('#processos-tbody'), procs);
     batchCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
