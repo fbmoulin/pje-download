@@ -25,6 +25,7 @@ import csv
 import json
 import sys
 import time
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from pathlib import Path
@@ -34,6 +35,24 @@ import structlog
 import metrics
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.batch-downloader")
+
+
+def _merge_downloaded_files(*groups: list[dict]) -> list[dict]:
+    """Merge file metadata lists, preferring checksum-based deduplication."""
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            key = (
+                item.get("checksum")
+                or f"{item.get('nome')}|{item.get('tamanhoBytes')}|{item.get('fonte')}"
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    return merged
+
 
 # NOTA: mni_client é importado DEPOIS de _load_env() para que as env vars
 # MNI_USERNAME/MNI_PASSWORD/MNI_TRIBUNAL sejam lidas corretamente.
@@ -75,6 +94,7 @@ class BatchProgress:
     progress_file: Path | None = None
     _last_save: float = field(default=0.0, repr=False)
     _save_interval: float = field(default=0.5, repr=False)
+    _save_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add(self, numero: str) -> None:
         if numero not in self.processos:
@@ -105,36 +125,41 @@ class BatchProgress:
         """Persiste progresso em disco para retomada (debounced 500ms)."""
         if not self.progress_file:
             return
-        now = time.monotonic()
-        if not force and (now - self._last_save) < self._save_interval:
-            return
-        self._last_save = now
-        data = {
-            "updated_at": datetime.now(UTC).isoformat(),
-            "summary": {
-                "total": self.total,
-                "done": self.done,
-                "failed": self.failed,
-                "pending": self.pending,
-            },
-            "processos": {
-                num: {
-                    "status": ps.status,
-                    "phase": ps.phase,
-                    "phase_detail": ps.phase_detail,
-                    "total_docs": ps.total_docs,
-                    "docs_baixados": ps.docs_baixados,
-                    "tamanho_bytes": ps.tamanho_bytes,
-                    "erro": ps.erro,
-                    "duracao_s": ps.duracao_s,
-                }
-                for num, ps in self.processos.items()
-            },
-        }
-        # Atomic write: temp file + rename prevents corruption
-        tmp = self.progress_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(self.progress_file)
+        with self._save_lock:
+            now = time.monotonic()
+            if not force and (now - self._last_save) < self._save_interval:
+                return
+
+            self.progress_file.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "updated_at": datetime.now(UTC).isoformat(),
+                "summary": {
+                    "total": self.total,
+                    "done": self.done,
+                    "failed": self.failed,
+                    "pending": self.pending,
+                },
+                "processos": {
+                    num: {
+                        "status": ps.status,
+                        "phase": ps.phase,
+                        "phase_detail": ps.phase_detail,
+                        "total_docs": ps.total_docs,
+                        "docs_baixados": ps.docs_baixados,
+                        "tamanho_bytes": ps.tamanho_bytes,
+                        "erro": ps.erro,
+                        "duracao_s": ps.duracao_s,
+                    }
+                    for num, ps in self.processos.items()
+                },
+            }
+            # Atomic write: temp file + rename prevents corruption
+            tmp = self.progress_file.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            tmp.replace(self.progress_file)
+            self._last_save = now
 
     @classmethod
     def load(cls, path: Path) -> "BatchProgress":
@@ -192,19 +217,42 @@ def load_processos_from_file(path: Path) -> list[str]:
         return []
 
     if suffix == ".csv":
-        reader = csv.DictReader(text.splitlines())
-        # Tentar campo "numero" ou "numeroProcesso"
-        rows = list(reader)
-        if rows:
+        rows = list(csv.reader(text.splitlines()))
+        if not rows:
+            return []
+
+        header = [cell.strip().lower() for cell in rows[0]]
+        known_headers = {"numero", "numeroprocesso", "processo"}
+        if any(cell in known_headers for cell in header):
             for field_name in ("numero", "numeroProcesso", "processo"):
-                if field_name in rows[0]:
+                lowered = field_name.lower()
+                if lowered in header:
+                    index = header.index(lowered)
                     return [
-                        r[field_name].strip() for r in rows if r[field_name].strip()
+                        row[index].strip()
+                        for row in rows[1:]
+                        if len(row) > index and row[index].strip()
                     ]
-        # Fallback: primeira coluna
-        reader2 = csv.reader(text.splitlines())
-        next(reader2, None)  # skip header
-        return [row[0].strip() for row in reader2 if row and row[0].strip()]
+            return [row[0].strip() for row in rows[1:] if row and row[0].strip()]
+
+        try:
+            has_header = csv.Sniffer().has_header(text)
+        except csv.Error:
+            has_header = False
+
+        if has_header:
+            for field_name in ("numero", "numeroProcesso", "processo"):
+                lowered = field_name.lower()
+                if lowered in header:
+                    index = header.index(lowered)
+                    return [
+                        row[index].strip()
+                        for row in rows[1:]
+                        if len(row) > index and row[index].strip()
+                    ]
+            return [row[0].strip() for row in rows[1:] if row and row[0].strip()]
+
+        return [row[0].strip() for row in rows if row and row[0].strip()]
 
     # TXT: um número por linha
     return [
@@ -275,52 +323,40 @@ async def download_batch(
 
     mni_user = os.getenv("MNI_USERNAME", "")
     mni_pass = os.getenv("MNI_PASSWORD", "")
-    if not mni_user or not mni_pass:
-        error_msg = "MNI_USERNAME ou MNI_PASSWORD não configurados"
-        log.error("batch.mni_credentials_missing")
-        for ps in progress.processos.values():
-            if ps.status == "pending":
-                ps.status = "failed"
-                ps.phase = "failed"
-                ps.phase_detail = error_msg
-                ps.erro = error_msg
-        progress.save(force=True)
-        return progress
-
-    # Inicializar cliente MNI
-    client = MNIClient()
-    health = await client.health_check()
-    mni_available = health["status"] == "healthy"
-    if not mni_available:
-        log.warning(
-            "batch.mni_unhealthy",
-            error=health.get("error"),
-            fallback="pje_session (Playwright)",
+    mni_credentials_ok = bool(mni_user and mni_pass)
+    missing_creds_msg = "MNI_USERNAME ou MNI_PASSWORD não configurados"
+    if not mni_credentials_ok:
+        log.error(
+            "batch.mni_credentials_missing",
+            error=missing_creds_msg,
         )
+
+    # Inicializar cliente MNI quando houver credenciais válidas
+    client = None
+    mni_available = False
+    health = {"status": "unavailable"}
+    if mni_credentials_ok:
+        client = MNIClient()
+        health = await client.health_check()
+        mni_available = health["status"] == "healthy"
+        if not mni_available:
+            log.warning(
+                "batch.mni_unhealthy",
+                error=health.get("error"),
+                fallback="pje_session (Playwright)",
+            )
 
     # Inicializar cliente Playwright como fallback quando MNI indisponível
     from pje_session import PJeSessionClient, SESSION_FILE
 
     pje_client: PJeSessionClient | None = None
-    if not mni_available and SESSION_FILE.exists():
+    if SESSION_FILE.exists():
         pje_client = PJeSessionClient()
-        log.info("batch.pje_session_fallback", session=str(SESSION_FILE))
-    elif not mni_available:
-        log.error(
-            "batch.no_fallback",
-            hint="Execute: python pje_session.py login",
+        log.info(
+            "batch.pje_session_available",
+            session=str(SESSION_FILE),
+            role="fallback" if not mni_available else "annex_complement",
         )
-        for ps in progress.processos.values():
-            if ps.status == "pending":
-                ps.status = "failed"
-                ps.phase = "failed"
-                ps.phase_detail = (
-                    "MNI indisponível e sessão PJe não encontrada. "
-                    "Execute: python pje_session.py login"
-                )
-                ps.erro = health.get("error", "MNI unhealthy")
-        progress.save(force=True)
-        return progress
 
     # Detectar processos antigos
     antigos = [n for n in numeros if is_processo_antigo(n)]
@@ -404,7 +440,7 @@ async def download_batch(
                         gdrive_files = await download_gdrive_folder(
                             gdrive_url, gdrive_dir
                         )
-                        all_files.extend(gdrive_files)
+                        all_files = _merge_downloaded_files(all_files, gdrive_files)
                         log.info(
                             "batch.processo.gdrive_done",
                             processo=numero,
@@ -417,6 +453,45 @@ async def download_batch(
                             note="Processo antigo sem link do Google Drive; tentando MNI apenas",
                         )
 
+                if not mni_available and pje_client is None:
+                    if all_files:
+                        ps.docs_baixados = len(all_files)
+                        ps.tamanho_bytes = sum(f["tamanhoBytes"] for f in all_files)
+                        ps.status = "done"
+                        ps.phase = "done"
+                        ps.phase_detail = f"GDrive: {len(all_files)} docs"
+                        ps.fim = time.monotonic()
+                        metrics.batch_processos_total.labels(status="done").inc()
+                        metrics.batch_docs_total.inc(ps.docs_baixados)
+                        metrics.batch_bytes_total.inc(ps.tamanho_bytes)
+                        progress.save(force=True)
+                        return
+
+                    ps.status = "failed"
+                    ps.phase = "failed"
+                    if not mni_credentials_ok:
+                        ps.phase_detail = (
+                            "MNI sem credenciais e sem fallback de sessão; "
+                            "forneça MNI_USERNAME/MNI_PASSWORD ou um link do Google Drive"
+                        )
+                    else:
+                        ps.phase_detail = (
+                            "MNI indisponível e sessão PJe não encontrada. "
+                            "Execute: python pje_session.py login"
+                        )
+                    ps.erro = (
+                        missing_creds_msg if not mni_credentials_ok else ps.phase_detail
+                    )
+                    ps.fim = time.monotonic()
+                    metrics.batch_processos_total.labels(status="failed").inc()
+                    log.warning(
+                        "batch.processo.failed",
+                        processo=numero,
+                        error=ps.erro,
+                    )
+                    progress.save(force=True)
+                    return
+
                 # ── PLAYWRIGHT FALLBACK (quando MNI indisponível) ──
                 if not mni_available and pje_client is not None:
                     ps.phase = "pje_session"
@@ -428,18 +503,24 @@ async def download_batch(
                         pje_files = await pje_client.download_processo(
                             numero, proc_dir, include_anexos=incluir_anexos
                         )
-                        all_files.extend(pje_files)
-                        if pje_files:
+                        all_files = _merge_downloaded_files(all_files, pje_files)
+                        if all_files:
                             ps.docs_baixados = len(all_files)
                             ps.tamanho_bytes = sum(f["tamanhoBytes"] for f in all_files)
                             ps.status = "done"
                             ps.phase = "done"
-                            ps.phase_detail = f"Playwright: {len(pje_files)} docs"
+                            ps.phase_detail = f"Playwright: {len(all_files)} docs"
                             ps.fim = time.monotonic()
                             metrics.batch_processos_total.labels(status="done").inc()
                             metrics.batch_docs_total.inc(ps.docs_baixados)
                             metrics.batch_bytes_total.inc(ps.tamanho_bytes)
                             return
+                        ps.status = "failed"
+                        ps.phase = "failed"
+                        ps.phase_detail = "Playwright não retornou documentos"
+                        ps.erro = ps.phase_detail
+                        ps.fim = time.monotonic()
+                        metrics.batch_processos_total.labels(status="failed").inc()
                     except Exception as exc:
                         log.warning(
                             "batch.pje_session_failed", processo=numero, error=str(exc)
@@ -512,13 +593,77 @@ async def download_batch(
                     batch_size=batch_size,
                     incluir_anexos=incluir_anexos,
                 )
-                all_files.extend(mni_files)
+                all_files = _merge_downloaded_files(all_files, mni_files)
+
+                anexos_warning = None
+                if incluir_anexos and total_vinc:
+                    if pje_client is not None:
+                        ps.phase = "pje_session"
+                        ps.phase_detail = (
+                            f"Complementando {total_vinc} anexo(s) via sessão PJe"
+                        )
+                        progress.save()
+                        try:
+                            session_files = await pje_client.download_processo(
+                                numero,
+                                proc_dir,
+                                include_anexos=True,
+                                include_principais=False,
+                            )
+                            if session_files:
+                                all_files = _merge_downloaded_files(
+                                    all_files,
+                                    session_files,
+                                )
+                                log.info(
+                                    "batch.processo.anexos_complemented",
+                                    processo=numero,
+                                    anexos_pendentes=total_vinc,
+                                    total_arquivos=len(all_files),
+                                )
+                            else:
+                                anexos_warning = (
+                                    f"MNI indicou {total_vinc} anexo(s), mas a "
+                                    "complementação via sessão não retornou anexos"
+                                )
+                                log.warning(
+                                    "batch.processo.anexos_complement_empty",
+                                    processo=numero,
+                                    anexos_pendentes=total_vinc,
+                                )
+                        except Exception as exc:
+                            anexos_warning = (
+                                f"MNI indicou {total_vinc} anexo(s), mas a "
+                                f"sessão PJe falhou ao complementar: {exc}"
+                            )
+                            log.warning(
+                                "batch.processo.anexos_complement_failed",
+                                processo=numero,
+                                anexos_pendentes=total_vinc,
+                                error=str(exc),
+                            )
+                    else:
+                        anexos_warning = (
+                            f"MNI indicou {total_vinc} anexo(s) vinculados, "
+                            "mas não há sessão PJe disponível para complementar"
+                        )
+                        log.warning(
+                            "batch.processo.anexos_pending",
+                            processo=numero,
+                            anexos_pendentes=total_vinc,
+                        )
 
                 ps.docs_baixados = len(all_files)
                 ps.tamanho_bytes = sum(f["tamanhoBytes"] for f in all_files)
                 ps.status = "done"
                 ps.phase = "done"
-                ps.phase_detail = f"{ps.docs_baixados} docs, {round(ps.tamanho_bytes / 1024 / 1024, 1)} MB"
+                ps.phase_detail = (
+                    f"{ps.docs_baixados} docs, "
+                    f"{round(ps.tamanho_bytes / 1024 / 1024, 1)} MB"
+                )
+                if anexos_warning:
+                    ps.phase_detail = f"{ps.phase_detail} ({anexos_warning})"
+                    ps.erro = anexos_warning
                 ps.fim = time.monotonic()
                 metrics.batch_processos_total.labels(status="done").inc()
                 metrics.batch_docs_total.inc(ps.docs_baixados)

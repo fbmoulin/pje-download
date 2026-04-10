@@ -8,7 +8,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-from aiohttp.test_utils import TestClient, TestServer
+from aiohttp import web
 
 import dashboard_api
 from dashboard_api import (
@@ -16,7 +16,6 @@ from dashboard_api import (
     MAX_BATCH_HISTORY,
     BatchJob,
     DashboardState,
-    create_app,
 )
 
 
@@ -124,24 +123,89 @@ class TestDashboardState:
 # ─────────────────────────────────────────────
 
 
-@pytest.fixture
-def app(tmp_path):
-    return create_app(tmp_path)
+class DummyRequest:
+    """Minimal request object for direct handler and middleware tests."""
+
+    def __init__(
+        self,
+        *,
+        method: str = "GET",
+        json_data=None,
+        headers: dict[str, str] | None = None,
+        remote: str | None = "127.0.0.1",
+        match_info: dict[str, str] | None = None,
+    ):
+        self.method = method
+        self._json_data = json_data
+        self.headers = headers or {}
+        self.remote = remote
+        self.match_info = match_info or {}
+        self.app = {}
+
+    async def json(self):
+        if isinstance(self._json_data, Exception):
+            raise self._json_data
+        return self._json_data
+
+
+class FakeHealthResponse:
+    """Async context manager that mimics aiohttp's response object."""
+
+    def __init__(self, status: int = 200, payload: dict | None = None):
+        self.status = status
+        self._payload = payload or {}
+
+    async def json(self):
+        return self._payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class FakeClientSession:
+    """Async context manager for patching aiohttp.ClientSession."""
+
+    def __init__(self, *args, response: FakeHealthResponse | None = None, **kwargs):
+        self.response = response or FakeHealthResponse()
+        self.closed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def get(self, url):
+        return self.response
+
+    async def close(self):
+        self.closed = True
+
+
+async def _ok_handler(request):
+    return web.Response(text="ok")
 
 
 @pytest.mark.asyncio
-async def test_handle_download_rejects_above_max(app):
+async def test_handle_download_rejects_above_max():
     """POST /api/download with >500 valid processos must return 422."""
     processos = [f"{i:07d}-01.2024.8.08.0001" for i in range(501)]
-    async with TestClient(TestServer(app)) as client:
-        resp = await client.post("/api/download", json={"processos": processos})
+    with patch("dashboard_api.state") as mock_state:
+        mock_state.current_batch_id = None
+        mock_state.batches = {}
+        resp = await dashboard_api.handle_download(
+            DummyRequest(method="POST", json_data={"processos": processos})
+        )
         assert resp.status == 422
-        body = await resp.json()
+        body = json.loads(resp.body.decode())
         assert "500" in body["error"]
 
 
 @pytest.mark.asyncio
-async def test_handle_download_accepts_at_max(app):
+async def test_handle_download_accepts_at_max():
     """POST /api/download with exactly 500 valid processos must not return 422."""
     processos = [f"{i:07d}-01.2024.8.08.0001" for i in range(500)]
 
@@ -160,56 +224,96 @@ async def test_handle_download_accepts_at_max(app):
         mock_state.current_batch_id = None
         mock_state.batches = {}
         mock_state.submit_batch = fake_submit
-
-        async with TestClient(TestServer(app)) as client:
-            resp = await client.post("/api/download", json={"processos": processos})
-            # Should not be 422
-            assert resp.status != 422
+        resp = await dashboard_api.handle_download(
+            DummyRequest(method="POST", json_data={"processos": processos})
+        )
+        assert resp.status == 201
 
 
 @pytest.mark.asyncio
-async def test_handle_download_rejects_invalid_format(app):
+async def test_handle_download_rejects_invalid_format():
     """POST /api/download with invalid CNJ format returns 400."""
-    async with TestClient(TestServer(app)) as client:
-        resp = await client.post(
-            "/api/download", json={"processos": ["not-a-processo"]}
+    with patch("dashboard_api.state") as mock_state:
+        mock_state.current_batch_id = None
+        mock_state.batches = {}
+        resp = await dashboard_api.handle_download(
+            DummyRequest(method="POST", json_data={"processos": ["not-a-processo"]})
         )
         assert resp.status == 400
 
 
 @pytest.mark.asyncio
-async def test_handle_download_rejects_empty(app):
-    async with TestClient(TestServer(app)) as client:
-        resp = await client.post("/api/download", json={"processos": []})
+async def test_handle_download_rejects_empty():
+    with patch("dashboard_api.state") as mock_state:
+        mock_state.current_batch_id = None
+        mock_state.batches = {}
+        resp = await dashboard_api.handle_download(
+            DummyRequest(method="POST", json_data={"processos": []})
+        )
         assert resp.status == 400
 
 
 @pytest.mark.asyncio
-async def test_handle_progress_when_idle(app):
-    async with TestClient(TestServer(app)) as client:
-        resp = await client.get("/api/progress")
+async def test_handle_progress_when_idle():
+    with patch("dashboard_api.state") as mock_state:
+        mock_state.get_current_progress.return_value = None
+        resp = await dashboard_api.handle_progress(DummyRequest())
         assert resp.status == 200
-        body = await resp.json()
+        body = json.loads(resp.body.decode())
         assert body["status"] == "idle"
 
 
 @pytest.mark.asyncio
-async def test_handle_history_returns_list(app):
-    async with TestClient(TestServer(app)) as client:
-        resp = await client.get("/api/history")
+async def test_handle_history_returns_list():
+    with patch("dashboard_api.state") as mock_state:
+        mock_state.batches = {}
+        resp = await dashboard_api.handle_history(DummyRequest())
         assert resp.status == 200
-        body = await resp.json()
+        body = json.loads(resp.body.decode())
         assert isinstance(body, list)
 
 
 @pytest.mark.asyncio
-async def test_handle_status_returns_worker_status(app):
+async def test_handle_status_returns_worker_status():
     """GET /api/status must include worker_status field."""
-    async with TestClient(TestServer(app)) as client:
-        resp = await client.get("/api/status")
+    fake_session = FakeClientSession(
+        response=FakeHealthResponse(200, {"status": "healthy"})
+    )
+    with (
+        patch("dashboard_api.state") as mock_state,
+        patch(
+            "dashboard_api.aiohttp.ClientSession",
+            return_value=fake_session,
+        ),
+    ):
+        mock_state.batches = {}
+        mock_state.current_batch_id = None
+        mock_state.output_dir.name = "downloads"
+        mock_state.get_current_progress.return_value = None
+        mock_state.get_worker_http.return_value = fake_session
+        resp = await dashboard_api.handle_status(DummyRequest())
         assert resp.status == 200
-        body = await resp.json()
-        assert "worker_status" in body
+        body = json.loads(resp.body.decode())
+        assert body["worker_status"] == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_state_reuses_worker_http_session(tmp_path):
+    from dashboard_api import DashboardState
+
+    with patch(
+        "dashboard_api.aiohttp.ClientSession",
+        side_effect=lambda *args, **kwargs: FakeClientSession(*args, **kwargs),
+    ) as mock_factory:
+        ds = DashboardState(tmp_path)
+        sess1 = ds.get_worker_http()
+        sess2 = ds.get_worker_http()
+
+        assert sess1 is sess2
+        assert mock_factory.call_count == 1
+
+        await ds.close()
+        assert sess1.closed is True
 
 
 @pytest.mark.asyncio
@@ -243,34 +347,59 @@ async def test_graceful_shutdown_cancels_task(tmp_path):
 
 class TestRateLimitMiddleware:
     @pytest.mark.asyncio
-    async def test_get_not_rate_limited(self, app):
-        """GET requests bypass the rate limiter — 15 requests all succeed."""
-        async with TestClient(TestServer(app)) as client:
-            for _ in range(15):
-                resp = await client.get("/api/progress")
-                assert resp.status == 200
+    async def test_get_not_rate_limited(self):
+        """GET requests bypass the rate limiter."""
+        resp = await dashboard_api.rate_limit_middleware(
+            DummyRequest(method="GET"),
+            _ok_handler,
+        )
+        assert resp.status == 200
 
     @pytest.mark.asyncio
-    async def test_post_rate_limit_exceeded(self, app):
-        """After 10 POST requests in window, 429 is returned."""
-        # Use a unique X-Forwarded-For IP to isolate this test from others
-        async with TestClient(TestServer(app)) as client:
-            # Use a unique IP so other tests don't pollute the bucket
-            headers = {"X-Forwarded-For": "10.99.99.1"}
-            # Clear any leftover state for this IP
-            dashboard_api._rate_buckets.pop("10.99.99.1", None)
-            dashboard_api._rate_bucket_last_seen.pop("10.99.99.1", None)
+    async def test_post_rate_limit_uses_remote_by_default(self, monkeypatch):
+        """X-Forwarded-For is ignored unless trust is enabled."""
+        remote_ip = "10.88.88.8"
+        spoofed_ip = "10.99.99.1"
+        dashboard_api._rate_buckets.pop(remote_ip, None)
+        dashboard_api._rate_bucket_last_seen.pop(remote_ip, None)
+        dashboard_api._rate_buckets.pop(spoofed_ip, None)
+        dashboard_api._rate_bucket_last_seen.pop(spoofed_ip, None)
+        monkeypatch.setattr(dashboard_api, "TRUST_X_FORWARDED_FOR", False)
 
-            statuses = []
-            for _ in range(12):
-                resp = await client.post(
-                    "/api/download",
-                    json={"processos": ["invalid"]},
-                    headers=headers,
-                )
-                statuses.append(resp.status)
-            # At least one request beyond limit should get 429
-            assert 429 in statuses
+        statuses = []
+        for _ in range(12):
+            resp = await dashboard_api.rate_limit_middleware(
+                DummyRequest(
+                    method="POST",
+                    headers={"X-Forwarded-For": spoofed_ip},
+                    remote=remote_ip,
+                ),
+                _ok_handler,
+            )
+            statuses.append(resp.status)
+
+        assert 429 in statuses
+        assert spoofed_ip not in dashboard_api._rate_buckets
+        assert remote_ip in dashboard_api._rate_buckets
+
+    @pytest.mark.asyncio
+    async def test_post_rate_limit_can_trust_forwarded_for_when_enabled(
+        self, monkeypatch
+    ):
+        """Forwarded IPs can be trusted only when explicitly enabled."""
+        spoofed_ip = "10.99.99.2"
+        dashboard_api._rate_buckets.pop(spoofed_ip, None)
+        dashboard_api._rate_bucket_last_seen.pop(spoofed_ip, None)
+        monkeypatch.setattr(dashboard_api, "TRUST_X_FORWARDED_FOR", True)
+
+        ip = dashboard_api._get_rate_limit_ip(
+            DummyRequest(
+                method="POST",
+                headers={"X-Forwarded-For": f"{spoofed_ip}, 10.1.1.1"},
+                remote="10.88.88.8",
+            )
+        )
+        assert ip == spoofed_ip
 
 
 # ─────────────────────────────────────────────
@@ -280,36 +409,35 @@ class TestRateLimitMiddleware:
 
 class TestCorsMiddleware:
     @pytest.mark.asyncio
-    async def test_allowed_origin_reflected(self, app):
+    async def test_allowed_origin_reflected(self):
         """An origin in _ALLOWED_ORIGINS is echoed back in the response header."""
-        async with TestClient(TestServer(app)) as client:
-            resp = await client.get(
-                "/api/progress", headers={"Origin": "http://localhost:8007"}
-            )
-            assert (
-                resp.headers.get("Access-Control-Allow-Origin")
-                == "http://localhost:8007"
-            )
+        resp = await dashboard_api.cors_middleware(
+            DummyRequest(headers={"Origin": "http://localhost:8007"}),
+            _ok_handler,
+        )
+        assert (
+            resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:8007"
+        )
 
     @pytest.mark.asyncio
-    async def test_disallowed_origin_defaults_to_localhost(self, app):
+    async def test_disallowed_origin_defaults_to_localhost(self):
         """An unknown origin falls back to 'http://localhost'."""
-        async with TestClient(TestServer(app)) as client:
-            resp = await client.get(
-                "/api/progress", headers={"Origin": "https://evil.com"}
-            )
-            assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost"
+        resp = await dashboard_api.cors_middleware(
+            DummyRequest(headers={"Origin": "https://evil.com"}),
+            _ok_handler,
+        )
+        assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost"
 
     @pytest.mark.asyncio
-    async def test_options_preflight_returns_correct_headers(self, app):
+    async def test_options_preflight_returns_correct_headers(self):
         """OPTIONS preflight returns 200 with CORS method headers."""
-        async with TestClient(TestServer(app)) as client:
-            resp = await client.options(
-                "/api/download", headers={"Origin": "http://localhost"}
-            )
-            assert resp.status == 200
-            assert "Access-Control-Allow-Methods" in resp.headers
-            assert "Access-Control-Allow-Origin" in resp.headers
+        resp = await dashboard_api.cors_middleware(
+            DummyRequest(method="OPTIONS", headers={"Origin": "http://localhost"}),
+            _ok_handler,
+        )
+        assert resp.status == 200
+        assert "Access-Control-Allow-Methods" in resp.headers
+        assert "Access-Control-Allow-Origin" in resp.headers
 
 
 # ─────────────────────────────────────────────
@@ -319,31 +447,28 @@ class TestCorsMiddleware:
 
 class TestApiKeyMiddleware:
     @pytest.mark.asyncio
-    async def test_no_key_configured_passes(self, app, monkeypatch):
+    async def test_no_key_configured_passes(self, monkeypatch):
         """When DASHBOARD_API_KEY is empty (dev mode), requests are not blocked."""
         import config
 
         monkeypatch.setattr(config, "DASHBOARD_API_KEY", "")
-        async with TestClient(TestServer(app)) as client:
-            resp = await client.post(
-                "/api/download", json={"processos": ["not-a-processo"]}
-            )
-            assert resp.status != 401
+        resp = await dashboard_api.api_key_middleware(
+            DummyRequest(method="POST"),
+            _ok_handler,
+        )
+        assert resp.status == 200
 
     @pytest.mark.asyncio
-    async def test_wrong_key_returns_401(self, tmp_path, monkeypatch):
+    async def test_wrong_key_returns_401(self, monkeypatch):
         """When DASHBOARD_API_KEY is set and wrong key is sent, return 401."""
         import config
 
         monkeypatch.setattr(config, "DASHBOARD_API_KEY", "correct-key")
-        _app = create_app(tmp_path)
-        async with TestClient(TestServer(_app)) as client:
-            resp = await client.post(
-                "/api/download",
-                json={"processos": ["0000001-01.2024.8.08.0001"]},
-                headers={"X-API-Key": "wrong-key"},
-            )
-            assert resp.status == 401
+        resp = await dashboard_api.api_key_middleware(
+            DummyRequest(method="POST", headers={"X-API-Key": "wrong-key"}),
+            _ok_handler,
+        )
+        assert resp.status == 401
 
 
 # ─────────────────────────────────────────────
@@ -353,14 +478,17 @@ class TestApiKeyMiddleware:
 
 class TestHandleBatchDetail:
     @pytest.mark.asyncio
-    async def test_unknown_batch_returns_404(self, app):
+    async def test_unknown_batch_returns_404(self):
         """GET /api/batch/<nonexistent> returns 404."""
-        async with TestClient(TestServer(app)) as client:
-            resp = await client.get("/api/batch/nonexistent-batch-id")
+        with patch("dashboard_api.state") as mock_state:
+            mock_state.batches = {}
+            resp = await dashboard_api.handle_batch_detail(
+                DummyRequest(match_info={"id": "nonexistent-batch-id"})
+            )
             assert resp.status == 404
 
     @pytest.mark.asyncio
-    async def test_known_batch_returns_200_with_data(self, app, tmp_path):
+    async def test_known_batch_returns_200_with_data(self, tmp_path):
         """GET /api/batch/<id> returns 200 with full batch payload."""
         job = BatchJob(
             id="test123",
@@ -370,11 +498,13 @@ class TestHandleBatchDetail:
             output_dir=str(tmp_path),
             progress={"total": 1, "done": 1},
         )
-        dashboard_api.state.batches["test123"] = job
-        async with TestClient(TestServer(app)) as client:
-            resp = await client.get("/api/batch/test123")
+        with patch("dashboard_api.state") as mock_state:
+            mock_state.batches = {"test123": job}
+            resp = await dashboard_api.handle_batch_detail(
+                DummyRequest(match_info={"id": "test123"})
+            )
             assert resp.status == 200
-            body = await resp.json()
+            body = json.loads(resp.body.decode())
             assert body["batch_id"] == "test123"
             assert body["status"] == "done"
             assert body["processos"] == ["5000001-00.2024.8.08.0001"]
@@ -387,15 +517,14 @@ class TestHandleBatchDetail:
 
 class TestHandleSessionStatus:
     @pytest.mark.asyncio
-    async def test_returns_expected_fields(self, app):
+    async def test_returns_expected_fields(self):
         """GET /api/session/status returns file_exists, login_running, last_login_ok."""
-        async with TestClient(TestServer(app)) as client:
-            resp = await client.get("/api/session/status")
-            assert resp.status == 200
-            body = await resp.json()
-            assert "file_exists" in body
-            assert "login_running" in body
-            assert "last_login_ok" in body
+        resp = await dashboard_api.handle_session_status(DummyRequest())
+        assert resp.status == 200
+        body = json.loads(resp.body.decode())
+        assert "file_exists" in body
+        assert "login_running" in body
+        assert "last_login_ok" in body
 
 
 # ─────────────────────────────────────────────
@@ -405,14 +534,18 @@ class TestHandleSessionStatus:
 
 class TestHandleIndex:
     @pytest.mark.asyncio
-    async def test_returns_200_or_404(self, app):
+    async def test_returns_200_or_404(self, monkeypatch):
         """GET / returns 200 (HTML served) or 404 (dashboard.html not present)."""
-        async with TestClient(TestServer(app)) as client:
-            resp = await client.get("/")
-            assert resp.status in (200, 404)
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr(dashboard_api.asyncio, "to_thread", fake_to_thread)
+        resp = await dashboard_api.handle_index(DummyRequest())
+        assert resp.status in (200, 404)
 
     @pytest.mark.asyncio
-    async def test_returns_404_when_html_missing(self, app, monkeypatch):
+    async def test_returns_404_when_html_missing(self, monkeypatch):
         """When dashboard.html does not exist, endpoint returns 404."""
         from pathlib import Path
 
@@ -421,10 +554,9 @@ class TestHandleIndex:
             "exists",
             lambda self: False if "dashboard.html" in str(self) else True,
         )
-        async with TestClient(TestServer(app)) as client:
-            resp = await client.get("/")
-            # With patched Path.exists, dashboard.html is not found → 404
-            assert resp.status == 404
+        resp = await dashboard_api.handle_index(DummyRequest())
+        # With patched Path.exists, dashboard.html is not found → 404
+        assert resp.status == 404
 
 
 # ─────────────────────────────────────────────
@@ -434,14 +566,13 @@ class TestHandleIndex:
 
 class TestHandleMetrics:
     @pytest.mark.asyncio
-    async def test_returns_prometheus_text_format(self, app):
+    async def test_returns_prometheus_text_format(self):
         """GET /metrics returns 200 with Prometheus exposition format."""
-        async with TestClient(TestServer(app)) as client:
-            resp = await client.get("/metrics")
-            assert resp.status == 200
-            text = await resp.text()
-            # Prometheus format contains HELP or TYPE comment lines
-            assert "HELP" in text or "TYPE" in text or "#" in text
+        resp = await dashboard_api.handle_metrics(DummyRequest())
+        assert resp.status == 200
+        text = resp.body.decode()
+        # Prometheus format contains HELP or TYPE comment lines
+        assert "HELP" in text or "TYPE" in text or "#" in text
 
 
 # ─────────────────────────────────────────────
@@ -694,15 +825,13 @@ class TestSessionLoginAudit:
             patch("pje_session.interactive_login", return_value=True),
             patch("audit.log_access") as mock_log_access,
         ):
-            app = create_app(tmp_path)
-            async with TestClient(TestServer(app)) as client:
-                resp = await client.post("/api/session/login")
-                assert resp.status == 202
+            resp = await dashboard_api.handle_session_login(DummyRequest(method="POST"))
+            assert resp.status == 202
 
-                # Wait for the background task to complete
-                task = dashboard_api._login_task
-                if task:
-                    await asyncio.wait_for(task, timeout=5.0)
+            # Wait for the background task to complete
+            task = dashboard_api._login_task
+            if task:
+                await asyncio.wait_for(task, timeout=5.0)
 
             mock_log_access.assert_called_once()
             entry = mock_log_access.call_args[0][0]

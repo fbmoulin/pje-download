@@ -60,6 +60,16 @@
       <span style="color:var(--text2);font-size:.8rem;white-space:nowrap">Sessão PJe:</span>
       <span id="session-status-text" style="font-size:.8rem;color:var(--text2)">verificando…</span>
     </div>
+    <div style="display:flex;align-items:center;gap:8px;min-width:260px;flex:1;justify-content:flex-end">
+      <label for="dashboard-api-key" style="color:var(--text2);font-size:.8rem;white-space:nowrap">API Key</label>
+      <input
+        id="dashboard-api-key"
+        type="password"
+        placeholder="Opcional"
+        autocomplete="off"
+        style="max-width:220px;width:100%;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:rgba(255,255,255,.7)"
+      >
+    </div>
     <div style="display:flex;gap:8px;flex-shrink:0">
       <button class="btn btn--ghost btn--sm" id="btn-session-verify" onclick="sessionVerify()" title="Verifica se a sessão ainda é válida no PJe (abre browser headless)">Verificar</button>
       <button class="btn btn--primary btn--sm" id="btn-session-login" onclick="sessionLogin()" style="font-size:.75rem;padding:4px 12px">Fazer Login</button>

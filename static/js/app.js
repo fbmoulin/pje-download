@@ -17,6 +17,7 @@ const TOAST_DURATION_MS = 5000;
 let pollTimer = null;
 let pollInterval = POLL_INTERVAL_MIN;
 let currentView = 'main'; // 'main' | 'batch-detail'
+const API_KEY_STORAGE_KEY = 'pje-dashboard-api-key';
 
 // ── DOM helpers ──
 
@@ -44,6 +45,16 @@ function el(tag, attrs = {}, children = []) {
     else if (c) node.appendChild(c);
   }
   return node;
+}
+
+function getApiKey() {
+  return (localStorage.getItem(API_KEY_STORAGE_KEY) || '').trim();
+}
+
+function setApiKey(value) {
+  const normalized = (value || '').trim();
+  if (normalized) localStorage.setItem(API_KEY_STORAGE_KEY, normalized);
+  else localStorage.removeItem(API_KEY_STORAGE_KEY);
 }
 
 // ── Formatters ──
@@ -167,7 +178,10 @@ function statusTag(status) {
 // ══════════════════════════════════════════
 
 async function apiFetch(path, opts = {}) {
-  const res = await fetch(API + path, opts);
+  const headers = new Headers(opts.headers || {});
+  const apiKey = getApiKey();
+  if (apiKey && !headers.has('X-API-Key')) headers.set('X-API-Key', apiKey);
+  const res = await fetch(API + path, { ...opts, headers });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `HTTP ${res.status}`);
@@ -492,6 +506,13 @@ function updateClock() {
 // ══════════════════════════════════════════
 
 async function init() {
+  const apiKeyInput = $('#dashboard-api-key');
+  if (apiKeyInput) {
+    apiKeyInput.value = getApiKey();
+    apiKeyInput.addEventListener('change', (e) => setApiKey(e.target.value));
+    apiKeyInput.addEventListener('blur', (e) => setApiKey(e.target.value));
+  }
+
   updateClock();
   setInterval(updateClock, 1000);
 
@@ -572,7 +593,9 @@ async function sessionLogin() {
   const btn = $('#btn-session-login');
   btn.disabled = true;
   try {
-    const res = await fetch(`${API}/api/session/login`, { method: 'POST' });
+    const apiKey = getApiKey();
+    const headers = apiKey ? { 'X-API-Key': apiKey } : {};
+    const res = await fetch(`${API}/api/session/login`, { method: 'POST', headers });
     if (res.status === 409) {
       toast('Login já está em andamento', 'warning');
     } else if (res.status === 202) {
@@ -596,7 +619,9 @@ async function sessionVerify() {
   btn.textContent = 'Verificando…';
   _setSessionUI('running', 'Abrindo browser headless…', true);
   try {
-    const res = await fetch(`${API}/api/session/verify`, { method: 'POST' });
+    const apiKey = getApiKey();
+    const headers = apiKey ? { 'X-API-Key': apiKey } : {};
+    const res = await fetch(`${API}/api/session/verify`, { method: 'POST', headers });
     const data = await res.json().catch(() => ({}));
     if (data.valid) {
       _setSessionUI('ok', 'Sessão válida ✓', false);

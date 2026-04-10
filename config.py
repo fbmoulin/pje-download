@@ -2,6 +2,7 @@
 
 import os
 import re
+import hashlib
 from pathlib import Path
 
 # CNJ process number format: NNNNNNN-DD.YYYY.J.TR.OOOO
@@ -24,6 +25,9 @@ def load_env() -> None:
                     val = re.split(r"\s+#\s", val, maxsplit=1)[0].strip()
                     os.environ.setdefault(key.strip(), val)
             return
+
+
+load_env()
 
 
 def is_valid_processo(numero: str) -> bool:
@@ -55,6 +59,17 @@ def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None
     tmp.replace(path)
 
 
+def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> tuple[str, int]:
+    """Return SHA256 and size for a file using streaming reads."""
+    digest = hashlib.sha256()
+    total = 0
+    with path.open("rb") as fh:
+        while chunk := fh.read(chunk_size):
+            digest.update(chunk)
+            total += len(chunk)
+    return digest.hexdigest(), total
+
+
 # ─────────────────────────────────────────────
 # Centralized defaults (all env-configurable)
 # ─────────────────────────────────────────────
@@ -75,6 +90,8 @@ MAX_DOCS_PER_SESSION = int(os.getenv("MAX_DOCS_PER_SESSION", "50"))
 DOWNLOAD_DELAY_SECS = float(os.getenv("DOWNLOAD_DELAY_SECS", "1.5"))
 CONCURRENT_DOWNLOADS = int(os.getenv("CONCURRENT_DOWNLOADS", "3"))
 HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8006"))
+HEALTH_BIND_HOST = os.getenv("HEALTH_BIND_HOST", "127.0.0.1")
+WORKER_HEALTH_HOST = os.getenv("WORKER_HEALTH_HOST", "localhost")
 MNI_ENABLED = os.getenv("MNI_ENABLED", "true").lower() == "true"
 
 # MNI Client
@@ -93,3 +110,5 @@ BATCH_DELAY_DEFAULT = float(os.getenv("BATCH_DELAY_SECS", "2.0"))
 # Dashboard
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8007"))
 DASHBOARD_API_KEY = os.getenv("DASHBOARD_API_KEY", "")
+# Forwarded headers are ignored unless explicitly enabled behind a trusted proxy.
+TRUST_X_FORWARDED_FOR = os.getenv("TRUST_X_FORWARDED_FOR", "false").lower() == "true"

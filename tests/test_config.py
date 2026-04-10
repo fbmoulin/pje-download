@@ -1,5 +1,6 @@
 """Tests for config module — CNJ validation and env loading."""
 
+import importlib
 import os
 from config import (
     is_valid_processo,
@@ -7,6 +8,7 @@ from config import (
     sanitize_filename,
     unique_path,
     atomic_write_text,
+    sha256_file,
 )
 
 
@@ -42,6 +44,34 @@ class TestIsValidProcesso:
 
 
 class TestLoadEnv:
+    def test_module_reload_applies_dotenv_before_constants(self, monkeypatch):
+        """Reloading config should apply dotenv values before env-backed constants are set."""
+        import config
+        from pathlib import Path
+
+        monkeypatch.delenv("DOWNLOAD_BASE_DIR", raising=False)
+        monkeypatch.delenv("DASHBOARD_API_KEY", raising=False)
+
+        original_exists = Path.exists
+        original_read_text = Path.read_text
+
+        def fake_exists(self):
+            if self.name == ".env":
+                return True
+            return original_exists(self)
+
+        def fake_read_text(self, encoding="utf-8"):
+            if self.name == ".env":
+                return "DOWNLOAD_BASE_DIR=/tmp/pje-dotenv\nDASHBOARD_API_KEY=secret\n"
+            return original_read_text(self, encoding=encoding)
+
+        monkeypatch.setattr(Path, "exists", fake_exists)
+        monkeypatch.setattr(Path, "read_text", fake_read_text)
+
+        reloaded = importlib.reload(config)
+        assert str(reloaded.DOWNLOAD_BASE_DIR) == "/tmp/pje-dotenv"
+        assert reloaded.DASHBOARD_API_KEY == "secret"
+
     def test_loads_from_dotenv(self, tmp_path, monkeypatch):
         """Create a .env in the project dir candidate path and verify load_env reads it."""
         import config
@@ -136,3 +166,17 @@ class TestAtomicWriteText:
         p = tmp_path / "test.json"
         atomic_write_text(p, "content")
         assert not (tmp_path / "test.json.tmp").exists()
+
+
+class TestSha256File:
+    def test_streaming_hash_and_size(self, tmp_path):
+        p = tmp_path / "blob.bin"
+        payload = b"abc123" * 1000
+        p.write_bytes(payload)
+
+        checksum, size = sha256_file(p, chunk_size=128)
+
+        import hashlib
+
+        assert checksum == hashlib.sha256(payload).hexdigest()
+        assert size == len(payload)

@@ -41,7 +41,13 @@ log: structlog.BoundLogger = structlog.get_logger("kratos.dashboard-api")
 # CONFIGURAÇÃO
 # ─────────────────────────────────────────────
 
-from config import DASHBOARD_PORT as DEFAULT_PORT, DOWNLOAD_BASE_DIR as DEFAULT_OUTPUT
+from config import (
+    DASHBOARD_PORT as DEFAULT_PORT,
+    DOWNLOAD_BASE_DIR as DEFAULT_OUTPUT,
+    HEALTH_PORT as WORKER_HEALTH_PORT,
+    WORKER_HEALTH_HOST,
+    TRUST_X_FORWARDED_FOR,
+)
 
 
 # ─────────────────────────────────────────────
@@ -80,7 +86,21 @@ class DashboardState:
         self._task: asyncio.Task | None = None
         self._progress_cache: dict | None = None
         self._progress_cache_time: float = 0.0
+        self._worker_http: aiohttp.ClientSession | None = None
         self._load_history()
+
+    def get_worker_http(self) -> aiohttp.ClientSession:
+        """Reuse a single HTTP session for worker health polling."""
+        if self._worker_http is None or self._worker_http.closed:
+            timeout = aiohttp.ClientTimeout(total=2)
+            self._worker_http = aiohttp.ClientSession(timeout=timeout)
+        return self._worker_http
+
+    async def close(self) -> None:
+        """Release reusable resources held by dashboard state."""
+        if self._worker_http is not None and not self._worker_http.closed:
+            await self._worker_http.close()
+        self._worker_http = None
 
     def _load_history(self):
         """Carrega histórico de batches anteriores dos _report.json em disco."""
@@ -283,14 +303,15 @@ async def handle_status(request: web.Request) -> web.Response:
     # Consultar health do worker (:8006) — falha graciosamente se indisponível
     worker_status = "unknown"
     try:
-        timeout = aiohttp.ClientTimeout(total=2)
-        async with aiohttp.ClientSession(timeout=timeout) as sess:
-            async with sess.get("http://localhost:8006/health") as resp:
-                if resp.status == 200:
-                    worker_data = await resp.json()
-                    worker_status = worker_data.get("status", "unknown")
-                else:
-                    worker_status = "unhealthy"
+        sess = state.get_worker_http()
+        async with sess.get(
+            f"http://{WORKER_HEALTH_HOST}:{WORKER_HEALTH_PORT}/health"
+        ) as resp:
+            if resp.status == 200:
+                worker_data = await resp.json()
+                worker_status = worker_data.get("status", "unknown")
+            else:
+                worker_status = "unhealthy"
     except Exception:
         worker_status = "unreachable"
 
@@ -624,6 +645,9 @@ async def _on_cleanup(app: web.Application) -> None:
             pass
         log.info("dashboard.shutdown.batch_cancelled")
 
+    if state:
+        await state.close()
+
 
 def create_app(output_dir: Path) -> web.Application:
     """Cria a aplicação aiohttp."""
@@ -686,14 +710,28 @@ def _purge_stale_buckets(now: float) -> None:
         _rate_bucket_last_seen.pop(ip, None)
 
 
+def _get_rate_limit_ip(request: web.Request) -> str:
+    """Resolve the client IP used by rate limiting.
+
+    `X-Forwarded-For` is only trusted when explicitly enabled in config.
+    """
+
+    if TRUST_X_FORWARDED_FOR:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            candidate = forwarded.split(",")[0].strip()
+            if candidate:
+                return candidate
+    return request.remote or "unknown"
+
+
 @web.middleware
 async def rate_limit_middleware(request: web.Request, handler):
     """Simple sliding-window rate limiter for POST endpoints."""
     if request.method != "POST":
         return await handler(request)
 
-    forwarded = request.headers.get("X-Forwarded-For", "")
-    ip = forwarded.split(",")[0].strip() if forwarded else (request.remote or "unknown")
+    ip = _get_rate_limit_ip(request)
     now = time.monotonic()
 
     # Periodic cleanup of stale buckets (every ~100 requests on average)
@@ -744,7 +782,7 @@ async def cors_middleware(request: web.Request, handler):
             headers={
                 "Access-Control-Allow-Origin": allow_origin,
                 "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type",
+                "Access-Control-Allow-Headers": "Content-Type, X-API-Key",
                 "Vary": "Origin",
             }
         )

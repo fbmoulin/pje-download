@@ -164,6 +164,43 @@ class TestInteractiveLogin:
         mock_browser.close.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_success_creates_parent_dir(self, tmp_path):
+        from unittest.mock import AsyncMock, patch
+
+        sf = tmp_path / "nested" / "session.json"
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://pje.tjes.jus.br/pje/painel.seam"
+        mock_page.wait_for_url = AsyncMock()
+        mock_page.goto = AsyncMock()
+
+        mock_ctx = AsyncMock()
+        mock_ctx.new_page = AsyncMock(return_value=mock_page)
+        mock_ctx.storage_state = AsyncMock(return_value={"cookies": [{"name": "test"}]})
+
+        mock_browser = AsyncMock()
+        mock_browser.new_context = AsyncMock(return_value=mock_ctx)
+        mock_browser.close = AsyncMock()
+
+        mock_pw = AsyncMock()
+        mock_pw.chromium = AsyncMock()
+        mock_pw.chromium.launch = AsyncMock(return_value=mock_browser)
+
+        mock_pw_ctx = AsyncMock()
+        mock_pw_ctx.__aenter__ = AsyncMock(return_value=mock_pw)
+        mock_pw_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("playwright.async_api.async_playwright", return_value=mock_pw_ctx):
+            from pje_session import interactive_login
+
+            result = await interactive_login(session_file=sf)
+
+        assert result is True
+        assert sf.parent.exists()
+        assert sf.exists()
+        mock_browser.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_timeout_returns_false(self, tmp_path):
         from unittest.mock import AsyncMock, patch
 
@@ -350,6 +387,46 @@ class TestTryApiAudit:
         assert entry.checksum_sha256 == expected_hash
         assert entry.tamanho_bytes == len(b"PDF_CONTENT")
 
+    @pytest.mark.asyncio
+    async def test_try_api_can_download_only_annexes(self, tmp_path):
+        """_try_api() can skip principais during annex complement."""
+        pw, browser, ctx, page, download, api_resp = _mock_playwright_chain()
+        api_resp.json = AsyncMock(
+            return_value=[
+                {"id": "DOC1", "nome": "principal.pdf", "tipo": "sentenca"},
+                {"id": "DOC2", "nome": "anexo.pdf", "tipo": "anexo"},
+            ]
+        )
+
+        principal_resp = AsyncMock()
+        principal_resp.ok = True
+        principal_resp.body = AsyncMock(return_value=b"PRINCIPAL")
+        principal_resp.headers = {"content-type": "application/pdf"}
+
+        annex_resp = AsyncMock()
+        annex_resp.ok = True
+        annex_resp.body = AsyncMock(return_value=b"ANNEX")
+        annex_resp.headers = {"content-type": "application/pdf"}
+
+        page.request.get = AsyncMock(side_effect=[api_resp, annex_resp])
+
+        client = _make_client(tmp_path)
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+
+        with patch("pje_session.audit"):
+            result = await client._try_api(
+                ctx,
+                "5000001-02.2024.8.08.0001",
+                output_dir,
+                include_anexos=True,
+                include_principais=False,
+            )
+
+        assert len(result) == 1
+        assert result[0]["nome"].startswith("anexo")
+        assert result[0]["checksum"] == hashlib.sha256(b"ANNEX").hexdigest()
+
 
 # ─────────────────────────────────────────────
 # Audit instrumentation tests — _try_browser
@@ -499,14 +576,50 @@ class TestPlaywrightSmoke:
 
         client = _make_client(tmp_path)
         output_dir = tmp_path / "downloads"
+        _setup_browser_download_mocks(page, download, output_dir, b"BROWSER_PDF")
 
         with (
             patch("playwright.async_api.async_playwright", return_value=pw_ctx),
             patch("pje_session.audit"),
         ):
-            await client.download_processo("5000001-02.2024.8.08.0001", output_dir)
+            result = await client.download_processo(
+                "5000001-02.2024.8.08.0001", output_dir
+            )
 
         # API failed (403), browser fallback attempted. Both paths completed.
+        assert len(result) == 1
+        assert result[0]["fonte"] == "pje_browser"
+        browser.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_download_processo_annex_only_skips_browser_fallback(self, tmp_path):
+        """Annex-only mode avoids browser fallback to prevent redownloading principals."""
+        pw, browser, ctx, page, download, api_resp = _mock_playwright_chain()
+        pw_ctx = _make_pw_context_manager(pw)
+
+        api_resp.status = 403
+        api_resp.ok = False
+        page.request.get = AsyncMock(return_value=api_resp)
+
+        client = _make_client(tmp_path)
+        output_dir = tmp_path / "downloads"
+
+        with (
+            patch("playwright.async_api.async_playwright", return_value=pw_ctx),
+            patch("pje_session.audit"),
+            patch.object(
+                client, "_try_browser", new_callable=AsyncMock
+            ) as mock_browser,
+        ):
+            result = await client.download_processo(
+                "5000001-02.2024.8.08.0001",
+                output_dir,
+                include_anexos=True,
+                include_principais=False,
+            )
+
+        assert result == []
+        mock_browser.assert_not_awaited()
         browser.close.assert_awaited_once()
 
     @pytest.mark.asyncio

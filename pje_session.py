@@ -36,7 +36,13 @@ log = structlog.get_logger("kratos.pje-session")
 
 import audit
 import config
-from config import PJE_BASE_URL, SESSION_STATE_PATH, sanitize_filename, unique_path
+from config import (
+    PJE_BASE_URL,
+    SESSION_STATE_PATH,
+    sanitize_filename,
+    sha256_file,
+    unique_path,
+)
 
 SESSION_FILE = SESSION_STATE_PATH
 LOGIN_URL = (
@@ -102,6 +108,7 @@ async def interactive_login(session_file: Path = SESSION_FILE) -> bool:
             state = await ctx.storage_state()
             import os as _os
 
+            session_file.parent.mkdir(parents=True, exist_ok=True)
             content = json.dumps(state, indent=2, ensure_ascii=False)
             fd = _os.open(
                 str(session_file), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600
@@ -166,10 +173,14 @@ class PJeSessionClient:
         numero: str,
         output_dir: Path,
         include_anexos: bool = True,
+        include_principais: bool = True,
     ) -> list[dict]:
         """
         Baixa documentos de um processo via API REST do PJe.
         Retorna lista de dicts com nome, path, tamanho.
+
+        Quando `include_principais=False`, o método faz somente a tentativa via API.
+        O fallback de browser é evitado para não redownload dos documentos principais.
         """
         from playwright.async_api import async_playwright
 
@@ -190,9 +201,9 @@ class PJeSessionClient:
 
             try:
                 downloaded = await self._try_api(
-                    ctx, numero, output_dir, include_anexos
+                    ctx, numero, output_dir, include_anexos, include_principais
                 )
-                if not downloaded:
+                if not downloaded and include_principais:
                     downloaded = await self._try_browser(ctx, numero, output_dir)
             finally:
                 await browser.close()
@@ -205,6 +216,7 @@ class PJeSessionClient:
         numero: str,
         output_dir: Path,
         include_anexos: bool,
+        include_principais: bool = True,
     ) -> list[dict]:
         """Tenta baixar via API REST do PJe."""
         page = await ctx.new_page()
@@ -239,7 +251,10 @@ class PJeSessionClient:
             log.info("pje.session.api_docs", count=len(docs), numero=numero)
 
             for doc in docs:
-                if not include_anexos and doc.get("tipo", "").lower() == "anexo":
+                doc_tipo = doc.get("tipo", "").lower()
+                if not include_anexos and doc_tipo == "anexo":
+                    continue
+                if not include_principais and doc_tipo != "anexo":
                     continue
 
                 doc_id = doc.get("id") or doc.get("idDocumento")
@@ -252,6 +267,7 @@ class PJeSessionClient:
                 bin_resp = await page.request.get(bin_url)
                 if bin_resp.ok:
                     content = await bin_resp.body()
+                    checksum = hashlib.sha256(content).hexdigest()
                     ext = _guess_ext(bin_resp.headers.get("content-type", ""), nome)
                     dest = output_dir / f"{nome}{ext}"
                     dest = unique_path(dest)
@@ -261,6 +277,7 @@ class PJeSessionClient:
                             "nome": dest.name,
                             "localPath": str(dest),
                             "tamanhoBytes": len(content),
+                            "checksum": checksum,
                             "fonte": "pje_api",
                         }
                     )
@@ -274,7 +291,7 @@ class PJeSessionClient:
                             fonte="pje_api",
                             tribunal=config.MNI_TRIBUNAL,
                             tamanho_bytes=len(content),
-                            checksum_sha256=hashlib.sha256(content).hexdigest(),
+                            checksum_sha256=checksum,
                             status="success",
                         )
                     )
@@ -328,11 +345,13 @@ class PJeSessionClient:
                         f"Path traversal in filename: {dl.suggested_filename}"
                     )
                 await dl.save_as(dest)
+                checksum, size = sha256_file(dest)
                 downloaded.append(
                     {
                         "nome": dest.name,
                         "localPath": str(dest),
-                        "tamanhoBytes": dest.stat().st_size,
+                        "tamanhoBytes": size,
+                        "checksum": checksum,
                         "fonte": "pje_browser",
                     }
                 )
@@ -343,7 +362,7 @@ class PJeSessionClient:
                         documento_nome=dest.name,
                         fonte="pje_browser",
                         tribunal=config.MNI_TRIBUNAL,
-                        tamanho_bytes=dest.stat().st_size,
+                        tamanho_bytes=size,
                         checksum_sha256=None,
                         status="success",
                     )

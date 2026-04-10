@@ -48,18 +48,38 @@ from config import (
     MAX_DOCS_PER_SESSION,
     DOWNLOAD_DELAY_SECS,
     HEALTH_PORT,
+    HEALTH_BIND_HOST,
     CONCURRENT_DOWNLOADS,
     MNI_ENABLED,
+    sha256_file,
     sanitize_filename,
     unique_path,
 )
 
 DOWNLOAD_BASE_DIR.mkdir(parents=True, exist_ok=True)
+DEAD_LETTER_QUEUE = "kratos:pje:dead-letter"
 
 
 def _unique_filename(directory: Path, filename: str) -> str:
     """Return a non-colliding filename in directory."""
     return unique_path(directory / filename).name
+
+
+def _merge_downloaded_files(*groups: list[dict]) -> list[dict]:
+    """Merge file metadata lists, preferring checksum-based deduplication."""
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            key = (
+                item.get("checksum")
+                or f"{item.get('nome')}|{item.get('tamanhoBytes')}|{item.get('fonte')}"
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    return merged
 
 
 # Padrões conhecidos de CAPTCHA no PJe
@@ -100,6 +120,7 @@ class PJeSessionWorker:
         self._session_lock_fh: Any | None = None
         self._health_cache: dict | None = None
         self._health_cache_time: float = 0.0
+        self._health_runner: Any | None = None
 
     def _acquire_session_lock(self) -> bool:
         """Acquire advisory lock on session state file (prevents multi-instance corruption)."""
@@ -200,7 +221,12 @@ class PJeSessionWorker:
         Se o MNI estiver disponível, Playwright é opcional (usado como fallback).
         """
         if self.mni_client is not None:
-            log.info("pje.session.mni_available", note="playwright_is_fallback_only")
+            # MNI disponível: não iniciar Chromium no boot. Isso evita depender
+            # de browser visível quando o caminho principal já resolve o fluxo.
+            self.session_valid = True
+            self.session_started_at = datetime.now(UTC)
+            log.info("pje.session.mni_available", note="playwright_deferred")
+            return True
 
         self._browser = await playwright.chromium.launch(
             headless=False
@@ -331,6 +357,7 @@ class PJeSessionWorker:
         job_id: str = job["jobId"]
         numero_processo: str = job["numeroProcesso"]
         tipos_documento: list | None = job.get("tiposDocumento")
+        incluir_anexos: bool = job.get("includeAnexos", job.get("include_anexos", True))
 
         self._health_status = "processing"
 
@@ -341,40 +368,74 @@ class PJeSessionWorker:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         downloaded_files: list[dict] = []
+        anexos_pendentes = 0
 
         try:
             log.info("pje.download.start", processo=numero_processo, job_id=job_id)
 
             # ── ESTRATÉGIA 1: MNI SOAP ──
             if self.mni_client is not None:
-                mni_files = await self._try_mni_download(
-                    numero_processo, output_dir, tipos_documento
+                mni_files, anexos_pendentes = await self._try_mni_download(
+                    numero_processo,
+                    output_dir,
+                    tipos_documento,
+                    incluir_anexos=incluir_anexos,
                 )
                 if mni_files:
-                    downloaded_files.extend(mni_files)
+                    downloaded_files = _merge_downloaded_files(
+                        downloaded_files, mni_files
+                    )
                     log.info(
                         "pje.download.mni_success",
                         count=len(downloaded_files),
                         processo=numero_processo,
+                        anexos_pendentes=anexos_pendentes,
                     )
-                    await self._log_job_result(
-                        job_id, numero_processo, downloaded_files
-                    )
-                    self._health_status = "ready"
-                    return self._result(
-                        job_id, numero_processo, "success", downloaded_files
-                    )
+                    if not anexos_pendentes:
+                        await self._log_job_result(
+                            job_id, numero_processo, downloaded_files
+                        )
+                        self._health_status = "ready"
+                        return self._result(
+                            job_id, numero_processo, "success", downloaded_files
+                        )
 
             # ── Estratégias 2 e 3 precisam de sessão Playwright ──
+            if anexos_pendentes and (self.page is None or self.context is None):
+                warning = (
+                    f"MNI baixou documentos principais, mas {anexos_pendentes} anexo(s) "
+                    "permanecem pendentes sem sessão PJe disponível"
+                )
+                log.warning(
+                    "pje.download.anexos_pending",
+                    processo=numero_processo,
+                    anexos_pendentes=anexos_pendentes,
+                )
+                await self._log_job_result(job_id, numero_processo, downloaded_files)
+                self._health_status = "ready"
+                return self._result(
+                    job_id,
+                    numero_processo,
+                    "success",
+                    downloaded_files,
+                    error=warning,
+                )
+
             if self.is_session_expired():
                 log.warning("pje.download.session_expired", job_id=job_id)
                 self._health_status = "session_expired"
                 return self._result(job_id, numero_processo, "session_expired")
 
             # ── ESTRATÉGIA 2: API REST ──
-            api_result = await self._try_official_api(numero_processo, output_dir)
+            api_result = await self._try_official_api(
+                numero_processo,
+                output_dir,
+                tipos_documento=tipos_documento,
+                incluir_anexos=incluir_anexos,
+                incluir_principais=not (downloaded_files and anexos_pendentes > 0),
+            )
             if api_result:
-                downloaded_files.extend(api_result)
+                downloaded_files = _merge_downloaded_files(downloaded_files, api_result)
                 log.info("pje.download.api_success", count=len(downloaded_files))
             else:
                 # ── ESTRATÉGIA 3: Browser automation ──
@@ -389,14 +450,39 @@ class PJeSessionWorker:
                     )
 
                 browser_files = await self._download_via_browser(
-                    numero_processo, output_dir, tipos_documento
+                    numero_processo,
+                    output_dir,
+                    tipos_documento,
+                    allow_full_download=not (downloaded_files and anexos_pendentes > 0),
                 )
-                downloaded_files.extend(browser_files)
+                if not browser_files:
+                    self._health_status = "ready"
+                    return self._result(
+                        job_id,
+                        numero_processo,
+                        "failed",
+                        error="Browser fallback indisponível ou sem arquivos",
+                    )
+                downloaded_files = _merge_downloaded_files(
+                    downloaded_files, browser_files
+                )
                 log.info("pje.download.browser_success", count=len(downloaded_files))
 
             await self._log_job_result(job_id, numero_processo, downloaded_files)
             self._health_status = "ready"
-            return self._result(job_id, numero_processo, "success", downloaded_files)
+            warning = None
+            if anexos_pendentes and incluir_anexos:
+                warning = (
+                    f"MNI indicou {anexos_pendentes} anexo(s) vinculados; "
+                    "resultado complementar via API/browser pode conter duplicatas filtradas"
+                )
+            return self._result(
+                job_id,
+                numero_processo,
+                "success",
+                downloaded_files,
+                error=warning,
+            )
 
         except Exception as e:
             log.error("pje.download.failed", job_id=job_id, error=str(e))
@@ -426,7 +512,8 @@ class PJeSessionWorker:
         numero_processo: str,
         output_dir: Path,
         tipos_documento: list | None = None,
-    ) -> list | None:
+        incluir_anexos: bool = True,
+    ) -> tuple[list[dict] | None, int]:
         """
         Tenta baixar documentos via MNI SOAP (estratégia de 2 fases).
 
@@ -434,9 +521,16 @@ class PJeSessionWorker:
         Fase 2: download_documentos faz novas chamadas com IDs em batch
                  para obter o conteúdo binário de cada documento
 
-        Retorna lista de arquivos salvos ou None se falhar.
+        Retorna lista de arquivos salvos e quantidade de anexos pendentes.
         """
         try:
+            tipos_normalizados = (
+                {t.lower() for t in tipos_documento} if tipos_documento else None
+            )
+            incluir_vinculados = incluir_anexos and (
+                tipos_normalizados is None or "anexo" in tipos_normalizados
+            )
+
             # Fase 1: obter metadados (lista de documentos sem conteúdo)
             result: MNIResult = await self.mni_client.consultar_processo(
                 numero_processo,
@@ -450,43 +544,65 @@ class PJeSessionWorker:
                     processo=numero_processo,
                     error=result.error,
                 )
-                return None
+                return None, 0
 
             if not result.processo.documentos:
                 log.warning(
                     "pje.mni.no_documents",
                     processo=numero_processo,
                 )
-                return None
+                return None, 0
+
+            anexos_pendentes = (
+                sum(len(doc.vinculados) for doc in result.processo.documentos)
+                if incluir_vinculados
+                else 0
+            )
 
             log.info(
                 "pje.mni.phase1_complete",
                 processo=numero_processo,
                 total_docs=len(result.processo.documentos),
+                anexos_pendentes=anexos_pendentes,
             )
 
             # Fase 2: download em batches (dentro de download_documentos)
             files = await self.mni_client.download_documentos(
-                result.processo, output_dir, tipos_documento
+                result.processo,
+                output_dir,
+                tipos_documento,
+                incluir_anexos=incluir_vinculados,
             )
-            return files if files else None
+            return (files if files else None), anexos_pendentes
 
         except Exception as exc:
             log.warning("pje.mni.download_error", error=str(exc))
-            return None
+            return None, 0
 
     # ──────────────────────
     # ESTRATÉGIA 2: API REST
     # ──────────────────────
 
     async def _try_official_api(
-        self, numero_processo: str, output_dir: Path
+        self,
+        numero_processo: str,
+        output_dir: Path,
+        tipos_documento: list | None = None,
+        incluir_anexos: bool = True,
+        incluir_principais: bool = True,
     ) -> list | None:
         """
         Tenta usar a API oficial REST do PJe para download.
         Referência: https://docs.pje.jus.br/manuais-basicos/padroes-de-api-do-pje/
         """
         try:
+            if self.page is None:
+                log.warning(
+                    "pje.api.browser_unavailable",
+                    processo=numero_processo,
+                    note="browser not initialized; skipping REST fallback",
+                )
+                return None
             processo_id = numero_processo.replace(".", "").replace("-", "")
 
             response = await self.page.request.get(
@@ -496,8 +612,22 @@ class PJeSessionWorker:
 
             if response.status == 200:
                 docs = await response.json()
+                if isinstance(docs, list):
+                    docs_list = docs
+                else:
+                    docs_list = docs.get("content") or docs.get("documentos") or []
                 files: list[dict] = []
-                for doc in docs.get("documentos", []):
+                tipos_normalizados = (
+                    {t.lower() for t in tipos_documento} if tipos_documento else None
+                )
+                for doc in docs_list:
+                    doc_tipo = str(doc.get("tipo", "pdf")).lower()
+                    if not incluir_anexos and doc_tipo == "anexo":
+                        continue
+                    if not incluir_principais and doc_tipo != "anexo":
+                        continue
+                    if tipos_normalizados and doc_tipo not in tipos_normalizados:
+                        continue
                     file_info = await self._download_document_api(doc, output_dir)
                     if file_info:
                         files.append(file_info)
@@ -544,7 +674,8 @@ class PJeSessionWorker:
         numero_processo: str,
         output_dir: Path,
         tipos_documento: list | None = None,
-    ) -> list:
+        allow_full_download: bool = True,
+    ) -> list | None:
         """
         Download via browser automation com Playwright.
 
@@ -552,10 +683,23 @@ class PJeSessionWorker:
         3a. Botão "full download" nos autos digitais (baixa tudo de uma vez)
         3b. Download individual de cada documento (fallback)
         """
-        # 3a: Tentar full download via autos digitais
-        full_files = await self._try_full_download_button(numero_processo, output_dir)
-        if full_files:
-            return full_files
+        if self.page is None or self.context is None:
+            log.warning(
+                "pje.browser.unavailable",
+                processo=numero_processo,
+                note="browser fallback skipped because session was not initialized",
+            )
+            return None
+
+        # 3a: Tentar full download via autos digitais apenas quando ainda
+        # precisamos dos documentos principais. No complemento de anexos, o
+        # full download rebaixa o processo inteiro e desperdiça banda/IO.
+        if allow_full_download:
+            full_files = await self._try_full_download_button(
+                numero_processo, output_dir
+            )
+            if full_files:
+                return full_files
 
         # 3b: Fallback — download individual
         return await self._download_docs_individually(
@@ -670,13 +814,12 @@ class PJeSessionWorker:
                 dest = output_dir / filename
 
                 await download.save_as(str(dest))
-                content = dest.read_bytes()
-                checksum = hashlib.sha256(content).hexdigest()
+                checksum, size = sha256_file(dest)
 
                 log.info(
                     "pje.browser.full_download.success",
                     filename=filename,
-                    size=len(content),
+                    size=size,
                     processo=numero_processo,
                 )
 
@@ -686,7 +829,7 @@ class PJeSessionWorker:
                     {
                         "nome": filename,
                         "tipo": "completo",
-                        "tamanhoBytes": len(content),
+                        "tamanhoBytes": size,
                         "localPath": str(dest),
                         "checksum": checksum,
                         "fonte": "browser_full_download",
@@ -724,20 +867,19 @@ class PJeSessionWorker:
                             filename2 = _unique_filename(output_dir, raw_name2)
                             dest2 = output_dir / filename2
                             await download2.save_as(str(dest2))
-                            content2 = dest2.read_bytes()
-                            checksum2 = hashlib.sha256(content2).hexdigest()
+                            checksum2, size2 = sha256_file(dest2)
 
                             log.info(
                                 "pje.browser.full_download.dialog_success",
                                 filename=filename2,
-                                size=len(content2),
+                                size=size2,
                             )
                             self.docs_downloaded_count += 1
                             return [
                                 {
                                     "nome": filename2,
                                     "tipo": "completo",
-                                    "tamanhoBytes": len(content2),
+                                    "tamanhoBytes": size2,
                                     "localPath": str(dest2),
                                     "checksum": checksum2,
                                     "fonte": "browser_full_download",
@@ -826,18 +968,17 @@ class PJeSessionWorker:
                         filename = download.suggested_filename or f"doc_{idx:03d}.pdf"
                         dest = output_dir / _unique_filename(output_dir, filename)
                         await download.save_as(str(dest))
-                        content = dest.read_bytes()
-                        checksum = hashlib.sha256(content).hexdigest()
+                        checksum, size = sha256_file(dest)
                         self.docs_downloaded_count += 1
                         log.info(
                             "pje.browser.individual.doc_saved",
                             filename=dest.name,
-                            size=len(content),
+                            size=size,
                         )
                         return {
                             "nome": dest.name,
                             "tipo": "pdf",
-                            "tamanhoBytes": len(content),
+                            "tamanhoBytes": size,
                             "localPath": str(dest),
                             "checksum": checksum,
                             "fonte": "browser_individual",
@@ -872,13 +1013,12 @@ class PJeSessionWorker:
                 filename = download.suggested_filename or f"doc_{i:03d}.pdf"
                 dest = output_dir / _unique_filename(output_dir, filename)
                 await download.save_as(str(dest))
-                content = dest.read_bytes()
-                checksum = hashlib.sha256(content).hexdigest()
+                checksum, size = sha256_file(dest)
                 files.append(
                     {
                         "nome": dest.name,
                         "tipo": "pdf",
-                        "tamanhoBytes": len(content),
+                        "tamanhoBytes": size,
                         "localPath": str(dest),
                         "checksum": checksum,
                         "fonte": "browser_individual",
@@ -910,7 +1050,11 @@ class PJeSessionWorker:
                         error=str(exc),
                         note="result saved to local log only",
                     )
-                    self._log_job_result(result_data)
+                    await self._log_job_result(
+                        result_data.get("jobId", ""),
+                        result_data.get("numeroProcesso", ""),
+                        result_data.get("arquivosDownloaded", []),
+                    )
                     return
                 delay = min(2**attempt + random.uniform(0, 0.5), 10)
                 log.warning(
@@ -919,6 +1063,34 @@ class PJeSessionWorker:
                     delay=round(delay, 1),
                 )
                 await asyncio.sleep(delay)
+
+    async def _publish_dead_letter(
+        self,
+        payload: str,
+        reason: str,
+        details: dict | None = None,
+    ) -> None:
+        """Publish malformed queue payloads to a dead-letter queue."""
+        if self.redis is None:
+            log.warning("pje.queue.dead_letter_skipped", reason=reason)
+            return
+
+        entry = {
+            "reason": reason,
+            "payload": payload,
+            "details": details or {},
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        try:
+            await self.redis.lpush(
+                DEAD_LETTER_QUEUE, json.dumps(entry, ensure_ascii=False)
+            )
+        except (redis.ConnectionError, redis.TimeoutError, OSError) as exc:
+            log.warning(
+                "pje.queue.dead_letter_publish_failed",
+                reason=reason,
+                error=str(exc),
+            )
 
     async def consume_queue(self, shutdown_event: asyncio.Event | None = None) -> None:
         """
@@ -965,10 +1137,23 @@ class PJeSessionWorker:
                 job = json.loads(job_json)
             except json.JSONDecodeError as exc:
                 log.error("pje.queue.invalid_json", error=str(exc))
+                await self._publish_dead_letter(
+                    job_json,
+                    "invalid_json",
+                    details={"error": str(exc)},
+                )
                 continue
 
-            if "jobId" not in job or "numeroProcesso" not in job:
+            missing_fields = [
+                key for key in ("jobId", "numeroProcesso") if key not in job
+            ]
+            if missing_fields:
                 log.error("pje.queue.missing_fields", keys=list(job.keys()))
+                await self._publish_dead_letter(
+                    json.dumps(job, ensure_ascii=False),
+                    "missing_fields",
+                    details={"missing": missing_fields, "keys": list(job.keys())},
+                )
                 continue
 
             log.info(
@@ -1003,14 +1188,27 @@ class PJeSessionWorker:
         """Inicia servidor HTTP minimalista para health checks."""
         from aiohttp import web
 
+        if self._health_runner is not None:
+            return
+
         app = web.Application()
         app.router.add_get("/health", self._health_handler)
 
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", HEALTH_PORT)
+        site = web.TCPSite(runner, HEALTH_BIND_HOST, HEALTH_PORT)
         await site.start()
-        log.info("pje.health.started", port=HEALTH_PORT)
+        self._health_runner = runner
+        log.info("pje.health.started", host=HEALTH_BIND_HOST, port=HEALTH_PORT)
+
+    async def stop_health_server(self) -> None:
+        """Encerra o servidor de health checks e libera a porta."""
+        if self._health_runner is None:
+            return
+        try:
+            await self._health_runner.cleanup()
+        finally:
+            self._health_runner = None
 
     async def _health_handler(self, request):
         """Handler do endpoint /health with deep checks."""
@@ -1123,6 +1321,7 @@ class PJeSessionWorker:
         )
 
     async def close(self) -> None:
+        await self.stop_health_server()
         if self.page:
             await self.page.close()
         if self.context:

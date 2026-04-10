@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import json
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
 
 
@@ -86,7 +87,7 @@ class TestWorkerInit:
 
     @pytest.mark.asyncio
     async def test_missing_mni_username_logs_error(self, monkeypatch):
-        monkeypatch.delenv("MNI_USERNAME", raising=False)
+        monkeypatch.setenv("MNI_USERNAME", "")
         monkeypatch.setenv("MNI_PASSWORD", "pass")
 
         w = _load_worker_module()
@@ -113,9 +114,25 @@ class TestWorkerInit:
         assert worker.mni_client is None
 
     @pytest.mark.asyncio
+    async def test_mni_available_does_not_start_browser(self):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.mni_client = MagicMock()
+
+        playwright = MagicMock()
+        playwright.chromium.launch = AsyncMock(side_effect=AssertionError("launch"))
+
+        result = await worker.load_session(playwright)
+
+        assert result is True
+        assert worker.session_valid is True
+        assert worker.session_started_at is not None
+        playwright.chromium.launch.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_missing_mni_password_leaves_client_none(self, monkeypatch):
         monkeypatch.setenv("MNI_USERNAME", "user")
-        monkeypatch.delenv("MNI_PASSWORD", raising=False)
+        monkeypatch.setenv("MNI_PASSWORD", "")
 
         w = _load_worker_module()
         w.MNI_ENABLED = True
@@ -274,16 +291,21 @@ class TestWorkerClose:
         mock_page = AsyncMock()
         mock_ctx = AsyncMock()
         mock_browser = AsyncMock()
+        mock_runner = AsyncMock()
+        mock_runner.cleanup = AsyncMock()
         mock_redis = AsyncMock()
         worker.page = mock_page
         worker.context = mock_ctx
         worker._browser = mock_browser
         worker.redis = mock_redis
+        worker._health_runner = mock_runner
         await worker.close()
+        mock_runner.cleanup.assert_awaited_once()
         mock_page.close.assert_awaited_once()
         mock_ctx.close.assert_awaited_once()
         mock_browser.close.assert_awaited_once()
         mock_redis.close.assert_awaited_once()
+        assert worker._health_runner is None
 
     @pytest.mark.asyncio
     async def test_close_with_none_resources(self):
@@ -419,6 +441,56 @@ class TestConsumeQueueShutdown:
         # Retry_in should increase (backoff)
         assert logged_errors[1]["retry_in"] > logged_errors[0]["retry_in"]
 
+    @pytest.mark.asyncio
+    async def test_invalid_json_is_sent_to_dead_letter_queue(self):
+        import asyncio
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        shutdown = asyncio.Event()
+
+        async def blpop(*args, **kwargs):
+            shutdown.set()
+            return ("kratos:pje:jobs", "{invalid")
+
+        mock_r.blpop = blpop
+        worker.redis = mock_r
+        worker.mni_client = MagicMock()
+
+        with patch.object(w, "log", MagicMock()):
+            await worker.consume_queue(shutdown)
+
+        mock_r.lpush.assert_any_await(
+            w.DEAD_LETTER_QUEUE,
+            ANY,
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_fields_are_sent_to_dead_letter_queue(self):
+        import asyncio
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        shutdown = asyncio.Event()
+
+        async def blpop(*args, **kwargs):
+            shutdown.set()
+            return ("kratos:pje:jobs", json.dumps({"jobId": "J1"}))
+
+        mock_r.blpop = blpop
+        worker.redis = mock_r
+        worker.mni_client = MagicMock()
+
+        with patch.object(w, "log", MagicMock()):
+            await worker.consume_queue(shutdown)
+
+        mock_r.lpush.assert_any_await(
+            w.DEAD_LETTER_QUEUE,
+            ANY,
+        )
+
 
 class TestPublishResult:
     """_publish_result() retries on Redis failure."""
@@ -459,10 +531,259 @@ class TestPublishResult:
         mock_r = AsyncMock()
         mock_r.lpush = AsyncMock(side_effect=RedisConnectionError("down"))
         worker.redis = mock_r
+        local_log = AsyncMock()
         with (
             patch.object(w, "log", MagicMock()),
             patch("worker.asyncio.sleep", new_callable=AsyncMock),
-            patch.object(worker, "_log_job_result") as mock_log_local,
+            patch.object(worker, "_log_job_result", local_log),
         ):
-            await worker._publish_result({"jobId": "J1"}, max_retries=2)
-        mock_log_local.assert_called_once()
+            await worker._publish_result(
+                {
+                    "jobId": "J1",
+                    "numeroProcesso": "5000001-00.2024.8.08.0001",
+                    "arquivosDownloaded": [{"nome": "doc.pdf"}],
+                },
+                max_retries=2,
+            )
+        local_log.assert_awaited_once_with(
+            "J1",
+            "5000001-00.2024.8.08.0001",
+            [{"nome": "doc.pdf"}],
+        )
+
+
+class TestDownloadProcess:
+    @pytest.mark.asyncio
+    async def test_mni_pending_annexes_returns_warning(self):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.mni_client = MagicMock()
+        worker.page = None
+        worker.context = None
+        worker._try_mni_download = AsyncMock(
+            return_value=(
+                [
+                    {
+                        "nome": "doc.pdf",
+                        "checksum": "abc",
+                        "tamanhoBytes": 10,
+                        "fonte": "mni",
+                    }
+                ],
+                2,
+            )
+        )
+        worker._log_job_result = AsyncMock()
+        worker.is_session_expired = MagicMock(return_value=False)
+
+        result = await worker.download_process(
+            {
+                "jobId": "J1",
+                "numeroProcesso": "5000001-00.2024.8.08.0001",
+                "includeAnexos": True,
+            }
+        )
+
+        assert result["status"] == "success"
+        assert result["errorMessage"]
+        assert "anexo" in result["errorMessage"]
+        worker._log_job_result.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_mni_plus_api_merges_without_duplicates(self):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.mni_client = MagicMock()
+        worker.page = AsyncMock()
+        worker.context = AsyncMock()
+        worker._try_mni_download = AsyncMock(
+            return_value=(
+                [
+                    {
+                        "nome": "principal.pdf",
+                        "checksum": "dup",
+                        "tamanhoBytes": 10,
+                        "fonte": "mni",
+                    }
+                ],
+                1,
+            )
+        )
+        worker._try_official_api = AsyncMock(
+            return_value=[
+                {
+                    "nome": "principal-copy.pdf",
+                    "checksum": "dup",
+                    "tamanhoBytes": 10,
+                    "fonte": "api_rest",
+                },
+                {
+                    "nome": "anexo.pdf",
+                    "checksum": "annex",
+                    "tamanhoBytes": 5,
+                    "fonte": "api_rest",
+                },
+            ]
+        )
+        worker._download_via_browser = AsyncMock(return_value=None)
+        worker._log_job_result = AsyncMock()
+        worker.is_session_expired = MagicMock(return_value=False)
+
+        result = await worker.download_process(
+            {
+                "jobId": "J2",
+                "numeroProcesso": "5000002-00.2024.8.08.0001",
+                "includeAnexos": True,
+            }
+        )
+
+        assert result["status"] == "success"
+        assert len(result["arquivosDownloaded"]) == 2
+        assert {f["checksum"] for f in result["arquivosDownloaded"]} == {
+            "dup",
+            "annex",
+        }
+        assert "duplicatas" in result["errorMessage"]
+        worker._try_official_api.assert_awaited_once()
+        assert worker._try_official_api.await_args.kwargs["incluir_principais"] is False
+
+
+class TestOfficialApiFallback:
+    @pytest.mark.asyncio
+    async def test_accepts_list_payload(self, tmp_path):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        response = AsyncMock()
+        response.status = 200
+        response.json = AsyncMock(
+            return_value=[
+                {"id": "1", "tipo": "pdf"},
+                {"id": "2", "tipo": "anexo"},
+            ]
+        )
+        worker.page = AsyncMock()
+        worker.page.request.get = AsyncMock(return_value=response)
+        worker._download_document_api = AsyncMock(
+            side_effect=[
+                {
+                    "nome": "principal.pdf",
+                    "checksum": "doc-1",
+                    "tamanhoBytes": 10,
+                    "fonte": "api_rest",
+                },
+                {
+                    "nome": "anexo.pdf",
+                    "checksum": "doc-2",
+                    "tamanhoBytes": 5,
+                    "fonte": "api_rest",
+                },
+            ]
+        )
+
+        files = await worker._try_official_api(
+            "5000003-00.2024.8.08.0001",
+            tmp_path,
+            incluir_anexos=True,
+        )
+
+        assert len(files) == 2
+        assert worker._download_document_api.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_skips_annex_when_disabled(self, tmp_path):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        response = AsyncMock()
+        response.status = 200
+        response.json = AsyncMock(
+            return_value=[
+                {"id": "1", "tipo": "pdf"},
+                {"id": "2", "tipo": "anexo"},
+            ]
+        )
+        worker.page = AsyncMock()
+        worker.page.request.get = AsyncMock(return_value=response)
+        worker._download_document_api = AsyncMock(
+            return_value={
+                "nome": "principal.pdf",
+                "checksum": "doc-1",
+                "tamanhoBytes": 10,
+                "fonte": "api_rest",
+            }
+        )
+
+        files = await worker._try_official_api(
+            "5000004-00.2024.8.08.0001",
+            tmp_path,
+            incluir_anexos=False,
+        )
+
+        assert len(files) == 1
+        worker._download_document_api.assert_awaited_once()
+
+
+class TestBrowserFallback:
+    @pytest.mark.asyncio
+    async def test_skips_full_download_when_only_annexes_are_pending(self, tmp_path):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.page = AsyncMock()
+        worker.context = AsyncMock()
+        worker._try_full_download_button = AsyncMock(
+            return_value=[{"nome": "full.zip"}]
+        )
+        worker._download_docs_individually = AsyncMock(
+            return_value=[
+                {
+                    "nome": "anexo.pdf",
+                    "checksum": "annex",
+                    "tamanhoBytes": 5,
+                    "fonte": "browser_individual",
+                }
+            ]
+        )
+
+        files = await worker._download_via_browser(
+            "5000005-00.2024.8.08.0001",
+            tmp_path,
+            allow_full_download=False,
+        )
+
+        worker._try_full_download_button.assert_not_awaited()
+        worker._download_docs_individually.assert_awaited_once()
+        assert files[0]["nome"] == "anexo.pdf"
+
+
+class TestMniOptimization:
+    @pytest.mark.asyncio
+    async def test_filtered_types_do_not_trigger_annex_tracking(self, tmp_path):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+
+        processo = MagicMock(
+            documentos=[
+                MagicMock(vinculados=[MagicMock(), MagicMock()], tipo="sentenca")
+            ]
+        )
+        worker.mni_client = AsyncMock()
+        worker.mni_client.consultar_processo.return_value = MagicMock(
+            success=True,
+            processo=processo,
+        )
+        worker.mni_client.download_documentos = AsyncMock(return_value=[])
+
+        files, anexos_pendentes = await worker._try_mni_download(
+            "5000005-00.2024.8.08.0001",
+            tmp_path,
+            tipos_documento=["sentenca"],
+            incluir_anexos=True,
+        )
+
+        assert files is None
+        assert anexos_pendentes == 0
+        worker.mni_client.download_documentos.assert_awaited_once_with(
+            processo,
+            tmp_path,
+            ["sentenca"],
+            incluir_anexos=False,
+        )

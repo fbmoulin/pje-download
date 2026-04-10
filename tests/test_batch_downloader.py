@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, MagicMock, patch
+from pathlib import Path
+import threading
 
 import pytest
 
@@ -95,6 +99,41 @@ class TestBatchProgress:
         assert p.exists()
         assert not (tmp_path / "_progress.tmp").exists()
 
+    def test_save_is_thread_safe(self, tmp_path, monkeypatch):
+        p = tmp_path / "_progress.json"
+        bp = BatchProgress(progress_file=p)
+        bp.add("x")
+        bp.processos["x"].status = "downloading"
+
+        original_write_text = Path.write_text
+        active = {"count": 0, "max": 0}
+        active_lock = threading.Lock()
+
+        def wrapped_write_text(self, *args, **kwargs):
+            if self.name.endswith(".tmp"):
+                with active_lock:
+                    active["count"] += 1
+                    active["max"] = max(active["max"], active["count"])
+                time.sleep(0.02)
+                try:
+                    return original_write_text(self, *args, **kwargs)
+                finally:
+                    with active_lock:
+                        active["count"] -= 1
+            return original_write_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", wrapped_write_text)
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(bp.save, True) for _ in range(4)]
+            for future in futures:
+                future.result()
+
+        data = json.loads(p.read_text(encoding="utf-8"))
+        assert data["summary"]["total"] == 1
+        assert active["max"] == 1
+        assert not (tmp_path / "_progress.tmp").exists()
+
     def test_duracao_s_without_fim(self):
         ps = ProcessoStatus(numero="x")
         ps.inicio = 1000.0
@@ -160,6 +199,18 @@ class TestLoadProcessosFromFile:
         f.write_text("col_a,col_b\n1234567-89.2024.8.08.0001,extra\n", encoding="utf-8")
         result = load_processos_from_file(f)
         assert "1234567-89.2024.8.08.0001" in result
+
+    def test_csv_without_header_keeps_first_row(self, tmp_path):
+        f = tmp_path / "nums.csv"
+        f.write_text(
+            "1234567-89.2024.8.08.0001\n9876543-21.2023.8.08.0002\n",
+            encoding="utf-8",
+        )
+        result = load_processos_from_file(f)
+        assert result == [
+            "1234567-89.2024.8.08.0001",
+            "9876543-21.2023.8.08.0002",
+        ]
 
 
 # ─────────────────────────────────────────────
@@ -227,6 +278,9 @@ async def test_download_batch_missing_credentials(tmp_path, monkeypatch):
     """Sem credenciais MNI, todos os processos devem falhar com mensagem clara."""
     monkeypatch.delenv("MNI_USERNAME", raising=False)
     monkeypatch.delenv("MNI_PASSWORD", raising=False)
+    import pje_session
+
+    monkeypatch.setattr(pje_session, "SESSION_FILE", tmp_path / "missing.json")
 
     from batch_downloader import download_batch
 
@@ -239,6 +293,262 @@ async def test_download_batch_missing_credentials(tmp_path, monkeypatch):
     ps = progress.processos["1234567-89.2024.8.08.0001"]
     assert ps.status == "failed"
     assert "MNI_USERNAME" in ps.erro or "MNI_PASSWORD" in ps.erro
+
+
+@pytest.mark.asyncio
+async def test_download_batch_allows_gdrive_only_without_mni_credentials(
+    tmp_path, monkeypatch
+):
+    """Processos antigos com GDrive devem continuar funcionando sem credenciais MNI."""
+    monkeypatch.delenv("MNI_USERNAME", raising=False)
+    monkeypatch.delenv("MNI_PASSWORD", raising=False)
+    import pje_session
+
+    monkeypatch.setattr(pje_session, "SESSION_FILE", tmp_path / "missing.json")
+
+    from batch_downloader import download_batch
+
+    gdrive_file = {
+        "nome": "scan.pdf",
+        "tipo": "pdf",
+        "tamanhoBytes": 10,
+        "localPath": str(tmp_path / "scan.pdf"),
+        "checksum": "abc123",
+        "fonte": "google_drive",
+    }
+
+    with (
+        patch("gdrive_downloader.is_processo_antigo", return_value=True),
+        patch(
+            "gdrive_downloader.download_gdrive_folder",
+            new_callable=AsyncMock,
+            return_value=[gdrive_file],
+        ),
+        patch("mni_client.MNIClient") as mock_mni,
+    ):
+        progress = await download_batch(
+            numeros=["1234567-89.2024.8.08.0001"],
+            output_dir=tmp_path,
+            gdrive_url_map={
+                "1234567-89.2024.8.08.0001": "https://drive.google.com/drive/folders/ABC123"
+            },
+            delay_entre_processos=0.0,
+        )
+
+    assert progress.done == 1
+    assert progress.failed == 0
+    ps = progress.processos["1234567-89.2024.8.08.0001"]
+    assert ps.status == "done"
+    assert ps.docs_baixados == 1
+    mock_mni.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_download_batch_complements_annexes_with_session(tmp_path, monkeypatch):
+    """MNI success with pending annexes should complement via saved PJe session."""
+    monkeypatch.setenv("MNI_USERNAME", "u")
+    monkeypatch.setenv("MNI_PASSWORD", "p")
+    import pje_session
+
+    session_file = tmp_path / "session.json"
+    session_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(pje_session, "SESSION_FILE", session_file)
+
+    from batch_downloader import download_batch
+
+    result = MagicMock()
+    result.success = True
+    result.processo = MagicMock(
+        documentos=[MagicMock(vinculados=[MagicMock()], tipo="pdf")]
+    )
+
+    mock_client = AsyncMock()
+    mock_client.health_check.return_value = {
+        "status": "healthy",
+        "tribunal": "T",
+        "operations": [],
+        "latency_ms": 1,
+    }
+    mock_client.consultar_processo.return_value = result
+    mock_client.download_documentos.return_value = [
+        {
+            "nome": "principal.pdf",
+            "tamanhoBytes": 10,
+            "localPath": str(tmp_path / "principal.pdf"),
+            "checksum": "dup",
+            "fonte": "mni",
+        }
+    ]
+
+    mock_pje_client = AsyncMock()
+    mock_pje_client.download_processo.return_value = [
+        {
+            "nome": "principal-copy.pdf",
+            "tamanhoBytes": 10,
+            "localPath": str(tmp_path / "principal-copy.pdf"),
+            "checksum": "dup",
+            "fonte": "pje_api",
+        },
+        {
+            "nome": "anexo.pdf",
+            "tamanhoBytes": 5,
+            "localPath": str(tmp_path / "anexo.pdf"),
+            "checksum": "annex",
+            "fonte": "pje_api",
+        },
+    ]
+
+    with (
+        patch("mni_client.MNIClient", return_value=mock_client),
+        patch("pje_session.PJeSessionClient", return_value=mock_pje_client),
+        patch("gdrive_downloader.is_processo_antigo", return_value=False),
+        patch(
+            "gdrive_downloader.download_gdrive_folder",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        progress = await download_batch(
+            numeros=["1234567-89.2024.8.08.0001"],
+            output_dir=tmp_path,
+            delay_entre_processos=0.0,
+        )
+
+    ps = progress.processos["1234567-89.2024.8.08.0001"]
+    assert ps.status == "done"
+    assert ps.docs_baixados == 2
+    mock_pje_client.download_processo.assert_awaited_once_with(
+        "1234567-89.2024.8.08.0001",
+        tmp_path / "1234567-89.2024.8.08.0001",
+        include_anexos=True,
+        include_principais=False,
+    )
+    assert (
+        mock_pje_client.download_processo.await_args.kwargs["include_principais"]
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_download_batch_reports_pending_annexes_without_session(
+    tmp_path, monkeypatch
+):
+    """MNI-only runs should no longer hide annexes that remain pending."""
+    monkeypatch.setenv("MNI_USERNAME", "u")
+    monkeypatch.setenv("MNI_PASSWORD", "p")
+    import pje_session
+
+    monkeypatch.setattr(pje_session, "SESSION_FILE", tmp_path / "missing-session.json")
+
+    from batch_downloader import download_batch
+
+    result = MagicMock()
+    result.success = True
+    result.processo = MagicMock(
+        documentos=[MagicMock(vinculados=[MagicMock(), MagicMock()], tipo="pdf")]
+    )
+
+    mock_client = AsyncMock()
+    mock_client.health_check.return_value = {
+        "status": "healthy",
+        "tribunal": "T",
+        "operations": [],
+        "latency_ms": 1,
+    }
+    mock_client.consultar_processo.return_value = result
+    mock_client.download_documentos.return_value = [
+        {
+            "nome": "principal.pdf",
+            "tamanhoBytes": 10,
+            "localPath": str(tmp_path / "principal.pdf"),
+            "checksum": "main",
+            "fonte": "mni",
+        }
+    ]
+
+    with (
+        patch("mni_client.MNIClient", return_value=mock_client),
+        patch("gdrive_downloader.is_processo_antigo", return_value=False),
+        patch(
+            "gdrive_downloader.download_gdrive_folder",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        progress = await download_batch(
+            numeros=["1234567-89.2024.8.08.0001"],
+            output_dir=tmp_path,
+            delay_entre_processos=0.0,
+        )
+
+    ps = progress.processos["1234567-89.2024.8.08.0001"]
+    assert ps.status == "done"
+    assert "anexo" in ps.phase_detail.lower()
+    assert ps.erro is not None
+
+
+@pytest.mark.asyncio
+async def test_download_batch_warns_when_annex_complement_returns_empty(
+    tmp_path, monkeypatch
+):
+    """Annex-only complement must surface a warning when the session returns no files."""
+    monkeypatch.setenv("MNI_USERNAME", "u")
+    monkeypatch.setenv("MNI_PASSWORD", "p")
+    import pje_session
+
+    session_file = tmp_path / "session.json"
+    session_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(pje_session, "SESSION_FILE", session_file)
+
+    from batch_downloader import download_batch
+
+    result = MagicMock()
+    result.success = True
+    result.processo = MagicMock(
+        documentos=[MagicMock(vinculados=[MagicMock()], tipo="pdf")]
+    )
+
+    mock_client = AsyncMock()
+    mock_client.health_check.return_value = {
+        "status": "healthy",
+        "tribunal": "T",
+        "operations": [],
+        "latency_ms": 1,
+    }
+    mock_client.consultar_processo.return_value = result
+    mock_client.download_documentos.return_value = [
+        {
+            "nome": "principal.pdf",
+            "tamanhoBytes": 10,
+            "localPath": str(tmp_path / "principal.pdf"),
+            "checksum": "main",
+            "fonte": "mni",
+        }
+    ]
+
+    mock_pje_client = AsyncMock()
+    mock_pje_client.download_processo.return_value = []
+
+    with (
+        patch("mni_client.MNIClient", return_value=mock_client),
+        patch("pje_session.PJeSessionClient", return_value=mock_pje_client),
+        patch("gdrive_downloader.is_processo_antigo", return_value=False),
+        patch(
+            "gdrive_downloader.download_gdrive_folder",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        progress = await download_batch(
+            numeros=["1234567-89.2024.8.08.0001"],
+            output_dir=tmp_path,
+            delay_entre_processos=0.0,
+        )
+
+    ps = progress.processos["1234567-89.2024.8.08.0001"]
+    assert ps.status == "done"
+    assert ps.erro is not None
+    assert "não retornou anexos" in ps.erro
 
 
 # ─────────────────────────────────────────────
