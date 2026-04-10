@@ -45,7 +45,7 @@ class TestIsValidProcesso:
 
 class TestLoadEnv:
     def test_module_reload_applies_dotenv_before_constants(self, monkeypatch):
-        """Reloading config should apply dotenv values before env-backed constants are set."""
+        """Reloading config should apply repo-local dotenv before env-backed constants."""
         import config
         from pathlib import Path
 
@@ -72,25 +72,14 @@ class TestLoadEnv:
         assert str(reloaded.DOWNLOAD_BASE_DIR) == "/tmp/pje-dotenv"
         assert reloaded.DASHBOARD_API_KEY == "secret"
 
-    def test_loads_from_dotenv(self, tmp_path, monkeypatch):
-        """Create a .env in the project dir candidate path and verify load_env reads it."""
+    def test_explicit_env_file_overrides_default_candidate(self, tmp_path, monkeypatch):
+        """PJE_DOWNLOAD_ENV_FILE should be the only external dotenv entrypoint."""
         import config
 
-        env_file = tmp_path / ".env"
+        env_file = tmp_path / "custom.env"
         env_file.write_text("PJE_TEST_LOAD_VAR=loaded_ok\n")
         monkeypatch.delenv("PJE_TEST_LOAD_VAR", raising=False)
-
-        def patched_load():
-            for line in env_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    import re as _re
-
-                    key, _, val = line.partition("=")
-                    val = _re.split(r"\s+#\s", val, maxsplit=1)[0].strip()
-                    os.environ.setdefault(key.strip(), val)
-
-        monkeypatch.setattr(config, "load_env", patched_load)
+        monkeypatch.setenv("PJE_DOWNLOAD_ENV_FILE", str(env_file))
 
         config.load_env()
         assert os.environ.get("PJE_TEST_LOAD_VAR") == "loaded_ok"

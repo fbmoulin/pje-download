@@ -109,13 +109,21 @@ class TestDashboardState:
         batch_dir = tmp_path / "20240101_120000_abc123"
         batch_dir.mkdir()
         report = {
+            "status": "failed",
+            "created_at": "2024-01-01T11:00:00+00:00",
+            "started_at": "2024-01-01T11:05:00+00:00",
             "completed_at": "2024-01-01T12:00:00+00:00",
+            "error": "worker timeout",
             "processos": {"1234567-89.2024.8.08.0001": {"status": "done"}},
         }
         (batch_dir / "_report.json").write_text(json.dumps(report), encoding="utf-8")
 
         ds = DashboardState(tmp_path)
         assert "20240101_120000_abc123" in ds.batches
+        loaded = ds.batches["20240101_120000_abc123"]
+        assert loaded.status == "failed"
+        assert loaded.error == "worker timeout"
+        assert loaded.started_at == "2024-01-01T11:05:00+00:00"
 
     def test_progress_event_updates_phase_without_completing_batch(self, tmp_path):
         ds = DashboardState(tmp_path)
@@ -889,6 +897,14 @@ class TestRuntimeConfigValidation:
         with patch("config.DASHBOARD_API_KEY", ""):
             with pytest.raises(RuntimeError, match="DASHBOARD_API_KEY"):
                 dashboard_api.create_app(tmp_path)
+
+    def test_create_app_rotates_audit_logs(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(dashboard_api, "APP_ENV", "development")
+        monkeypatch.setattr(dashboard_api, "AUDIT_LOG_RETENTION_DAYS", 45)
+        with patch("audit.rotate_logs", return_value=2) as mock_rotate:
+            app = dashboard_api.create_app(tmp_path)
+        assert isinstance(app, web.Application)
+        mock_rotate.assert_called_once_with(max_days=45)
 
 
 # ─────────────────────────────────────────────

@@ -60,6 +60,7 @@ services:
       MNI_PROXY: ${MNI_PROXY:-}
       TRUST_X_FORWARDED_FOR: ${TRUST_X_FORWARDED_FOR:-false}
       WORKER_HEALTH_HOST: worker
+      AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-90}
     ports:
       - "${DASHBOARD_PORT:-8007}:8007"
     volumes:
@@ -88,7 +89,7 @@ services:
       dockerfile: Dockerfile
       target: worker
     container_name: pje-worker
-    restart: "no"
+    restart: unless-stopped
     mem_limit: 512m
     environment:
       APP_ENV: ${APP_ENV:-development}
@@ -114,6 +115,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8006/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
     networks:
       - pje-net
     profiles:

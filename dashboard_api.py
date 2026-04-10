@@ -44,6 +44,7 @@ log: structlog.BoundLogger = structlog.get_logger("kratos.dashboard-api")
 
 from config import (
     APP_ENV,
+    AUDIT_LOG_RETENTION_DAYS,
     DASHBOARD_PORT as DEFAULT_PORT,
     DOWNLOAD_BASE_DIR as DEFAULT_OUTPUT,
     REDIS_URL,
@@ -130,10 +131,14 @@ class DashboardState:
                 job = BatchJob(
                     id=batch_id,
                     processos=list(data.get("processos", {}).keys()),
-                    status="done",
+                    status=data.get("status", "done"),
+                    created_at=data.get("created_at", ""),
+                    started_at=data.get("started_at"),
                     finished_at=data.get("completed_at", ""),
                     output_dir=str(report_file.parent),
+                    include_anexos=data.get("include_anexos", True),
                     progress=data,
+                    error=data.get("error"),
                 )
                 self.batches[batch_id] = job
             except Exception as exc:
@@ -292,55 +297,6 @@ class DashboardState:
             "pending": max(total - done - failed, 0),
         }
         return worker_status
-
-    def _apply_progress_event(self, job: BatchJob, event: dict) -> None:
-        numero = event.get("numeroProcesso", "")
-        processos = job.progress.setdefault("processos", {})
-        current = processos.get(numero) or {
-            "status": "queued",
-            "phase": "waiting",
-            "phase_detail": "Aguardando worker",
-            "total_docs": 0,
-            "docs_baixados": 0,
-            "tamanho_bytes": 0,
-            "erro": None,
-            "duracao_s": None,
-        }
-        current.update(
-            {
-                "status": event.get(
-                    "status",
-                    "running"
-                    if current.get("status") == "queued"
-                    else current.get("status", "running"),
-                ),
-                "phase": event.get("phase", current.get("phase", "starting")),
-                "phase_detail": event.get(
-                    "phase_detail", current.get("phase_detail", "")
-                ),
-                "total_docs": event.get("total_docs", current.get("total_docs", 0)),
-                "docs_baixados": event.get(
-                    "docs_baixados", current.get("docs_baixados", 0)
-                ),
-                "tamanho_bytes": event.get(
-                    "tamanho_bytes", current.get("tamanho_bytes", 0)
-                ),
-                "erro": event.get("erro", current.get("erro")),
-            }
-        )
-        processos[numero] = current
-
-        done = sum(1 for proc in processos.values() if proc.get("status") == "done")
-        failed = sum(
-            1 for proc in processos.values() if proc.get("status") in {"failed"}
-        )
-        total = len(job.processos)
-        job.progress["summary"] = {
-            "total": total,
-            "done": done,
-            "failed": failed,
-            "pending": max(total - done - failed, 0),
-        }
 
     def _apply_progress_event(self, job: BatchJob, event: dict) -> None:
         numero = event.get("numeroProcesso", "")
@@ -960,10 +916,27 @@ def _validate_runtime_config() -> None:
         raise RuntimeError("DASHBOARD_API_KEY is required when APP_ENV=production")
 
 
+def _rotate_audit_logs_on_startup() -> None:
+    """Trim old audit logs opportunistically on dashboard startup."""
+    from audit import rotate_logs
+
+    try:
+        deleted = rotate_logs(max_days=AUDIT_LOG_RETENTION_DAYS)
+        if deleted:
+            log.info(
+                "dashboard.audit.rotation_complete",
+                deleted=deleted,
+                retention_days=AUDIT_LOG_RETENTION_DAYS,
+            )
+    except Exception as exc:
+        log.warning("dashboard.audit.rotation_failed", error=str(exc))
+
+
 def create_app(output_dir: Path) -> web.Application:
     """Cria a aplicação aiohttp."""
     global state
     _validate_runtime_config()
+    _rotate_audit_logs_on_startup()
     state = DashboardState(output_dir)
 
     app = web.Application()

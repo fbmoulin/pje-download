@@ -10,12 +10,13 @@ CNJ_PATTERN = re.compile(r"^\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}$")
 
 
 def load_env() -> None:
-    """Load .env from kratos-master config (Windows or relative path)."""
-    candidates = [
-        Path(r"C:\projetos-2026\kratos-master\config\.env"),
-        Path(__file__).resolve().parent.parent / "kratos-master" / "config" / ".env",
-        Path(__file__).resolve().parent / ".env",
-    ]
+    """Load environment defaults from an explicit file or the repo-local `.env`."""
+    candidates: list[Path] = []
+    explicit_env = os.getenv("PJE_DOWNLOAD_ENV_FILE", "").strip()
+    if explicit_env:
+        candidates.append(Path(explicit_env).expanduser())
+    candidates.append(Path(__file__).resolve().parent / ".env")
+
     for env_path in candidates:
         if env_path.exists():
             for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -84,6 +85,7 @@ PJE_BASE_URL = _pje_url
 SESSION_STATE_PATH = Path(os.getenv("SESSION_STATE_PATH", "/data/pje-session.json"))
 DOWNLOAD_BASE_DIR = Path(os.getenv("DOWNLOAD_BASE_DIR", "/data/downloads"))
 AUDIT_LOG_DIR = Path(os.getenv("AUDIT_LOG_DIR", "/data/audit"))
+AUDIT_LOG_RETENTION_DAYS = int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "90"))
 SESSION_TIMEOUT_MINUTES = int(os.getenv("SESSION_TIMEOUT_MINUTES", "60"))
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 MAX_DOCS_PER_SESSION = int(os.getenv("MAX_DOCS_PER_SESSION", "50"))

@@ -80,9 +80,10 @@ jobs:
               printf 'DASHBOARD_PORT=8007\n'
               printf 'WORKER_HEALTH_HOST=worker\n'
               printf 'TRUST_X_FORWARDED_FOR=false\n'
+              printf 'AUDIT_LOG_RETENTION_DAYS=90\n'
             } > /opt/pje-download/.env
 
-      - name: Restart dashboard
+      - name: Restart services
         uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -91,14 +92,25 @@ jobs:
           script: |
             set -e
             cd /opt/pje-download
-            docker compose up -d --build dashboard
-            if docker ps --format '{{.Names}}' | grep -qx 'pje-worker'; then
-              echo "Worker running on VPS; rebuilding worker too"
-              docker compose --profile worker up -d --build worker
-            else
-              echo "Worker not running on VPS; skipping worker deploy"
-            fi
-            echo "Waiting for healthcheck..."
-            sleep 5
-            curl -sf http://localhost:8007/api/status
+            docker compose --profile worker up -d --build dashboard worker
+
+            echo "Waiting for worker healthcheck..."
+            for i in $(seq 1 24); do
+              worker_health=$(curl -fsS http://localhost:8006/health || true)
+              if printf '%s' "$worker_health" | grep -Eq '"healthy"[[:space:]]*:[[:space:]]*true'; then
+                break
+              fi
+              sleep 5
+            done
+            printf '%s' "$worker_health" | grep -Eq '"healthy"[[:space:]]*:[[:space:]]*true'
+
+            echo "Waiting for dashboard healthcheck..."
+            for i in $(seq 1 24); do
+              dashboard_status=$(curl -fsS http://localhost:8007/api/status || true)
+              if printf '%s' "$dashboard_status" | grep -Eq '"worker_status"[[:space:]]*:[[:space:]]*"(ready|consuming)"'; then
+                break
+              fi
+              sleep 5
+            done
+            printf '%s' "$dashboard_status" | grep -Eq '"worker_status"[[:space:]]*:[[:space:]]*"(ready|consuming)"'
             echo "Deploy OK"
