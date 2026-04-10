@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import web
@@ -183,6 +183,70 @@ class FakeClientSession:
 
     async def close(self):
         self.closed = True
+
+
+class FakeRedis:
+    """Minimal async Redis stub for dashboard queue orchestration tests."""
+
+    def __init__(self):
+        self.queues: dict[str, list[str]] = {}
+        self.closed = False
+
+    async def ping(self):
+        return True
+
+    async def close(self):
+        self.closed = True
+
+    async def delete(self, key: str):
+        self.queues.pop(key, None)
+        return 1
+
+    async def rpush(self, key: str, *values: str):
+        queue = self.queues.setdefault(key, [])
+        queue.extend(values)
+        if key == "kratos:pje:jobs":
+            for raw in values:
+                payload = json.loads(raw)
+                result_queue = payload["replyQueue"]
+                self.queues.setdefault(result_queue, []).append(
+                    json.dumps(
+                        {
+                            "jobId": payload["jobId"],
+                            "batchId": payload["batchId"],
+                            "numeroProcesso": payload["numeroProcesso"],
+                            "status": "success",
+                            "arquivosDownloaded": [
+                                {
+                                    "nome": "doc.pdf",
+                                    "tamanhoBytes": 42,
+                                    "checksum": payload["numeroProcesso"],
+                                }
+                            ],
+                            "errorMessage": None,
+                            "downloadedAt": "2026-01-01T00:00:00+00:00",
+                        }
+                    )
+                )
+        return len(queue)
+
+    async def blpop(self, key: str, timeout: int = 0):
+        queue = self.queues.get(key, [])
+        if not queue:
+            return None
+        return key, queue.pop(0)
+
+    async def lrem(self, key: str, count: int, value: str):
+        queue = self.queues.get(key, [])
+        removed = 0
+        kept = []
+        for item in queue:
+            if item == value and (count == 0 or removed < count):
+                removed += 1
+                continue
+            kept.append(item)
+        self.queues[key] = kept
+        return removed
 
 
 async def _ok_handler(request):
@@ -725,7 +789,7 @@ class TestPurgeStaleBuckets:
 class TestRunBatch:
     @pytest.mark.asyncio
     async def test_run_batch_completes(self, tmp_path):
-        """_run_batch stores completion status."""
+        """_run_batch persists batch progress from Redis worker results."""
         ds = DashboardState(tmp_path)
         job = BatchJob(
             id="run_ok",
@@ -735,25 +799,20 @@ class TestRunBatch:
         )
         ds.batches["run_ok"] = job
 
-        # Mock download_batch to return a progress-like object
-        mock_progress = MagicMock()
-        mock_progress.total = 1
-        mock_progress.done = 1
-        mock_progress.failed = 0
-        mock_progress.processos = {}
+        fake_redis = FakeRedis()
+        ds.get_redis = AsyncMock(return_value=fake_redis)
 
-        with (
-            patch("batch_downloader._load_env"),
-            patch("batch_downloader.download_batch", return_value=mock_progress),
-        ):
-            await ds._run_batch(job)
+        await ds._run_batch(job)
 
         assert job.status == "done"
         assert job.finished_at is not None
+        assert job.progress["summary"]["done"] == 1
+        assert (tmp_path / "run_ok" / "_progress.json").exists()
+        assert (tmp_path / "run_ok" / "_report.json").exists()
 
     @pytest.mark.asyncio
     async def test_run_batch_handles_exception(self, tmp_path):
-        """_run_batch catches exceptions and sets failed status."""
+        """_run_batch catches Redis/control-plane exceptions and sets failed status."""
         ds = DashboardState(tmp_path)
         job = BatchJob(
             id="run_fail",
@@ -763,18 +822,24 @@ class TestRunBatch:
         )
         ds.batches["run_fail"] = job
 
-        with (
-            patch("batch_downloader._load_env"),
-            patch(
-                "batch_downloader.download_batch",
-                side_effect=RuntimeError("connection failed"),
-            ),
-        ):
-            await ds._run_batch(job)
+        async def fail_get_redis():
+            raise RuntimeError("connection failed")
+
+        ds.get_redis = fail_get_redis
+
+        await ds._run_batch(job)
 
         assert job.status == "failed"
         assert job.error == "connection failed"
         assert job.finished_at is not None
+
+
+class TestRuntimeConfigValidation:
+    def test_production_requires_dashboard_api_key(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(dashboard_api, "APP_ENV", "production")
+        with patch("config.DASHBOARD_API_KEY", ""):
+            with pytest.raises(RuntimeError, match="DASHBOARD_API_KEY"):
+                dashboard_api.create_app(tmp_path)
 
 
 # ─────────────────────────────────────────────

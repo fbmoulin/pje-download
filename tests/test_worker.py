@@ -491,6 +491,50 @@ class TestConsumeQueueShutdown:
             ANY,
         )
 
+    @pytest.mark.asyncio
+    async def test_result_is_published_to_job_reply_queue(self):
+        import asyncio
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        shutdown = asyncio.Event()
+
+        async def blpop(*args, **kwargs):
+            shutdown.set()
+            return (
+                "kratos:pje:jobs",
+                json.dumps(
+                    {
+                        "jobId": "J1",
+                        "batchId": "batch-1",
+                        "replyQueue": "kratos:pje:results:batch-1",
+                        "numeroProcesso": "5000001-00.2024.8.08.0001",
+                    }
+                ),
+            )
+
+        mock_r.blpop = blpop
+        worker.redis = mock_r
+        worker.mni_client = MagicMock()
+        worker.download_process = AsyncMock(
+            return_value={
+                "jobId": "J1",
+                "numeroProcesso": "5000001-00.2024.8.08.0001",
+                "status": "success",
+                "arquivosDownloaded": [],
+                "errorMessage": None,
+            }
+        )
+        worker._publish_result = AsyncMock()
+
+        await worker.consume_queue(shutdown)
+
+        worker._publish_result.assert_awaited_once()
+        assert worker._publish_result.await_args.kwargs["queue_name"] == (
+            "kratos:pje:results:batch-1"
+        )
+
 
 class TestPublishResult:
     """_publish_result() retries on Redis failure."""
@@ -503,6 +547,23 @@ class TestPublishResult:
         worker.redis = mock_r
         await worker._publish_result({"jobId": "J1", "status": "success"})
         mock_r.lpush.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_publish_can_target_batch_reply_queue(self):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        worker.redis = mock_r
+
+        await worker._publish_result(
+            {"jobId": "J1", "status": "success"},
+            queue_name="kratos:pje:results:batch-123",
+        )
+
+        mock_r.lpush.assert_awaited_once_with(
+            "kratos:pje:results:batch-123",
+            ANY,
+        )
 
     @pytest.mark.asyncio
     async def test_publish_retries_on_failure(self):
@@ -553,6 +614,40 @@ class TestPublishResult:
 
 
 class TestDownloadProcess:
+    @pytest.mark.asyncio
+    async def test_output_subdir_is_respected(self, tmp_path):
+        w = _load_worker_module()
+        w.DOWNLOAD_BASE_DIR = tmp_path
+        worker = w.PJeSessionWorker()
+        worker.mni_client = MagicMock()
+        worker._try_mni_download = AsyncMock(
+            return_value=(
+                [
+                    {
+                        "nome": "doc.pdf",
+                        "checksum": "abc",
+                        "tamanhoBytes": 10,
+                        "localPath": str(tmp_path / "batch-1" / "proc" / "doc.pdf"),
+                        "fonte": "mni",
+                    }
+                ],
+                0,
+            )
+        )
+        worker._log_job_result = AsyncMock()
+        worker.is_session_expired = MagicMock(return_value=False)
+
+        result = await worker.download_process(
+            {
+                "jobId": "J0",
+                "numeroProcesso": "5000000-00.2024.8.08.0001",
+                "outputSubdir": "batch-1/proc",
+            }
+        )
+
+        assert result["status"] == "success"
+        assert (tmp_path / "batch-1" / "proc").is_dir()
+
     @pytest.mark.asyncio
     async def test_mni_pending_annexes_returns_warning(self):
         w = _load_worker_module()

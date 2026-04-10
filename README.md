@@ -4,6 +4,11 @@
 
 Automacao de download de documentos processuais do PJe (Processo Judicial Eletronico) via MNI SOAP, API REST e browser automation.
 
+O caminho principal de execucao agora e desacoplado:
+- a dashboard publica um job Redis por processo
+- o worker executa os downloads e responde por fila especifica do batch
+- a dashboard agrega resultados e persiste `_progress.json` e `_report.json`
+
 ## Arquitetura
 
 ```
@@ -12,35 +17,38 @@ Automacao de download de documentos processuais do PJe (Processo Judicial Eletro
                      +--------+---------+
                               |
                      +--------v---------+
-                     |  dashboard_api   |  aiohttp REST API (:8007)
+                     |  dashboard_api   |  aiohttp control plane (:8007)
                      +--------+---------+
                               |
-              +---------------+---------------+
-              |                               |
-    +---------v----------+          +---------v----------+
-    |  batch_downloader  |          |      worker.py     |
-    |  (CLI / API call)  |          |  (Redis queue consumer)
-    +---------+----------+          +---------+----------+
-              |                               |
-    +---------v----------+          +---------v----------+
-    |    mni_client.py   |          |   3 strategies:    |
-    |  (SOAP/WSDL zeep)  |          |  MNI > API > Browser
-    +--------------------+          +--------------------+
-              |
-    +---------v-----------+
-    | gdrive_downloader   |
-    | (processos antigos) |
-    +---------------------+
+                     +--------v---------+
+                     |      Redis       |
+                     | jobs + reply q   |
+                     +--------+---------+
+                              |
+                     +--------v---------+
+                     |     worker.py    |  execution plane
+                     | MNI > API > Browser
+                     +--------+---------+
+                              |
+         +--------------------+--------------------+
+         |                    |                    |
+ +-------v--------+   +-------v--------+   +-------v--------+
+ |  mni_client.py |   | pje_session.py |   |gdrive_downloader|
+ |  SOAP / WSDL   |   | API + browser  |   | processos antigos|
+ +----------------+   +----------------+   +----------------+
+
+CLI offline:
+  batch_downloader.py -> mesmos integradores, sem passar pela dashboard
 ```
 
 ## Componentes
 
 | Arquivo | Linhas | Funcao |
 |---------|--------|--------|
-| `worker.py` | ~1111 | Worker PJe com 3 estrategias em cascata, downloads paralelos, deep health checks |
+| `worker.py` | ~1111 | Worker PJe com 3 estrategias em cascata, reply queues por batch, downloads paralelos e deep health checks |
 | `mni_client.py` | ~798 | Cliente SOAP para MNI — download em 2 fases com dedup por checksum |
 | `batch_downloader.py` | ~744 | Download em lote via CLI com progresso atomico, retomada e relatorio |
-| `dashboard_api.py` | ~701 | API REST (aiohttp) com rate limiting, validacao CNJ, recuperacao parcial e gestao de sessao PJe |
+| `dashboard_api.py` | ~701 | Control plane aiohttp — valida batches, publica jobs Redis, agrega resultados do worker e persiste progresso/relatorio |
 | `pje_session.py` | ~393 | Login interativo PJe (Playwright), persistencia de sessao Keycloak, API REST + browser fallback |
 | `dashboard.html` | ~193 | Frontend HTML com Google Fonts, data-animate attrs e card de sessao PJe |
 | `static/css/style.css` | ~685 | Design system — glassmorphism, Oswald KPIs, dot-grid bg, staggered animations |
@@ -129,15 +137,22 @@ Todas as variaveis sao configuradas via ambiente (centralizadas em `config.py`):
 | `DASHBOARD_PORT` | `8007` | Porta da dashboard API |
 | `MNI_ENABLED` | `true` | Habilitar/desabilitar MNI SOAP |
 | `BATCH_DELAY_SECS` | `2.0` | Pausa entre processos no batch |
+| `APP_ENV` | `development` | Quando `production`, exige `DASHBOARD_API_KEY` |
+| `DASHBOARD_API_KEY` | *(vazio)* | Chave obrigatoria para endpoints POST em producao |
+| `TRUST_X_FORWARDED_FOR` | `false` | So habilitar atras de proxy confiavel |
 
 ## Uso
 
 ### Dashboard (recomendado)
 
 ```bash
+redis-server
+python worker.py
 python dashboard_api.py --port 8007 --output ./downloads
 # Abrir http://localhost:8007
 ```
+
+Sem `worker.py` ativo, a dashboard aceita o batch mas nao tem plano de execucao.
 
 ### CLI Batch
 
@@ -160,7 +175,9 @@ python batch_downloader.py -i processos.json --gdrive-map gdrive_links.json
 ```bash
 # Requer Redis rodando
 python worker.py
-# Publica jobs em kratos:pje:jobs, resultados em kratos:pje:results
+# Consome jobs em kratos:pje:jobs
+# A dashboard usa reply queues por batch: kratos:pje:results:<batch_id>
+# Cada job pode informar outputSubdir para manter os arquivos dentro da pasta do batch
 ```
 
 ## API Endpoints
@@ -169,7 +186,7 @@ python worker.py
 |--------|------|-----------|
 | `GET` | `/` | Dashboard HTML |
 | `GET` | `/api/status` | Status geral do worker |
-| `POST` | `/api/download` | Submeter processos (rate limited: 10/60s) |
+| `POST` | `/api/download` | Publicar batch na fila Redis/worker (rate limited: 10/60s) |
 | `GET` | `/api/progress` | Progresso do batch atual (polling) |
 | `GET` | `/api/history` | Historico de todos os batches |
 | `GET` | `/api/batch/{id}` | Detalhes de um batch especifico |
@@ -192,6 +209,11 @@ python worker.py
 ```
 
 Respostas: `201` (criado), `400` (formato CNJ invalido), `409` (batch em execucao), `422` (>500 processos), `429` (rate limit).
+
+Observacoes operacionais:
+- a dashboard cria uma pasta por batch e consolida os resultados do worker nessa pasta
+- falhas de sessao/CAPTCHA no worker encerram o restante do batch como falha rastreavel
+- em producao, configure `DASHBOARD_API_KEY` e `REDIS_PASSWORD`; o workflow de deploy agora falha se esses secrets estiverem ausentes
 
 ### GET /metrics
 

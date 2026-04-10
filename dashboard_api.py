@@ -33,6 +33,7 @@ from pathlib import Path
 
 import aiohttp
 from aiohttp import web
+import redis.asyncio as redis
 import structlog
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.dashboard-api")
@@ -42,11 +43,15 @@ log: structlog.BoundLogger = structlog.get_logger("kratos.dashboard-api")
 # ─────────────────────────────────────────────
 
 from config import (
+    APP_ENV,
     DASHBOARD_PORT as DEFAULT_PORT,
     DOWNLOAD_BASE_DIR as DEFAULT_OUTPUT,
+    REDIS_URL,
     HEALTH_PORT as WORKER_HEALTH_PORT,
     WORKER_HEALTH_HOST,
     TRUST_X_FORWARDED_FOR,
+    atomic_write_text,
+    sanitize_filename,
 )
 
 
@@ -74,6 +79,7 @@ class BatchJob:
 
 MAX_BATCH_SIZE = 500  # máximo de processos por batch
 MAX_BATCH_HISTORY = 100  # max completed batches kept in memory
+RESULT_WAIT_TIMEOUT_SECS = 360
 
 
 class DashboardState:
@@ -87,7 +93,15 @@ class DashboardState:
         self._progress_cache: dict | None = None
         self._progress_cache_time: float = 0.0
         self._worker_http: aiohttp.ClientSession | None = None
+        self._redis: redis.Redis | None = None
         self._load_history()
+
+    async def get_redis(self) -> redis.Redis:
+        """Lazily create a Redis client used by the dashboard control plane."""
+        if self._redis is None:
+            self._redis = redis.from_url(REDIS_URL, decode_responses=True)
+        await self._redis.ping()
+        return self._redis
 
     def get_worker_http(self) -> aiohttp.ClientSession:
         """Reuse a single HTTP session for worker health polling."""
@@ -101,6 +115,9 @@ class DashboardState:
         if self._worker_http is not None and not self._worker_http.closed:
             await self._worker_http.close()
         self._worker_http = None
+        if self._redis is not None:
+            await self._redis.close()
+        self._redis = None
 
     def _load_history(self):
         """Carrega histórico de batches anteriores dos _report.json em disco."""
@@ -165,7 +182,7 @@ class DashboardState:
         )
         self.batches[batch_id] = job
 
-        # Iniciar download em background
+        batch_dir.mkdir(parents=True, exist_ok=True)
         self._task = asyncio.create_task(self._run_batch(job))
         self.current_batch_id = batch_id
 
@@ -174,80 +191,263 @@ class DashboardState:
         )
         return job
 
+    def _progress_path(self, job: BatchJob) -> Path:
+        return Path(job.output_dir) / "_progress.json"
+
+    def _report_path(self, job: BatchJob) -> Path:
+        return Path(job.output_dir) / "_report.json"
+
+    def _result_queue(self, batch_id: str) -> str:
+        return f"kratos:pje:results:{batch_id}"
+
+    def _build_initial_progress(self, job: BatchJob) -> dict:
+        processos = {
+            numero: {
+                "status": "queued",
+                "phase": "waiting",
+                "phase_detail": "Aguardando worker",
+                "total_docs": 0,
+                "docs_baixados": 0,
+                "tamanho_bytes": 0,
+                "erro": None,
+                "duracao_s": None,
+            }
+            for numero in job.processos
+        }
+        return {
+            "summary": {
+                "total": len(job.processos),
+                "done": 0,
+                "failed": 0,
+                "pending": len(job.processos),
+            },
+            "processos": processos,
+        }
+
+    def _persist_progress(self, job: BatchJob) -> None:
+        Path(job.output_dir).mkdir(parents=True, exist_ok=True)
+        atomic_write_text(
+            self._progress_path(job),
+            json.dumps(job.progress, ensure_ascii=False, indent=2),
+        )
+
+    def _persist_report(self, job: BatchJob) -> None:
+        Path(job.output_dir).mkdir(parents=True, exist_ok=True)
+        report = {
+            "batch_id": job.id,
+            "created_at": job.created_at,
+            "started_at": job.started_at,
+            "completed_at": job.finished_at,
+            "status": job.status,
+            "include_anexos": job.include_anexos,
+            "error": job.error,
+            **job.progress,
+        }
+        atomic_write_text(
+            self._report_path(job),
+            json.dumps(report, ensure_ascii=False, indent=2),
+        )
+
+    def _batch_job_payload(self, job: BatchJob, numero_processo: str) -> dict:
+        safe_name = sanitize_filename(numero_processo)
+        return {
+            "jobId": f"{job.id}:{uuid.uuid4().hex[:8]}",
+            "batchId": job.id,
+            "numeroProcesso": numero_processo,
+            "includeAnexos": job.include_anexos,
+            "replyQueue": self._result_queue(job.id),
+            "outputSubdir": f"{job.id}/{safe_name}",
+            "gdriveUrl": job.gdrive_map.get(numero_processo),
+        }
+
+    def _apply_result(self, job: BatchJob, result: dict) -> str:
+        numero = result.get("numeroProcesso", "")
+        files = result.get("arquivosDownloaded") or []
+        docs_baixados = len(files)
+        tamanho_bytes = sum(int(item.get("tamanhoBytes", 0) or 0) for item in files)
+        worker_status = result.get("status", "failed")
+        error = result.get("errorMessage")
+        status = "done" if worker_status == "success" else "failed"
+        phase = "done" if status == "done" else "failed"
+
+        processos = job.progress.setdefault("processos", {})
+        processos[numero] = {
+            "status": status,
+            "phase": phase,
+            "phase_detail": error if status == "done" and error else None,
+            "total_docs": docs_baixados,
+            "docs_baixados": docs_baixados,
+            "tamanho_bytes": tamanho_bytes,
+            "erro": error if status == "failed" else None,
+            "duracao_s": None,
+        }
+
+        done = sum(1 for proc in processos.values() if proc.get("status") == "done")
+        failed = sum(1 for proc in processos.values() if proc.get("status") == "failed")
+        total = len(job.processos)
+        job.progress["summary"] = {
+            "total": total,
+            "done": done,
+            "failed": failed,
+            "pending": max(total - done - failed, 0),
+        }
+        return worker_status
+
+    def _fail_remaining_processes(
+        self,
+        job: BatchJob,
+        pending: set[str],
+        error: str,
+    ) -> None:
+        processos = job.progress.setdefault("processos", {})
+        for numero in pending:
+            current = processos.get(numero, {})
+            if current.get("status") in ("done", "failed"):
+                continue
+            processos[numero] = {
+                "status": "failed",
+                "phase": "failed",
+                "phase_detail": error,
+                "total_docs": 0,
+                "docs_baixados": 0,
+                "tamanho_bytes": 0,
+                "erro": error,
+                "duracao_s": None,
+            }
+
+        done = sum(1 for proc in processos.values() if proc.get("status") == "done")
+        failed = sum(1 for proc in processos.values() if proc.get("status") == "failed")
+        total = len(job.processos)
+        job.progress["summary"] = {
+            "total": total,
+            "done": done,
+            "failed": failed,
+            "pending": max(total - done - failed, 0),
+        }
+
     async def _run_batch(self, job: BatchJob):
-        """Executa o batch downloader em background."""
+        """Executa um batch publicando jobs Redis e agregando resultados do worker."""
+        reply_queue = self._result_queue(job.id)
+        payloads_by_processo = {
+            numero: self._batch_job_payload(job, numero) for numero in job.processos
+        }
+        serialized_payloads = {
+            numero: json.dumps(payload, ensure_ascii=False)
+            for numero, payload in payloads_by_processo.items()
+        }
+
         try:
+            redis_client = await self.get_redis()
             job.status = "running"
             job.started_at = datetime.now(UTC).isoformat()
 
-            from batch_downloader import _load_env, download_batch
+            job.progress = self._build_initial_progress(job)
+            self._persist_progress(job)
+            await redis_client.delete(reply_queue)
+            if serialized_payloads:
+                await redis_client.rpush(
+                    "kratos:pje:jobs",
+                    *serialized_payloads.values(),
+                )
 
-            _load_env()
+            pending = set(job.processos)
+            last_result_at = time.monotonic()
 
-            progress = await download_batch(
-                numeros=job.processos,
-                output_dir=Path(job.output_dir),
-                incluir_anexos=job.include_anexos,
-                gdrive_url_map=job.gdrive_map if job.gdrive_map else None,
-            )
+            while pending:
+                item = await redis_client.blpop(reply_queue, timeout=5)
+                if not item:
+                    if time.monotonic() - last_result_at > RESULT_WAIT_TIMEOUT_SECS:
+                        timeout_error = (
+                            f"Worker timeout: batch sem resultados por "
+                            f"{RESULT_WAIT_TIMEOUT_SECS}s"
+                        )
+                        self._fail_remaining_processes(job, pending, timeout_error)
+                        job.error = timeout_error
+                        log.error(
+                            "dashboard.batch.result_timeout",
+                            batch_id=job.id,
+                            pending=len(pending),
+                        )
+                        break
+                    continue
+
+                _, result_json = item
+                result = json.loads(result_json)
+                numero = result.get("numeroProcesso")
+                if numero not in pending:
+                    continue
+
+                pending.remove(numero)
+                last_result_at = time.monotonic()
+                worker_status = self._apply_result(job, result)
+                self._persist_progress(job)
+
+                if worker_status in {"session_expired", "captcha_required"} and pending:
+                    fatal_error = result.get("errorMessage") or worker_status
+                    for pending_numero in pending:
+                        await redis_client.lrem(
+                            "kratos:pje:jobs",
+                            0,
+                            serialized_payloads[pending_numero],
+                        )
+                    self._fail_remaining_processes(job, pending, fatal_error)
+                    job.error = fatal_error
+                    pending.clear()
+                    self._persist_progress(job)
+                    break
 
             job.finished_at = datetime.now(UTC).isoformat()
-            job.progress = {
-                "total": progress.total,
-                "done": progress.done,
-                "failed": progress.failed,
-                "processos": {
-                    num: {
-                        "status": ps.status,
-                        "phase": ps.phase,
-                        "phase_detail": ps.phase_detail,
-                        "total_docs": ps.total_docs,
-                        "docs_baixados": ps.docs_baixados,
-                        "tamanho_bytes": ps.tamanho_bytes,
-                        "erro": ps.erro,
-                        "duracao_s": ps.duracao_s,
-                    }
-                    for num, ps in progress.processos.items()
-                },
-            }
+            summary = job.progress.get("summary", {})
+            done = int(summary.get("done", 0) or 0)
+            failed = int(summary.get("failed", 0) or 0)
 
-            # Determine final status based on actual results
-            if progress.failed > 0 and progress.done == 0:
+            if failed > 0 and done == 0:
                 job.status = "failed"
-                # Collect first error for display
-                first_err = next(
-                    (ps.erro for ps in progress.processos.values() if ps.erro),
-                    "All processes failed",
-                )
-                job.error = first_err
-            elif progress.failed > 0:
-                job.status = "done"  # partial success
-                job.error = f"{progress.failed}/{progress.total} processos falharam"
+                if not job.error:
+                    first_err = next(
+                        (
+                            proc.get("erro")
+                            for proc in job.progress.get("processos", {}).values()
+                            if proc.get("erro")
+                        ),
+                        "All processes failed",
+                    )
+                    job.error = first_err
+            elif failed > 0:
+                job.status = "done"
+                if not job.error:
+                    job.error = f"{failed}/{len(job.processos)} processos falharam"
             else:
                 job.status = "done"
+
+            self._persist_progress(job)
+            self._persist_report(job)
 
             log.info(
                 "dashboard.batch.complete",
                 batch_id=job.id,
                 status=job.status,
-                done=progress.done,
-                failed=progress.failed,
+                done=done,
+                failed=failed,
             )
             self._evict_old_batches()
 
         except Exception as exc:
-            # Recover partial progress if available
-            progress_file = Path(job.output_dir) / "_progress.json"
-            if progress_file.exists():
-                try:
-                    job.progress = json.loads(progress_file.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
             job.status = "failed"
             job.error = str(exc)
             job.finished_at = datetime.now(UTC).isoformat()
+            if not job.progress:
+                job.progress = self._build_initial_progress(job)
+            self._persist_progress(job)
+            self._persist_report(job)
             log.error("dashboard.batch.failed", batch_id=job.id, error=str(exc))
             self._evict_old_batches()
+        finally:
+            if self._redis is not None:
+                try:
+                    await self._redis.delete(reply_queue)
+                except Exception:
+                    pass
 
     def get_current_progress(self) -> dict | None:
         """Retorna progresso do batch atual — em memória (TTL 1s) durante execução."""
@@ -649,9 +849,18 @@ async def _on_cleanup(app: web.Application) -> None:
         await state.close()
 
 
+def _validate_runtime_config() -> None:
+    """Fail fast on insecure production dashboard configuration."""
+    from config import DASHBOARD_API_KEY
+
+    if APP_ENV == "production" and not DASHBOARD_API_KEY:
+        raise RuntimeError("DASHBOARD_API_KEY is required when APP_ENV=production")
+
+
 def create_app(output_dir: Path) -> web.Application:
     """Cria a aplicação aiohttp."""
     global state
+    _validate_runtime_config()
     state = DashboardState(output_dir)
 
     app = web.Application()

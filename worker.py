@@ -362,9 +362,16 @@ class PJeSessionWorker:
         self._health_status = "processing"
 
         safe_name = sanitize_filename(numero_processo)
-        output_dir = DOWNLOAD_BASE_DIR / safe_name
+        output_subdir = job.get("outputSubdir")
+        output_dir = (
+            DOWNLOAD_BASE_DIR / Path(output_subdir)
+            if output_subdir
+            else DOWNLOAD_BASE_DIR / safe_name
+        )
         if not output_dir.resolve().is_relative_to(DOWNLOAD_BASE_DIR.resolve()):
-            raise ValueError(f"Path traversal detected: {numero_processo}")
+            raise ValueError(
+                f"Path traversal detected: {output_subdir or numero_processo}"
+            )
         output_dir.mkdir(parents=True, exist_ok=True)
 
         downloaded_files: list[dict] = []
@@ -1035,12 +1042,17 @@ class PJeSessionWorker:
     # QUEUE CONSUMER
     # ──────────────────────
 
-    async def _publish_result(self, result_data: dict, max_retries: int = 3) -> None:
+    async def _publish_result(
+        self,
+        result_data: dict,
+        max_retries: int = 3,
+        queue_name: str = "kratos:pje:results",
+    ) -> None:
         """Publish job result to Redis with retry. Falls back to local log on failure."""
         result_json = json.dumps(result_data)
         for attempt in range(max_retries):
             try:
-                await self.redis.lpush("kratos:pje:results", result_json)
+                await self.redis.lpush(queue_name, result_json)
                 return
             except (redis.ConnectionError, redis.TimeoutError, OSError) as exc:
                 if attempt == max_retries - 1:
@@ -1163,9 +1175,14 @@ class PJeSessionWorker:
             )
 
             result_data = await self.download_process(job)
+            if job.get("batchId"):
+                result_data["batchId"] = job["batchId"]
 
             # Publicar resultado para o n8n (com retry)
-            await self._publish_result(result_data)
+            await self._publish_result(
+                result_data,
+                queue_name=job.get("replyQueue", "kratos:pje:results"),
+            )
 
             # Encerrar se sessão expirou e MNI não disponível
             if result_data["status"] == "session_expired" and self.mni_client is None:

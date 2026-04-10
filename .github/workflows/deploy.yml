@@ -51,13 +51,20 @@ jobs:
         env:
           MNI_USERNAME: ${{ secrets.MNI_USERNAME }}
           MNI_PASSWORD: ${{ secrets.MNI_PASSWORD }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          DASHBOARD_API_KEY: ${{ secrets.DASHBOARD_API_KEY }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: MNI_USERNAME,MNI_PASSWORD
+          envs: MNI_USERNAME,MNI_PASSWORD,REDIS_PASSWORD,DASHBOARD_API_KEY
           script: |
+            : "${MNI_USERNAME:?missing MNI_USERNAME secret}"
+            : "${MNI_PASSWORD:?missing MNI_PASSWORD secret}"
+            : "${REDIS_PASSWORD:?missing REDIS_PASSWORD secret}"
+            : "${DASHBOARD_API_KEY:?missing DASHBOARD_API_KEY secret}"
             {
+              printf 'APP_ENV=production\n'
               printf 'MNI_USERNAME=%s\n' "${MNI_USERNAME}"
               printf 'MNI_PASSWORD=%s\n' "${MNI_PASSWORD}"
               printf 'MNI_TRIBUNAL=TJES\n'
@@ -65,11 +72,14 @@ jobs:
               printf 'MNI_BATCH_SIZE=5\n'
               printf 'MNI_ENABLED=true\n'
               printf 'PJE_BASE_URL=https://pje.tjes.jus.br/pje\n'
-              printf 'REDIS_PASSWORD=pje_redis_2026\n'
-              printf 'REDIS_URL=redis://:pje_redis_2026@redis:6379\n'
+              printf 'DASHBOARD_API_KEY=%s\n' "${DASHBOARD_API_KEY}"
+              printf 'REDIS_PASSWORD=%s\n' "${REDIS_PASSWORD}"
+              printf 'REDIS_URL=redis://:%s@redis:6379\n' "${REDIS_PASSWORD}"
               printf 'DOWNLOAD_BASE_DIR=/data/downloads\n'
               printf 'HEALTH_PORT=8006\n'
               printf 'DASHBOARD_PORT=8007\n'
+              printf 'WORKER_HEALTH_HOST=worker\n'
+              printf 'TRUST_X_FORWARDED_FOR=false\n'
             } > /opt/pje-download/.env
 
       - name: Restart dashboard

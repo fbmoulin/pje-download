@@ -107,7 +107,8 @@ MNI_PROXY = os.getenv("MNI_PROXY", "")
 BATCH_SIZE_DEFAULT = int(os.getenv("MNI_BATCH_SIZE", "5"))
 BATCH_DELAY_DEFAULT = float(os.getenv("BATCH_DELAY_SECS", "2.0"))
 
-# Dashboard
+# Dashboard / Runtime
+APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8007"))
 DASHBOARD_API_KEY = os.getenv("DASHBOARD_API_KEY", "")
 # Forwarded headers are ignored unless explicitly enabled behind a trusted proxy.

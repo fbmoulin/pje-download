@@ -47,14 +47,18 @@ services:
     mem_limit: 256m
     command: ["python", "dashboard_api.py", "--port", "8007", "--output", "/data/downloads"]
     environment:
+      APP_ENV: ${APP_ENV:-development}
       DASHBOARD_PORT: "8007"
+      DASHBOARD_API_KEY: ${DASHBOARD_API_KEY:-}
       DOWNLOAD_BASE_DIR: /data/downloads
+      REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD:-pje_redis_2026}@redis:6379}
       MNI_USERNAME: ${MNI_USERNAME:-}
       MNI_PASSWORD: ${MNI_PASSWORD:-}
       MNI_TRIBUNAL: ${MNI_TRIBUNAL:-TJES}
       MNI_TIMEOUT: ${MNI_TIMEOUT:-60}
       MNI_BATCH_SIZE: ${MNI_BATCH_SIZE:-5}
       MNI_PROXY: ${MNI_PROXY:-}
+      TRUST_X_FORWARDED_FOR: ${TRUST_X_FORWARDED_FOR:-false}
       WORKER_HEALTH_HOST: worker
     ports:
       - "${DASHBOARD_PORT:-8007}:8007"
@@ -87,6 +91,7 @@ services:
     restart: "no"
     mem_limit: 512m
     environment:
+      APP_ENV: ${APP_ENV:-development}
       PJE_BASE_URL: ${PJE_BASE_URL:-https://pje.tjes.jus.br/pje}
       SESSION_STATE_PATH: /data/pje-session.json
       DOWNLOAD_BASE_DIR: /data/downloads
