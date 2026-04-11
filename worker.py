@@ -31,6 +31,7 @@ import redis.asyncio as redis
 import structlog
 from playwright.async_api import BrowserContext, Page, async_playwright
 
+import metrics
 from mni_client import MNIClient, MNIResult
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.pje-worker")
@@ -112,6 +113,7 @@ class PJeSessionWorker:
         self.context: BrowserContext | None = None
         self.page: Page | None = None
         self.session_valid: bool = False
+        self.fallback_ready: bool = False
         self.session_started_at: datetime | None = None
         self.mni_client: MNIClient | None = None
         self.docs_downloaded_count: int = 0
@@ -223,7 +225,8 @@ class PJeSessionWorker:
         if self.mni_client is not None:
             # MNI disponível: não iniciar Chromium no boot. Isso evita depender
             # de browser visível quando o caminho principal já resolve o fluxo.
-            self.session_valid = True
+            self.session_valid = False
+            self.fallback_ready = False
             self.session_started_at = datetime.now(UTC)
             log.info("pje.session.mni_available", note="playwright_deferred")
             return True
@@ -250,6 +253,7 @@ class PJeSessionWorker:
             if "login" not in self.page.url.lower():
                 log.info("pje.session.reused")
                 self.session_valid = True
+                self.fallback_ready = True
                 self.session_started_at = datetime.now(UTC)
                 return True
 
@@ -286,6 +290,7 @@ class PJeSessionWorker:
         log.info("pje.session.saved", path=str(SESSION_STATE_PATH))
 
         self.session_valid = True
+        self.fallback_ready = True
         self.session_started_at = datetime.now(UTC)
         return True
 
@@ -311,6 +316,7 @@ class PJeSessionWorker:
         if SESSION_STATE_PATH.exists():
             SESSION_STATE_PATH.unlink()
         self.session_valid = False
+        self.fallback_ready = False
         self.session_started_at = None
         log.info("pje.session.invalidated")
 
@@ -1400,9 +1406,13 @@ class PJeSessionWorker:
         for attempt in range(max_retries):
             try:
                 await self.redis.rpush(queue_name, result_json)
+                metrics.worker_results_total.labels(
+                    status=result_data.get("status", "unknown")
+                ).inc()
                 return
             except (redis.ConnectionError, redis.TimeoutError, OSError) as exc:
                 if attempt == max_retries - 1:
+                    metrics.worker_publish_failures_total.labels(kind="result").inc()
                     log.error(
                         "pje.queue.result_publish_failed",
                         job_id=result_data.get("jobId"),
@@ -1463,7 +1473,12 @@ class PJeSessionWorker:
         }
         try:
             await self.redis.rpush(queue_name, json.dumps(payload, ensure_ascii=False))
+            metrics.worker_progress_events_total.labels(
+                phase=phase,
+                status=resolved_status,
+            ).inc()
         except (redis.ConnectionError, redis.TimeoutError, OSError) as exc:
+            metrics.worker_publish_failures_total.labels(kind="progress").inc()
             log.warning(
                 "pje.queue.progress_publish_failed",
                 job_id=job.get("jobId"),
@@ -1492,7 +1507,9 @@ class PJeSessionWorker:
             await self.redis.lpush(
                 DEAD_LETTER_QUEUE, json.dumps(entry, ensure_ascii=False)
             )
+            metrics.worker_dead_letters_total.labels(reason=reason).inc()
         except (redis.ConnectionError, redis.TimeoutError, OSError) as exc:
+            metrics.worker_publish_failures_total.labels(kind="dead_letter").inc()
             log.warning(
                 "pje.queue.dead_letter_publish_failed",
                 reason=reason,
@@ -1683,6 +1700,7 @@ class PJeSessionWorker:
             "checks": checks,
             "mni_enabled": self.mni_client is not None,
             "session_valid": self.session_valid,
+            "fallback_ready": self.fallback_ready,
             "docs_downloaded": self.docs_downloaded_count,
             "uptime_minutes": round(
                 (datetime.now(UTC) - self.session_started_at).total_seconds() / 60, 1

@@ -33,6 +33,14 @@ def test_metrics_module_importable():
     assert m.batch_docs_total is not None
     assert m.batch_bytes_total is not None
     assert m.batch_throughput_docs_per_min is not None
+    assert m.worker_results_total is not None
+    assert m.worker_progress_events_total is not None
+    assert m.worker_dead_letters_total is not None
+    assert m.worker_publish_failures_total is not None
+    assert m.dashboard_batches_total is not None
+    assert m.dashboard_batch_timeouts_total is not None
+    assert m.dashboard_active_batch_recoveries_total is not None
+    assert m.dashboard_active_batches is not None
 
 
 # ─────────────────────────────────────────────
@@ -133,6 +141,30 @@ def test_throughput_gauge_set():
 
     assert "pje_batch_throughput_docs_per_min" in output
     assert "47.3" in output
+
+
+def test_runtime_metrics_are_exposed():
+    """Worker/control-plane metrics are present in the registry."""
+    import metrics as m
+
+    m.worker_results_total.labels(status="success").inc()
+    m.worker_progress_events_total.labels(phase="mni_metadata", status="running").inc()
+    m.worker_dead_letters_total.labels(reason="invalid_json").inc()
+    m.worker_publish_failures_total.labels(kind="progress").inc()
+    m.dashboard_batches_total.labels(status="done").inc()
+    m.dashboard_batch_timeouts_total.inc()
+    m.dashboard_active_batch_recoveries_total.inc()
+    m.dashboard_active_batches.set(1)
+
+    output = _scrape(m)
+    assert "pje_worker_results_total" in output
+    assert "pje_worker_progress_events_total" in output
+    assert "pje_worker_dead_letters_total" in output
+    assert "pje_worker_publish_failures_total" in output
+    assert "pje_dashboard_batches_total" in output
+    assert "pje_dashboard_batch_timeouts_total" in output
+    assert "pje_dashboard_active_batch_recoveries_total" in output
+    assert "pje_dashboard_active_batches" in output
 
 
 # ─────────────────────────────────────────────

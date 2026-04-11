@@ -45,17 +45,17 @@ CLI offline:
 
 | Arquivo | Linhas | Funcao |
 |---------|--------|--------|
-| `worker.py` | ~1111 | Worker PJe com 3 estrategias em cascata, reply queues por batch, downloads paralelos e deep health checks |
+| `worker.py` | ~1111 | Worker PJe com 3 estrategias em cascata, reply queues por batch, downloads paralelos, dead-letter e health detalhado |
 | `mni_client.py` | ~798 | Cliente SOAP para MNI — download em 2 fases com dedup por checksum |
 | `batch_downloader.py` | ~744 | Download em lote via CLI com progresso atomico, retomada e relatorio |
-| `dashboard_api.py` | ~701 | Control plane aiohttp — valida batches, publica jobs Redis, agrega resultados do worker e persiste progresso/relatorio |
+| `dashboard_api.py` | ~701 | Control plane aiohttp — valida batches, publica jobs Redis, agrega resultados, recupera batch ativo e expõe status/readiness |
 | `pje_session.py` | ~393 | Login interativo PJe (Playwright), persistencia de sessao Keycloak, API REST + browser fallback |
 | `dashboard.html` | ~193 | Frontend HTML com Google Fonts, data-animate attrs e card de sessao PJe |
 | `static/css/style.css` | ~685 | Design system — glassmorphism, Oswald KPIs, dot-grid bg, staggered animations |
 | `static/js/app.js` | ~618 | Dashboard — adaptive polling, pipeline renderer (SVG), toasts, file upload, sessao PJe |
 | `gdrive_downloader.py` | ~628 | Download de pastas Google Drive (processos antigos escaneados) |
 | `config.py` | ~64 | Configuracao centralizada — todas as variaveis env-configuraveis |
-| `metrics.py` | ~108 | Registry Prometheus dedicado — 7 metricas de latencia, throughput e erros |
+| `metrics.py` | ~108 | Registry Prometheus dedicado — metricas de MNI, GDrive, worker e control plane |
 
 ## Estrategias de Download
 
@@ -98,8 +98,10 @@ CLI offline:
 | Filename collision | Counter suffix automatico para nomes duplicados |
 | Browser cleanup | Fecha page/context/browser na invalidacao de sessao |
 | Deep health checks | `/health` verifica MNI, Redis e espaco em disco |
+| Dashboard readiness | `/healthz` valida Redis e se ha batch recuperado pendente de retomada |
 | Adaptive polling | Frontend backoff 1.5s-15s com reset em sucesso |
 | Partial failure recovery | Dashboard preserva progresso parcial em erros |
+| Active batch recovery | `_active_batch.json` + `_progress.json` permitem retomar agregacao apos restart |
 | Progress file resilience | `BatchProgress.load()` ignora arquivos `_progress.json` corrompidos e reinicia limpo |
 
 ## Setup
@@ -185,7 +187,8 @@ python worker.py
 | Metodo | Rota | Descricao |
 |--------|------|-----------|
 | `GET` | `/` | Dashboard HTML |
-| `GET` | `/api/status` | Status geral do worker |
+| `GET` | `/healthz` | Readiness da dashboard para compose/orquestracao |
+| `GET` | `/api/status` | Status operacional da dashboard + resumo do worker |
 | `POST` | `/api/download` | Publicar batch na fila Redis/worker (rate limited: 10/60s) |
 | `GET` | `/api/progress` | Progresso do batch atual (polling) |
 | `GET` | `/api/history` | Historico de todos os batches |
@@ -213,6 +216,8 @@ Respostas: `201` (criado), `400` (formato CNJ invalido), `409` (batch em execuca
 Observacoes operacionais:
 - a dashboard cria uma pasta por batch e consolida os resultados do worker nessa pasta
 - falhas de sessao/CAPTCHA no worker encerram o restante do batch como falha rastreavel
+- resultados incompletos agora sao marcados como `partial`/`partial_success`, nunca como sucesso pleno
+- se a dashboard reiniciar no meio do batch, ela reidrata o batch ativo e volta a consumir a `replyQueue`
 - em producao, configure `DASHBOARD_API_KEY` e `REDIS_PASSWORD`; o workflow de deploy agora falha se esses secrets estiverem ausentes
 
 ### GET /metrics
@@ -230,9 +235,10 @@ pje_gdrive_attempts_total{strategy="gdown", status="success"} 5.0
 pje_gdrive_attempts_total{strategy="requests", status="success"} 2.0
 pje_gdrive_attempts_total{strategy="playwright", status="success"} 1.0
 
-# Resultado dos processos no batch
+# Resultado agregado dos processos
 pje_batch_processos_total{status="done"} 38.0
 pje_batch_processos_total{status="failed"} 4.0
+pje_batch_processos_total{status="partial"} 2.0
 
 # Volume acumulado
 pje_batch_docs_total 1247.0
@@ -240,6 +246,15 @@ pje_batch_bytes_total 3.28e+09
 
 # Throughput do ultimo batch
 pje_batch_throughput_docs_per_min 8.3
+
+# Runtime real do worker/control plane
+pje_worker_results_total{status="success"} 35.0
+pje_worker_results_total{status="partial_success"} 2.0
+pje_worker_dead_letters_total{reason="invalid_json"} 1.0
+pje_dashboard_batches_total{status="done"} 12.0
+pje_dashboard_batch_timeouts_total 0.0
+pje_dashboard_active_batch_recoveries_total 1.0
+pje_dashboard_active_batches 0.0
 ```
 
 **Labels de status para `pje_mni_requests_total`:**
@@ -266,8 +281,58 @@ pje_batch_throughput_docs_per_min 8.3
     "disk": "ok",
     "disk_free_mb": 5432.1
   },
+  "mni_enabled": true,
+  "session_valid": false,
+  "fallback_ready": false,
   "docs_downloaded": 42,
   "uptime_minutes": 15.3
+}
+```
+
+Campos importantes:
+- `status`: estado operacional do worker (`ready`, `consuming`, `session_expired`, etc.)
+- `healthy`: readiness do worker para compose/deploy
+- `session_valid`: existe sessao PJe autenticada pronta para REST/browser
+- `fallback_ready`: o fallback Playwright/PJe esta realmente disponivel
+- com MNI disponivel, `session_valid=false` e `fallback_ready=false` podem coexistir com `healthy=true`
+
+### GET /healthz (Dashboard)
+
+```json
+{
+  "service": "pje-dashboard",
+  "ready": true,
+  "current_batch": null,
+  "checks": {
+    "redis": "healthy",
+    "active_batch_recovered": false,
+    "active_batch_resume_pending": false
+  }
+}
+```
+
+Use `/healthz` para healthcheck/orquestracao. Use `/api/status` para diagnostico operacional.
+
+### GET /api/status
+
+```json
+{
+  "service": "pje-dashboard",
+  "status": "running",
+  "current_status": "idle",
+  "worker_status": "ready",
+  "worker": {
+    "status": "ready",
+    "healthy": true,
+    "checks": {
+      "redis": "healthy",
+      "disk": "ok",
+      "mni": "healthy"
+    },
+    "session_valid": false,
+    "fallback_ready": false
+  },
+  "recovered_active_batch": null
 }
 ```
 
@@ -345,7 +410,8 @@ docker compose up -d   # dashboard + redis
 Verificacao:
 
 ```bash
-curl http://localhost:8007/api/status   # {"status":"running"}
+curl http://localhost:8007/healthz      # readiness da dashboard
+curl http://localhost:8007/api/status   # status operacional + worker resumido
 curl http://localhost:8007/metrics      # metricas Prometheus
 ```
 
@@ -363,7 +429,7 @@ curl http://localhost:8007/metrics      # metricas Prometheus
 | Workflow | Trigger | Etapas |
 |----------|---------|--------|
 | `ci.yml` | push / PR | ruff lint → pytest (73 testes) — badge acima |
-| `deploy.yml` | push master | rsync → `docker compose up --build` no VPS |
+| `deploy.yml` | CI concluido com sucesso em `master` | rsync → `docker compose up --build` no VPS → healthcheck worker/dashboard → smoke test da fila |
 | `dependabot.yml` | semanal | atualiza actions + pip deps |
 
 Secrets necessarios no repositorio: `VPS_SSH_KEY`, `VPS_HOST`, `VPS_USER`.

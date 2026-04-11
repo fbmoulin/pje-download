@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import web
+from prometheus_client import generate_latest
 
 import dashboard_api
 from dashboard_api import (
@@ -124,6 +125,55 @@ class TestDashboardState:
         assert loaded.status == "failed"
         assert loaded.error == "worker timeout"
         assert loaded.started_at == "2024-01-01T11:05:00+00:00"
+
+    def test_load_active_batch_restores_current_progress(self, tmp_path):
+        batch_dir = tmp_path / "20240101_120000_active"
+        batch_dir.mkdir()
+        active = {
+            "batch_id": "20240101_120000_active",
+            "processos": ["1234567-89.2024.8.08.0001"],
+            "status": "running",
+            "created_at": "2024-01-01T11:00:00+00:00",
+            "started_at": "2024-01-01T11:05:00+00:00",
+            "output_dir": str(batch_dir),
+            "include_anexos": True,
+            "gdrive_map": {},
+            "error": None,
+        }
+        progress = {
+            "summary": {"total": 1, "done": 0, "failed": 0, "partial": 0, "pending": 1},
+            "processos": {
+                "1234567-89.2024.8.08.0001": {
+                    "status": "running",
+                    "phase": "mni_metadata",
+                    "phase_detail": "Consultando",
+                    "total_docs": 0,
+                    "docs_baixados": 0,
+                    "tamanho_bytes": 0,
+                    "erro": None,
+                    "duracao_s": None,
+                }
+            },
+        }
+        (tmp_path / "_active_batch.json").write_text(
+            json.dumps(active), encoding="utf-8"
+        )
+        (batch_dir / "_progress.json").write_text(
+            json.dumps(progress), encoding="utf-8"
+        )
+
+        ds = DashboardState(tmp_path)
+
+        assert ds.current_batch_id == "20240101_120000_active"
+        loaded = ds.batches["20240101_120000_active"]
+        assert loaded.status == "running"
+        assert loaded.progress["summary"]["pending"] == 1
+        assert (
+            loaded.progress["processos"]["1234567-89.2024.8.08.0001"]["phase"]
+            == "mni_metadata"
+        )
+        metrics_output = generate_latest(dashboard_api.metrics.REGISTRY).decode()
+        assert "pje_dashboard_active_batch_recoveries_total" in metrics_output
 
     def test_progress_event_updates_phase_without_completing_batch(self, tmp_path):
         ds = DashboardState(tmp_path)
@@ -429,9 +479,17 @@ async def test_handle_history_returns_list():
 
 @pytest.mark.asyncio
 async def test_handle_status_returns_worker_status():
-    """GET /api/status must include worker_status field."""
+    """GET /api/status must include worker summary fields."""
     fake_session = FakeClientSession(
-        response=FakeHealthResponse(200, {"status": "healthy"})
+        response=FakeHealthResponse(
+            200,
+            {
+                "status": "healthy",
+                "healthy": True,
+                "checks": {"redis": "healthy"},
+                "fallback_ready": False,
+            },
+        )
     )
     with (
         patch("dashboard_api.state") as mock_state,
@@ -442,6 +500,7 @@ async def test_handle_status_returns_worker_status():
     ):
         mock_state.batches = {}
         mock_state.current_batch_id = None
+        mock_state.recovered_active_batch_id = None
         mock_state.output_dir.name = "downloads"
         mock_state.get_current_progress.return_value = None
         mock_state.get_worker_http.return_value = fake_session
@@ -449,6 +508,73 @@ async def test_handle_status_returns_worker_status():
         assert resp.status == 200
         body = json.loads(resp.body.decode())
         assert body["worker_status"] == "healthy"
+        assert body["worker"]["healthy"] is True
+        assert body["worker"]["checks"]["redis"] == "healthy"
+        assert body["worker"]["fallback_ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_handle_healthz_reports_ready(tmp_path):
+    ds = DashboardState(tmp_path)
+    dashboard_api.state = ds
+    ds.get_redis = AsyncMock(return_value=AsyncMock(ping=AsyncMock(return_value=True)))
+
+    resp = await dashboard_api.handle_healthz(DummyRequest())
+
+    assert resp.status == 200
+    body = json.loads(resp.body.decode())
+    assert body["ready"] is True
+    assert body["checks"]["redis"] == "healthy"
+    assert body["checks"]["active_batch_resume_pending"] is False
+
+
+@pytest.mark.asyncio
+async def test_handle_healthz_reports_resume_pending(tmp_path):
+    batch_dir = tmp_path / "batch-r"
+    batch_dir.mkdir()
+    (tmp_path / "_active_batch.json").write_text(
+        json.dumps(
+            {
+                "batch_id": "batch-r",
+                "processos": ["001"],
+                "status": "running",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "started_at": "2026-01-01T00:00:10+00:00",
+                "output_dir": str(batch_dir),
+                "include_anexos": True,
+                "gdrive_map": {},
+                "error": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (batch_dir / "_progress.json").write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "total": 1,
+                    "done": 0,
+                    "failed": 0,
+                    "partial": 0,
+                    "pending": 1,
+                },
+                "processos": {"001": {"status": "running", "phase": "waiting"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ds = DashboardState(tmp_path)
+    dashboard_api.state = ds
+    ds.get_redis = AsyncMock(return_value=AsyncMock(ping=AsyncMock(return_value=True)))
+
+    resp = await dashboard_api.handle_healthz(DummyRequest())
+
+    assert resp.status == 503
+    body = json.loads(resp.body.decode())
+    assert body["ready"] is False
+    assert body["checks"]["active_batch_recovered"] is True
+    assert body["checks"]["active_batch_resume_pending"] is True
 
 
 @pytest.mark.asyncio
@@ -826,6 +952,51 @@ class TestSubmitBatch:
         except (asyncio.CancelledError, Exception):
             pass
 
+    @pytest.mark.asyncio
+    async def test_resume_active_batch_schedules_consumer(self, tmp_path):
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="resume-1",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="running",
+            output_dir=str(tmp_path / "resume-1"),
+            progress={
+                "summary": {
+                    "total": 1,
+                    "done": 0,
+                    "failed": 0,
+                    "partial": 0,
+                    "pending": 1,
+                },
+                "processos": {
+                    "5000001-00.2024.8.08.0001": {
+                        "status": "running",
+                        "phase": "mni_metadata",
+                        "phase_detail": "Consultando",
+                        "total_docs": 0,
+                        "docs_baixados": 0,
+                        "tamanho_bytes": 0,
+                        "erro": None,
+                        "duracao_s": None,
+                    }
+                },
+            },
+        )
+        ds.batches[job.id] = job
+        ds.current_batch_id = job.id
+
+        called = asyncio.Event()
+
+        async def noop_run(resumed_job: BatchJob, *, enqueue_jobs: bool = True):
+            assert resumed_job is job
+            assert enqueue_jobs is False
+            called.set()
+
+        ds._run_batch = noop_run
+        await ds.resume_active_batch()
+        assert ds._task is not None
+        await asyncio.wait_for(called.wait(), timeout=2.0)
+
 
 # ─────────────────────────────────────────────
 # _purge_stale_buckets
@@ -986,6 +1157,15 @@ class TestRuntimeConfigValidation:
             app = dashboard_api.create_app(tmp_path)
         assert isinstance(app, web.Application)
         mock_rotate.assert_called_once_with(max_days=45)
+
+    @pytest.mark.asyncio
+    async def test_on_startup_resumes_active_batch(self, monkeypatch, tmp_path):
+        dashboard_api.state = DashboardState(tmp_path)
+        dashboard_api.state.resume_active_batch = AsyncMock()
+
+        await dashboard_api._on_startup(MagicMock())
+
+        dashboard_api.state.resume_active_batch.assert_awaited_once()
 
 
 # ─────────────────────────────────────────────

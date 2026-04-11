@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
+from prometheus_client import generate_latest
 
 
 def _load_worker_module():
@@ -125,9 +126,28 @@ class TestWorkerInit:
         result = await worker.load_session(playwright)
 
         assert result is True
-        assert worker.session_valid is True
+        assert worker.session_valid is False
+        assert worker.fallback_ready is False
         assert worker.session_started_at is not None
         playwright.chromium.launch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_health_reports_fallback_readiness_separately(self):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.redis = AsyncMock()
+        worker.redis.ping = AsyncMock(return_value=True)
+        worker.mni_client = MagicMock()
+        worker._health_status = "ready"
+        worker.session_valid = False
+        worker.fallback_ready = False
+
+        response = await worker._health_handler(MagicMock())
+        body = json.loads(response.text)
+
+        assert response.status == 200
+        assert body["session_valid"] is False
+        assert body["fallback_ready"] is False
 
     @pytest.mark.asyncio
     async def test_missing_mni_password_leaves_client_none(self, monkeypatch):
@@ -580,6 +600,18 @@ class TestPublishResult:
         )
 
     @pytest.mark.asyncio
+    async def test_publish_result_updates_metric(self):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.redis = AsyncMock()
+
+        await worker._publish_result({"jobId": "J1", "status": "partial_success"})
+
+        output = generate_latest(w.metrics.REGISTRY).decode()
+        assert "pje_worker_results_total" in output
+        assert 'status="partial_success"' in output
+
+    @pytest.mark.asyncio
     async def test_publish_retries_on_failure(self):
         from redis import ConnectionError as RedisConnectionError
 
@@ -648,6 +680,10 @@ class TestPublishResult:
             "kratos:pje:results:batch-1",
             ANY,
         )
+
+        output = generate_latest(w.metrics.REGISTRY).decode()
+        assert "pje_worker_progress_events_total" in output
+        assert 'phase="mni_metadata"' in output
 
 
 class TestDownloadProcess:

@@ -35,6 +35,7 @@ import aiohttp
 from aiohttp import web
 import redis.asyncio as redis
 import structlog
+import metrics
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.dashboard-api")
 
@@ -92,12 +93,14 @@ class DashboardState:
         self.output_dir = output_dir
         self.batches: dict[str, BatchJob] = {}
         self.current_batch_id: str | None = None
+        self.recovered_active_batch_id: str | None = None
         self._task: asyncio.Task | None = None
         self._progress_cache: dict | None = None
         self._progress_cache_time: float = 0.0
         self._worker_http: aiohttp.ClientSession | None = None
         self._redis: redis.Redis | None = None
         self._load_history()
+        self._load_active_batch()
 
     async def get_redis(self) -> redis.Redis:
         """Lazily create a Redis client used by the dashboard control plane."""
@@ -191,8 +194,10 @@ class DashboardState:
         self.batches[batch_id] = job
 
         batch_dir.mkdir(parents=True, exist_ok=True)
+        self._persist_active_batch(job)
         self._task = asyncio.create_task(self._run_batch(job))
         self.current_batch_id = batch_id
+        metrics.dashboard_active_batches.set(1)
 
         log.info(
             "dashboard.batch.submitted", batch_id=batch_id, processos=len(processos)
@@ -204,6 +209,9 @@ class DashboardState:
 
     def _report_path(self, job: BatchJob) -> Path:
         return Path(job.output_dir) / "_report.json"
+
+    def _active_batch_path(self) -> Path:
+        return self.output_dir / "_active_batch.json"
 
     def _result_queue(self, batch_id: str) -> str:
         return f"kratos:pje:results:{batch_id}"
@@ -232,6 +240,120 @@ class DashboardState:
             },
             "processos": processos,
         }
+
+    def _persist_active_batch(self, job: BatchJob) -> None:
+        payload = {
+            "batch_id": job.id,
+            "processos": job.processos,
+            "status": job.status,
+            "created_at": job.created_at,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "output_dir": job.output_dir,
+            "include_anexos": job.include_anexos,
+            "gdrive_map": job.gdrive_map,
+            "error": job.error,
+        }
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(
+            self._active_batch_path(),
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+
+    def _clear_active_batch(self, batch_id: str | None = None) -> None:
+        active_path = self._active_batch_path()
+        if not active_path.exists():
+            return
+        if batch_id is not None:
+            try:
+                data = json.loads(active_path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+            if data.get("batch_id") not in {batch_id, None}:
+                return
+        try:
+            active_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def _load_active_batch(self) -> None:
+        active_path = self._active_batch_path()
+        if not active_path.exists():
+            return
+        try:
+            data = json.loads(active_path.read_text(encoding="utf-8"))
+            batch_id = data["batch_id"]
+            status = data.get("status", "running")
+            if status in TERMINAL_PROCESS_STATUSES:
+                self._clear_active_batch(batch_id)
+                return
+
+            output_dir = Path(data["output_dir"])
+            progress_path = output_dir / "_progress.json"
+            if progress_path.exists():
+                progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            else:
+                progress = self._build_initial_progress(
+                    BatchJob(
+                        id=batch_id,
+                        processos=list(data.get("processos", [])),
+                        output_dir=str(output_dir),
+                    )
+                )
+
+            job = BatchJob(
+                id=batch_id,
+                processos=list(data.get("processos", [])),
+                status=status,
+                created_at=data.get("created_at", ""),
+                started_at=data.get("started_at"),
+                finished_at=data.get("finished_at"),
+                output_dir=str(output_dir),
+                include_anexos=data.get("include_anexos", True),
+                gdrive_map=data.get("gdrive_map", {}),
+                progress=progress,
+                error=data.get("error"),
+            )
+            self.batches[batch_id] = job
+            self.current_batch_id = batch_id
+            self.recovered_active_batch_id = batch_id
+            metrics.dashboard_active_batch_recoveries_total.inc()
+            metrics.dashboard_active_batches.set(1)
+            log.info(
+                "dashboard.active_batch.recovered",
+                batch_id=batch_id,
+                status=status,
+                pending=progress.get("summary", {}).get("pending"),
+            )
+        except Exception as exc:
+            log.warning(
+                "dashboard.active_batch.load_failed",
+                file=str(active_path),
+                error=str(exc),
+            )
+
+    async def resume_active_batch(self) -> None:
+        if not self.current_batch_id:
+            return
+        job = self.batches.get(self.current_batch_id)
+        if not job or job.status not in {"queued", "running"}:
+            return
+        if self._task is not None and not self._task.done():
+            return
+        self._task = asyncio.create_task(self._run_batch(job, enqueue_jobs=False))
+        log.info(
+            "dashboard.active_batch.resume_scheduled",
+            batch_id=job.id,
+            status=job.status,
+        )
+
+    def recovered_batch_pending_resume(self) -> bool:
+        if not self.recovered_active_batch_id:
+            return False
+        job = self.batches.get(self.recovered_active_batch_id)
+        if not job or job.status not in {"queued", "running"}:
+            return False
+        return self._task is None or self._task.done()
 
     def _persist_progress(self, job: BatchJob) -> None:
         Path(job.output_dir).mkdir(parents=True, exist_ok=True)
@@ -401,7 +523,7 @@ class DashboardState:
             "pending": max(total - done - failed - partial, 0),
         }
 
-    async def _run_batch(self, job: BatchJob):
+    async def _run_batch(self, job: BatchJob, *, enqueue_jobs: bool = True):
         """Executa um batch publicando jobs Redis e agregando resultados do worker."""
         reply_queue = self._result_queue(job.id)
         payloads_by_processo = {
@@ -415,18 +537,26 @@ class DashboardState:
         try:
             redis_client = await self.get_redis()
             job.status = "running"
-            job.started_at = datetime.now(UTC).isoformat()
+            job.started_at = job.started_at or datetime.now(UTC).isoformat()
 
-            job.progress = self._build_initial_progress(job)
-            self._persist_progress(job)
-            await redis_client.delete(reply_queue)
-            if serialized_payloads:
+            if enqueue_jobs or not job.progress:
+                job.progress = self._build_initial_progress(job)
+                self._persist_progress(job)
+                await redis_client.delete(reply_queue)
+            self._persist_active_batch(job)
+            if enqueue_jobs and serialized_payloads:
                 await redis_client.rpush(
                     "kratos:pje:jobs",
                     *serialized_payloads.values(),
                 )
 
-            pending = set(job.processos)
+            progress_processos = job.progress.get("processos", {})
+            pending = {
+                numero
+                for numero in job.processos
+                if progress_processos.get(numero, {}).get("status")
+                not in TERMINAL_PROCESS_STATUSES
+            }
             last_result_at = time.monotonic()
 
             while pending:
@@ -439,6 +569,7 @@ class DashboardState:
                         )
                         self._fail_remaining_processes(job, pending, timeout_error)
                         job.error = timeout_error
+                        metrics.dashboard_batch_timeouts_total.inc()
                         log.error(
                             "dashboard.batch.result_timeout",
                             batch_id=job.id,
@@ -453,6 +584,7 @@ class DashboardState:
                     self._apply_progress_event(job, result)
                     last_result_at = time.monotonic()
                     self._persist_progress(job)
+                    self._persist_active_batch(job)
                     continue
 
                 numero = result.get("numeroProcesso")
@@ -463,6 +595,7 @@ class DashboardState:
                 last_result_at = time.monotonic()
                 worker_status = self._apply_result(job, result)
                 self._persist_progress(job)
+                self._persist_active_batch(job)
 
                 if worker_status in {"session_expired", "captcha_required"} and pending:
                     fatal_error = result.get("errorMessage") or worker_status
@@ -476,6 +609,7 @@ class DashboardState:
                     job.error = fatal_error
                     pending.clear()
                     self._persist_progress(job)
+                    self._persist_active_batch(job)
                     break
 
             job.finished_at = datetime.now(UTC).isoformat()
@@ -510,6 +644,24 @@ class DashboardState:
 
             self._persist_progress(job)
             self._persist_report(job)
+            self._clear_active_batch(job.id)
+            metrics.dashboard_batches_total.labels(status=job.status).inc()
+            total_docs = sum(
+                int(proc.get("docs_baixados", 0) or 0)
+                for proc in job.progress.get("processos", {}).values()
+            )
+            total_bytes = sum(
+                int(proc.get("tamanho_bytes", 0) or 0)
+                for proc in job.progress.get("processos", {}).values()
+            )
+            if total_docs:
+                metrics.batch_docs_total.inc(total_docs)
+            if total_bytes:
+                metrics.batch_bytes_total.inc(total_bytes)
+            metrics.batch_processos_total.labels(status=job.status).inc(
+                len(job.processos)
+            )
+            metrics.dashboard_active_batches.set(0)
 
             log.info(
                 "dashboard.batch.complete",
@@ -528,6 +680,12 @@ class DashboardState:
                 job.progress = self._build_initial_progress(job)
             self._persist_progress(job)
             self._persist_report(job)
+            self._clear_active_batch(job.id)
+            metrics.dashboard_batches_total.labels(status="failed").inc()
+            metrics.batch_processos_total.labels(status="failed").inc(
+                len(job.processos)
+            )
+            metrics.dashboard_active_batches.set(0)
             log.error("dashboard.batch.failed", batch_id=job.id, error=str(exc))
             self._evict_old_batches()
         finally:
@@ -588,20 +746,8 @@ async def handle_status(request: web.Request) -> web.Response:
         return web.json_response({"error": "Service not initialized"}, status=503)
     current = state.get_current_progress()
 
-    # Consultar health do worker (:8006) — falha graciosamente se indisponível
-    worker_status = "unknown"
-    try:
-        sess = state.get_worker_http()
-        async with sess.get(
-            f"http://{WORKER_HEALTH_HOST}:{WORKER_HEALTH_PORT}/health"
-        ) as resp:
-            if resp.status == 200:
-                worker_data = await resp.json()
-                worker_status = worker_data.get("status", "unknown")
-            else:
-                worker_status = "unhealthy"
-    except Exception:
-        worker_status = "unreachable"
+    worker_data = await _fetch_worker_health()
+    worker_status = worker_data.get("status", "unknown")
 
     return web.json_response(
         {
@@ -612,8 +758,66 @@ async def handle_status(request: web.Request) -> web.Response:
             "current_status": current["status"] if current else "idle",
             "output_dir": state.output_dir.name,
             "worker_status": worker_status,
+            "worker": worker_data,
+            "recovered_active_batch": state.recovered_active_batch_id,
         }
     )
+
+
+async def handle_healthz(request: web.Request) -> web.Response:
+    """GET /healthz — Dashboard readiness for orchestrators."""
+    if state is None:
+        return web.json_response(
+            {"service": "pje-dashboard", "ready": False, "reason": "uninitialized"},
+            status=503,
+        )
+
+    checks: dict[str, str | bool | None] = {}
+    ready = True
+
+    try:
+        redis_client = await state.get_redis()
+        await redis_client.ping()
+        checks["redis"] = "healthy"
+    except Exception:
+        checks["redis"] = "unreachable"
+        ready = False
+
+    pending_resume = state.recovered_batch_pending_resume()
+    checks["active_batch_recovered"] = bool(state.recovered_active_batch_id)
+    checks["active_batch_resume_pending"] = pending_resume
+    if pending_resume:
+        ready = False
+
+    status_code = 200 if ready else 503
+    return web.json_response(
+        {
+            "service": "pje-dashboard",
+            "ready": ready,
+            "current_batch": state.current_batch_id,
+            "checks": checks,
+        },
+        status=status_code,
+    )
+
+
+async def _fetch_worker_health() -> dict:
+    """Fetch worker health, returning a normalized payload for dashboard endpoints."""
+    if state is None:
+        return {"status": "unknown", "healthy": False}
+
+    try:
+        sess = state.get_worker_http()
+        async with sess.get(
+            f"http://{WORKER_HEALTH_HOST}:{WORKER_HEALTH_PORT}/health"
+        ) as resp:
+            if resp.status == 200:
+                worker_data = await resp.json()
+                worker_data.setdefault("healthy", True)
+                return worker_data
+            return {"status": "unhealthy", "healthy": False, "http_status": resp.status}
+    except Exception:
+        return {"status": "unreachable", "healthy": False}
 
 
 async def handle_download(request: web.Request) -> web.Response:
@@ -910,6 +1114,7 @@ async def _on_cleanup(app: web.Application) -> None:
         job = state.batches.get(state.current_batch_id)
         if job and job.progress:
             try:
+                state._persist_active_batch(job)
                 progress_path = Path(job.output_dir) / "_progress.json"
                 from config import atomic_write_text
 
@@ -935,6 +1140,11 @@ async def _on_cleanup(app: web.Application) -> None:
 
     if state:
         await state.close()
+
+
+async def _on_startup(app: web.Application) -> None:
+    if state is not None:
+        await state.resume_active_batch()
 
 
 def _validate_runtime_config() -> None:
@@ -975,6 +1185,7 @@ def create_app(output_dir: Path) -> web.Application:
     app.middlewares.append(api_key_middleware)
 
     app.router.add_get("/", handle_index)
+    app.router.add_get("/healthz", handle_healthz)
     app.router.add_get("/metrics", handle_metrics)
     app.router.add_get("/api/status", handle_status)
     app.router.add_post("/api/download", handle_download)
@@ -990,6 +1201,7 @@ def create_app(output_dir: Path) -> web.Application:
     if static_dir.is_dir():
         app.router.add_static("/static", static_dir, show_index=False)
 
+    app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
 
     return app

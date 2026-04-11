@@ -23,10 +23,22 @@ gdrive_downloader.py
     _try_playwright_*()    -> gdrive_attempts_total (strategy="playwright")
     All functions:           status="success" (files returned) or "failed" (exception)
 
-batch_downloader.py
-    _download_one()        -> batch_processos_total (status="done"/"failed")
-                          -> batch_docs_total / batch_bytes_total (on done)
-    download_batch()       -> batch_throughput_docs_per_min (set at completion)
+batch_downloader.py / dashboard_api.py
+    CLI and dashboard control plane both update batch_processos_total,
+    batch_docs_total and batch_bytes_total so Prometheus reflects the
+    real production path as well as offline runs.
+
+worker.py
+    _publish_result()      -> worker_results_total(status=...)
+    _publish_progress()    -> worker_progress_events_total(phase=..., status=...)
+    _publish_dead_letter() -> worker_dead_letters_total(reason=...)
+                           -> worker_publish_failures_total(kind=...)
+
+dashboard_api.py
+    _load_active_batch()   -> dashboard_active_batch_recoveries_total
+    submit/_run_batch()    -> dashboard_active_batches
+                           -> dashboard_batches_total(status=...)
+                           -> dashboard_batch_timeouts_total
 
 To add instrumentation to a new module
 ---------------------------------------
@@ -104,5 +116,60 @@ batch_bytes_total = Counter(
 batch_throughput_docs_per_min = Gauge(
     "pje_batch_throughput_docs_per_min",
     "Documents per minute achieved in the most recent completed batch",
+    registry=REGISTRY,
+)
+
+# ── Worker/control plane runtime ─────────────────────────────────────────────
+
+worker_results_total = Counter(
+    "pje_worker_results_total",
+    "Total worker result messages published by terminal status",
+    ["status"],
+    registry=REGISTRY,
+)
+
+worker_progress_events_total = Counter(
+    "pje_worker_progress_events_total",
+    "Total worker progress events published by phase and status",
+    ["phase", "status"],
+    registry=REGISTRY,
+)
+
+worker_dead_letters_total = Counter(
+    "pje_worker_dead_letters_total",
+    "Total malformed queue payloads sent to dead-letter storage by reason",
+    ["reason"],
+    registry=REGISTRY,
+)
+
+worker_publish_failures_total = Counter(
+    "pje_worker_publish_failures_total",
+    "Total Redis publish failures in the worker by message kind",
+    ["kind"],
+    registry=REGISTRY,
+)
+
+dashboard_batches_total = Counter(
+    "pje_dashboard_batches_total",
+    "Total dashboard batches completed by final status",
+    ["status"],
+    registry=REGISTRY,
+)
+
+dashboard_batch_timeouts_total = Counter(
+    "pje_dashboard_batch_timeouts_total",
+    "Total dashboard batches that hit worker result timeout",
+    registry=REGISTRY,
+)
+
+dashboard_active_batch_recoveries_total = Counter(
+    "pje_dashboard_active_batch_recoveries_total",
+    "Total active batches recovered from disk on dashboard startup",
+    registry=REGISTRY,
+)
+
+dashboard_active_batches = Gauge(
+    "pje_dashboard_active_batches",
+    "Number of dashboard batches currently active in the control plane",
     registry=REGISTRY,
 )
