@@ -252,6 +252,20 @@ class TestResultHelper:
         assert r["status"] == "failed"
         assert r["errorMessage"] == "timeout"
 
+    def test_partial_success_result_with_error(self):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        r = worker._result(
+            "job2",
+            "5000002-00.2024.8.08.0001",
+            "partial_success",
+            [{"nome": "doc.pdf"}],
+            error="faltam anexos",
+        )
+        assert r["status"] == "partial_success"
+        assert r["errorMessage"] == "faltam anexos"
+        assert len(r["arquivosDownloaded"]) == 1
+
     def test_result_without_files(self):
         w = _load_worker_module()
         worker = w.PJeSessionWorker()
@@ -707,7 +721,7 @@ class TestDownloadProcess:
             )
 
         mock_gdrive.assert_awaited_once()
-        assert result["status"] == "success"
+        assert result["status"] == "partial_success"
         assert any(
             item["fonte"] == "google_drive" for item in result["arquivosDownloaded"]
         )
@@ -744,7 +758,7 @@ class TestDownloadProcess:
             }
         )
 
-        assert result["status"] == "success"
+        assert result["status"] == "partial_success"
         assert result["errorMessage"]
         assert "anexo" in result["errorMessage"]
         worker._log_job_result.assert_awaited_once()

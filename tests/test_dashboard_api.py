@@ -157,6 +157,39 @@ class TestDashboardState:
         assert proc["phase"] == "mni_metadata"
         assert job.progress["summary"]["pending"] == 1
 
+    def test_apply_result_maps_partial_success_to_partial(self, tmp_path):
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="batch-partial",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="running",
+            output_dir=str(tmp_path / "batch-partial"),
+            progress=ds._build_initial_progress(
+                BatchJob(
+                    id="batch-partial",
+                    processos=["5000001-00.2024.8.08.0001"],
+                    output_dir=str(tmp_path / "batch-partial"),
+                )
+            ),
+        )
+
+        worker_status = ds._apply_result(
+            job,
+            {
+                "numeroProcesso": "5000001-00.2024.8.08.0001",
+                "status": "partial_success",
+                "arquivosDownloaded": [{"nome": "doc.pdf", "tamanhoBytes": 42}],
+                "errorMessage": "faltam anexos",
+            },
+        )
+
+        proc = job.progress["processos"]["5000001-00.2024.8.08.0001"]
+        assert worker_status == "partial_success"
+        assert proc["status"] == "partial"
+        assert proc["phase"] == "partial"
+        assert proc["erro"] == "faltam anexos"
+        assert job.progress["summary"]["partial"] == 1
+
 
 # ─────────────────────────────────────────────
 # HTTP endpoint tests
@@ -866,6 +899,54 @@ class TestRunBatch:
         assert job.progress["summary"]["done"] == 1
         assert (tmp_path / "run_ok" / "_progress.json").exists()
         assert (tmp_path / "run_ok" / "_report.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_run_batch_marks_partial_when_worker_returns_partial_success(
+        self, tmp_path
+    ):
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="run_partial",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="queued",
+            output_dir=str(tmp_path / "run_partial"),
+        )
+        ds.batches["run_partial"] = job
+
+        fake_redis = FakeRedis()
+
+        async def rpush_partial(key: str, *values: str):
+            queue = fake_redis.queues.setdefault(key, [])
+            queue.extend(values)
+            if key == "kratos:pje:jobs":
+                for raw in values:
+                    payload = json.loads(raw)
+                    reply_queue = payload["replyQueue"]
+                    fake_redis.queues.setdefault(reply_queue, []).append(
+                        json.dumps(
+                            {
+                                "jobId": payload["jobId"],
+                                "batchId": payload["batchId"],
+                                "numeroProcesso": payload["numeroProcesso"],
+                                "status": "partial_success",
+                                "arquivosDownloaded": [
+                                    {"nome": "doc.pdf", "tamanhoBytes": 42}
+                                ],
+                                "errorMessage": "faltam anexos",
+                                "downloadedAt": "2026-01-01T00:00:00+00:00",
+                            }
+                        )
+                    )
+            return len(queue)
+
+        fake_redis.rpush = rpush_partial
+        ds.get_redis = AsyncMock(return_value=fake_redis)
+
+        await ds._run_batch(job)
+
+        assert job.status == "partial"
+        assert job.error == "1 incompletos"
+        assert job.progress["summary"]["partial"] == 1
 
     @pytest.mark.asyncio
     async def test_run_batch_handles_exception(self, tmp_path):

@@ -448,8 +448,9 @@ class PJeSessionWorker:
                     )
                     await self._publish_progress(
                         job,
-                        "done",
+                        "partial",
                         warning,
+                        status="partial",
                         docs_baixados=len(downloaded_files),
                         tamanho_bytes=sum(
                             int(item.get("tamanhoBytes", 0) or 0)
@@ -463,7 +464,7 @@ class PJeSessionWorker:
                     return self._result(
                         job_id,
                         numero_processo,
-                        "success",
+                        "partial_success",
                         downloaded_files,
                         error=warning,
                     )
@@ -552,8 +553,9 @@ class PJeSessionWorker:
                 )
                 await self._publish_progress(
                     job,
-                    "done",
+                    "partial",
                     warning,
+                    status="partial",
                     total_docs=max(expected_total_docs, len(downloaded_files)),
                     docs_baixados=len(downloaded_files),
                     tamanho_bytes=sum(
@@ -571,7 +573,7 @@ class PJeSessionWorker:
                 return self._result(
                     job_id,
                     numero_processo,
-                    "success",
+                    "partial_success",
                     downloaded_files,
                     error=warning,
                 )
@@ -665,8 +667,9 @@ class PJeSessionWorker:
                         self._health_status = "ready"
                         await self._publish_progress(
                             job,
-                            "done",
+                            "partial",
                             warning,
+                            status="partial",
                             total_docs=max(expected_total_docs, len(downloaded_files)),
                             docs_baixados=len(downloaded_files),
                             tamanho_bytes=sum(
@@ -677,7 +680,7 @@ class PJeSessionWorker:
                         return self._result(
                             job_id,
                             numero_processo,
-                            "success",
+                            "partial_success",
                             downloaded_files,
                             error=warning,
                         )

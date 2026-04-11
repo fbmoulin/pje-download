@@ -82,6 +82,8 @@ MAX_BATCH_SIZE = 500  # máximo de processos por batch
 MAX_BATCH_HISTORY = 100  # max completed batches kept in memory
 RESULT_WAIT_TIMEOUT_SECS = 360
 
+TERMINAL_PROCESS_STATUSES = {"done", "failed", "partial"}
+
 
 class DashboardState:
     """Estado global da dashboard — batches, progresso, histórico."""
@@ -154,7 +156,8 @@ class DashboardState:
         completed = [
             (bid, job)
             for bid, job in self.batches.items()
-            if job.status in ("done", "failed") and bid != self.current_batch_id
+            if job.status in ("done", "failed", "partial")
+            and bid != self.current_batch_id
         ]
         if len(completed) <= MAX_BATCH_HISTORY:
             return
@@ -224,6 +227,7 @@ class DashboardState:
                 "total": len(job.processos),
                 "done": 0,
                 "failed": 0,
+                "partial": 0,
                 "pending": len(job.processos),
             },
             "processos": processos,
@@ -272,29 +276,40 @@ class DashboardState:
         tamanho_bytes = sum(int(item.get("tamanhoBytes", 0) or 0) for item in files)
         worker_status = result.get("status", "failed")
         error = result.get("errorMessage")
-        status = "done" if worker_status == "success" else "failed"
-        phase = "done" if status == "done" else "failed"
+        if worker_status == "success":
+            status = "done"
+            phase = "done"
+        elif worker_status == "partial_success":
+            status = "partial"
+            phase = "partial"
+        else:
+            status = "failed"
+            phase = "failed"
 
         processos = job.progress.setdefault("processos", {})
         processos[numero] = {
             "status": status,
             "phase": phase,
-            "phase_detail": error if status == "done" and error else None,
+            "phase_detail": error if status in {"done", "partial"} and error else None,
             "total_docs": docs_baixados,
             "docs_baixados": docs_baixados,
             "tamanho_bytes": tamanho_bytes,
-            "erro": error if status == "failed" else None,
+            "erro": error if status in {"failed", "partial"} else None,
             "duracao_s": None,
         }
 
         done = sum(1 for proc in processos.values() if proc.get("status") == "done")
         failed = sum(1 for proc in processos.values() if proc.get("status") == "failed")
+        partial = sum(
+            1 for proc in processos.values() if proc.get("status") == "partial"
+        )
         total = len(job.processos)
         job.progress["summary"] = {
             "total": total,
             "done": done,
             "failed": failed,
-            "pending": max(total - done - failed, 0),
+            "partial": partial,
+            "pending": max(total - done - failed - partial, 0),
         }
         return worker_status
 
@@ -338,12 +353,16 @@ class DashboardState:
         )
         done = sum(1 for proc in processos.values() if proc.get("status") == "done")
         failed = sum(1 for proc in processos.values() if proc.get("status") == "failed")
+        partial = sum(
+            1 for proc in processos.values() if proc.get("status") == "partial"
+        )
         total = len(job.processos)
         job.progress["summary"] = {
             "total": total,
             "done": done,
             "failed": failed,
-            "pending": max(total - done - failed, 0),
+            "partial": partial,
+            "pending": max(total - done - failed - partial, 0),
         }
 
     def _fail_remaining_processes(
@@ -355,7 +374,7 @@ class DashboardState:
         processos = job.progress.setdefault("processos", {})
         for numero in pending:
             current = processos.get(numero, {})
-            if current.get("status") in ("done", "failed"):
+            if current.get("status") in TERMINAL_PROCESS_STATUSES:
                 continue
             processos[numero] = {
                 "status": "failed",
@@ -370,12 +389,16 @@ class DashboardState:
 
         done = sum(1 for proc in processos.values() if proc.get("status") == "done")
         failed = sum(1 for proc in processos.values() if proc.get("status") == "failed")
+        partial = sum(
+            1 for proc in processos.values() if proc.get("status") == "partial"
+        )
         total = len(job.processos)
         job.progress["summary"] = {
             "total": total,
             "done": done,
             "failed": failed,
-            "pending": max(total - done - failed, 0),
+            "partial": partial,
+            "pending": max(total - done - failed - partial, 0),
         }
 
     async def _run_batch(self, job: BatchJob):
@@ -459,8 +482,9 @@ class DashboardState:
             summary = job.progress.get("summary", {})
             done = int(summary.get("done", 0) or 0)
             failed = int(summary.get("failed", 0) or 0)
+            partial = int(summary.get("partial", 0) or 0)
 
-            if failed > 0 and done == 0:
+            if failed > 0 and done == 0 and partial == 0:
                 job.status = "failed"
                 if not job.error:
                     first_err = next(
@@ -472,10 +496,15 @@ class DashboardState:
                         "All processes failed",
                     )
                     job.error = first_err
-            elif failed > 0:
-                job.status = "done"
+            elif failed > 0 or partial > 0:
+                job.status = "partial"
                 if not job.error:
-                    job.error = f"{failed}/{len(job.processos)} processos falharam"
+                    parts = []
+                    if failed > 0:
+                        parts.append(f"{failed} falharam")
+                    if partial > 0:
+                        parts.append(f"{partial} incompletos")
+                    job.error = ", ".join(parts)
             else:
                 job.status = "done"
 
@@ -517,7 +546,7 @@ class DashboardState:
             return None
 
         # Se já terminou, retornar progresso final (já em memória)
-        if job.status in ("done", "failed"):
+        if job.status in ("done", "failed", "partial"):
             self._progress_cache = None  # limpar cache ao terminar
             return {"batch_id": job.id, "status": job.status, **job.progress}
 

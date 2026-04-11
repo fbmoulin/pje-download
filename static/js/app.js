@@ -133,7 +133,14 @@ function setBadge(status) {
   const badge = $('#status-badge');
   const label = status.charAt(0).toUpperCase() + status.slice(1);
   badge.textContent = label;
-  badge.className = 'badge badge--' + (status === 'running' ? 'running' : status === 'done' ? 'done' : status === 'failed' ? 'failed' : status === 'offline' ? 'offline' : 'idle');
+  badge.className = 'badge badge--' + (
+    status === 'running' ? 'running'
+      : status === 'done' ? 'done'
+      : status === 'partial' ? 'partial'
+      : status === 'failed' ? 'failed'
+      : status === 'offline' ? 'offline'
+      : 'idle'
+  );
 }
 
 // ── KPI Updates ──
@@ -161,6 +168,15 @@ function renderPhase(p, isAntigoProc) {
     let html = '<span class="tag tag--failed">Falhou</span>';
     if (failureDetail) {
       html += `<div class="pipeline__detail" title="${esc(failureDetail)}">${esc(failureDetail.substring(0, 80))}</div>`;
+    }
+    return html;
+  }
+
+  if (phase === 'partial') {
+    const partialDetail = detail || p.erro || '';
+    let html = '<span class="tag tag--partial">Incompleto</span>';
+    if (partialDetail) {
+      html += `<div class="pipeline__detail" title="${esc(partialDetail)}">${esc(partialDetail.substring(0, 80))}</div>`;
     }
     return html;
   }
@@ -220,6 +236,7 @@ function renderBatchSummary(summary = {}) {
     { key: 'queued', label: 'Na fila', count: Number(summary.pending || summary.queued || 0) },
     { key: 'running', label: 'Em curso', count: Number(summary.running || 0) },
     { key: 'done', label: 'Concluidos', count: Number(summary.done || 0) },
+    { key: 'partial', label: 'Incompletos', count: Number(summary.partial || 0) },
     { key: 'failed', label: 'Falhas', count: Number(summary.failed || 0) },
   ];
   return chips.map((chip) => (
@@ -384,7 +401,7 @@ async function fetchProgress() {
     const data = await apiFetch('/api/progress');
     pollInterval = POLL_INTERVAL_MIN; // reset on success
     renderProgress(data);
-    if (data.status === 'done' || data.status === 'failed' || data.status === 'idle') {
+    if (data.status === 'done' || data.status === 'partial' || data.status === 'failed' || data.status === 'idle') {
       stopPolling();
       fetchHistory();
     }
@@ -412,10 +429,11 @@ function renderProgress(data) {
   const procs = data.processos || {};
   const summary = data.summary || {};
   const total = summary.total || Object.keys(procs).length;
-  let done = 0, failed = 0, downloadedDocs = 0, expectedDocs = 0, totalBytes = 0;
+  let done = 0, failed = 0, partial = 0, downloadedDocs = 0, expectedDocs = 0, totalBytes = 0;
 
   for (const p of Object.values(procs)) {
     if (p.status === 'done') done++;
+    if (p.status === 'partial') partial++;
     if (p.status === 'failed') failed++;
     const { done: procDone, total: procTotal } = getDocStats(p);
     downloadedDocs += procDone;
@@ -423,17 +441,18 @@ function renderProgress(data) {
     totalBytes += p.tamanho_bytes || p.bytes || 0;
   }
 
-  const pct = total > 0 ? Math.round((done + failed) / total * 100) : 0;
+  const pct = total > 0 ? Math.round((done + failed + partial) / total * 100) : 0;
 
   updateKPIs(total, downloadedDocs, totalBytes, parseInt($('#kpi-batches').textContent) || 0);
 
   const statusMsg = data.status === 'running' ? 'Baixando documentos...'
+    : data.status === 'partial' ? 'Concluido com itens incompletos'
     : data.status === 'failed' ? 'Falhou'
     : data.status === 'done' && failed > 0 ? 'Concluido com falhas'
     : data.status === 'done' ? 'Concluido' : data.status;
 
-  const errorLine = (data.error || (failed > 0 && done === 0))
-    ? `<div class="text-xs" style="color:var(--red);margin-top:4px">${esc(data.error || `${failed}/${total} processos falharam`)}</div>`
+  const errorLine = (data.error || failed > 0 || partial > 0)
+    ? `<div class="text-xs" style="color:${partial > 0 && failed === 0 ? 'var(--amber)' : 'var(--red)'};margin-top:4px">${esc(data.error || `${failed}/${total} processos falharam`)}</div>`
     : '';
 
   area.innerHTML = `
@@ -444,6 +463,7 @@ function renderProgress(data) {
     <div class="text-xs text-muted">
       ${statusMsg}
       ${failed > 0 && done > 0 ? ` \u2022 <span style="color:var(--red)">${failed} falha(s)</span>` : ''}
+      ${partial > 0 ? ` \u2022 <span style="color:var(--amber)">${partial} incompleto(s)</span>` : ''}
     </div>
     ${errorLine}`;
 
@@ -453,7 +473,7 @@ function renderProgress(data) {
   const docLabel = expectedDocs > 0
     ? `${downloadedDocs}/${expectedDocs} docs`
     : `${downloadedDocs} docs`;
-  $('#progress-label').textContent = `${done + failed} / ${total} processos (${pct}%) \u2014 ${docLabel}, ${fmtBytes(totalBytes)}`;
+  $('#progress-label').textContent = `${done + failed + partial} / ${total} processos (${pct}%) \u2014 ${docLabel}, ${fmtBytes(totalBytes)}`;
   $('#batch-summary').innerHTML = renderBatchSummary(summary);
 
   renderProcessTable($('#processos-tbody'), procs);
@@ -537,9 +557,10 @@ async function viewBatch(batchId) {
     batchCard.classList.remove('hidden');
 
     const procs = data.progress.processos;
-    let done = 0, downloadedDocs = 0, expectedDocs = 0, totalBytes = 0;
+    let done = 0, partial = 0, downloadedDocs = 0, expectedDocs = 0, totalBytes = 0;
     for (const p of Object.values(procs)) {
       if (p.status === 'done') done++;
+      if (p.status === 'partial') partial++;
       const { done: procDone, total: procTotal } = getDocStats(p);
       downloadedDocs += procDone;
       expectedDocs += procTotal || procDone;
@@ -547,16 +568,17 @@ async function viewBatch(batchId) {
     }
 
     const total = Object.keys(procs).length;
-    const pct = total > 0 ? Math.round(done / total * 100) : 0;
+    const pct = total > 0 ? Math.round((done + partial) / total * 100) : 0;
     $('#main-progress').style.width = pct + '%';
     const docLabel = expectedDocs > 0
       ? `${downloadedDocs}/${expectedDocs} docs`
       : `${downloadedDocs} docs`;
-    $('#progress-label').textContent = `${done} / ${total} processos (${pct}%) \u2014 ${docLabel}, ${fmtBytes(totalBytes)}`;
+    $('#progress-label').textContent = `${done + partial} / ${total} processos (${pct}%) \u2014 ${docLabel}, ${fmtBytes(totalBytes)}`;
     $('#batch-summary').innerHTML = renderBatchSummary({
       pending: Object.values(procs).filter((p) => p.status === 'queued').length,
       running: Object.values(procs).filter((p) => p.status === 'running').length,
       done: Object.values(procs).filter((p) => p.status === 'done').length,
+      partial: Object.values(procs).filter((p) => p.status === 'partial').length,
       failed: Object.values(procs).filter((p) => p.status === 'failed').length,
     });
 

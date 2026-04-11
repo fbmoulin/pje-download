@@ -1,7 +1,9 @@
 name: Deploy
 
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [master]
   workflow_dispatch:
 
@@ -18,9 +20,16 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     needs: []
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'master')
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Sync files to VPS
         env:
@@ -85,10 +94,13 @@ jobs:
 
       - name: Restart services
         uses: appleboy/ssh-action@v1.2.5
+        env:
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          envs: REDIS_PASSWORD
           script: |
             set -e
             cd /opt/pje-download
@@ -113,4 +125,16 @@ jobs:
               sleep 5
             done
             printf '%s' "$dashboard_status" | grep -Eq '"worker_status"[[:space:]]*:[[:space:]]*"(ready|consuming)"'
+
+            echo "Running queue smoke test..."
+            before_dead=$(docker compose exec -T redis redis-cli -a "$REDIS_PASSWORD" LLEN kratos:pje:dead-letter | tr -d '\r')
+            docker compose exec -T redis redis-cli -a "$REDIS_PASSWORD" RPUSH kratos:pje:jobs '{invalid-json' >/dev/null
+            for i in $(seq 1 12); do
+              after_dead=$(docker compose exec -T redis redis-cli -a "$REDIS_PASSWORD" LLEN kratos:pje:dead-letter | tr -d '\r')
+              if [ "$after_dead" -gt "$before_dead" ]; then
+                break
+              fi
+              sleep 5
+            done
+            test "${after_dead:-$before_dead}" -gt "$before_dead"
             echo "Deploy OK"

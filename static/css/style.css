@@ -154,6 +154,8 @@ body {
 .badge--running::before { background: var(--blue); animation: badge-ripple 1.6s ease-in-out infinite; box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.5); }
 .badge--done { background: var(--green-bg); color: var(--green); border-color: rgba(16, 185, 129, 0.25); }
 .badge--done::before { background: var(--green); }
+.badge--partial { background: var(--yellow-bg); color: var(--amber); border-color: rgba(245, 158, 11, 0.25); }
+.badge--partial::before { background: var(--amber); }
 .badge--failed { background: var(--red-bg); color: var(--red); border-color: rgba(239, 68, 68, 0.25); }
 .badge--failed::before { background: var(--red); }
 .badge--offline { background: var(--red-bg); color: var(--red); border-color: rgba(239, 68, 68, 0.2); opacity: .7; }
@@ -462,6 +464,11 @@ body {
   color: var(--green);
   border-color: rgba(16, 185, 129, 0.22);
 }
+.summary-chip--partial {
+  background: var(--yellow-bg);
+  color: var(--yellow);
+  border-color: rgba(245, 158, 11, 0.22);
+}
 .summary-chip--failed {
   background: var(--red-bg);
   color: var(--red);
@@ -518,6 +525,7 @@ tbody tr.clickable { cursor: pointer; }
   letter-spacing: .02em;
 }
 .tag--done       { background: var(--green-bg); color: var(--green); }
+.tag--partial    { background: var(--yellow-bg); color: var(--yellow); }
 .tag--failed     { background: var(--red-bg); color: var(--red); }
 .tag--downloading,
 .tag--running    { background: var(--blue-bg); color: var(--blue); }
