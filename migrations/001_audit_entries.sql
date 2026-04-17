@@ -40,11 +40,18 @@ CREATE INDEX IF NOT EXISTS audit_entries_event_type_idx
   ON audit_entries (event_type, ts DESC);
 
 -- ─────────────────────────────────────────────────────────────
--- Insert-only role (defense in depth) — run manually as admin:
+-- Append-only role (defense in depth) — run manually as admin:
 --
 --   CREATE ROLE audit_writer LOGIN PASSWORD 'CHANGEME';
---   GRANT INSERT ON audit_entries TO audit_writer;
+--   GRANT CONNECT ON DATABASE railway TO audit_writer;
+--   GRANT USAGE ON SCHEMA public TO audit_writer;
+--   GRANT INSERT, SELECT ON audit_entries TO audit_writer;
 --   GRANT USAGE, SELECT ON SEQUENCE audit_entries_id_seq TO audit_writer;
+--
+-- SELECT is required by Postgres for the INSERT ... ON CONFLICT (cols)
+-- DO NOTHING path (arbiter-index lookup needs row visibility). It does
+-- NOT enable UPDATE, DELETE or TRUNCATE — the role is still effectively
+-- append-only: rows can be inserted and read, nothing else.
 --
 -- Then set DATABASE_URL to use audit_writer, NOT the admin role.
 -- ─────────────────────────────────────────────────────────────

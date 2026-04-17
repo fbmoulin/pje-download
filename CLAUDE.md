@@ -103,13 +103,16 @@ Local JSON-L remains the **source of truth**; Railway is a write-only redundant 
 Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 **Required for production:**
-- Use an **insert-only** Postgres role, not the admin role. One-time setup:
+- Use an **append-only** Postgres role, not the admin role. One-time setup:
   ```sql
   CREATE ROLE audit_writer LOGIN PASSWORD '...';
-  GRANT INSERT ON audit_entries TO audit_writer;
+  GRANT CONNECT ON DATABASE railway TO audit_writer;
+  GRANT USAGE ON SCHEMA public TO audit_writer;
+  GRANT INSERT, SELECT ON audit_entries TO audit_writer;
   GRANT USAGE, SELECT ON SEQUENCE audit_entries_id_seq TO audit_writer;
   ```
-- Use `sslmode=verify-full` in `DATABASE_URL` — the syncer builds a TLS context with `check_hostname=True`.
+  `SELECT` is required by Postgres for the arbiter-index lookup in `INSERT ... ON CONFLICT (cols) DO NOTHING`. The role is still effectively append-only — no UPDATE, DELETE, or TRUNCATE.
+- TLS: `sslmode=require` is enough for managed providers (Railway, Neon, Supabase). Only set `sslmode=verify-full` when the server has a CA-signed cert; the syncer respects the URL's `sslmode` and will only build a strict `SSLContext` for `verify-full`/`verify-ca`.
 - Never log `DATABASE_URL` — always pass through `audit_sync._scrub_url()` first. Covered by `test_no_password_in_logs_during_lifecycle`.
 
 **Bootstrap sequence:**

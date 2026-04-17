@@ -39,7 +39,7 @@ INSERT INTO audit_entries (
     api_key_hash, erro, duracao_s, raw
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
-) ON CONFLICT ON CONSTRAINT audit_entries_dedupe DO NOTHING
+) ON CONFLICT (ts, event_type, processo_numero, documento_id) DO NOTHING
 """
 
 _URL_PASSWORD_RE = re.compile(r"(://[^:/@?#]+):([^@]+)@")
@@ -292,17 +292,36 @@ class AuditSyncer:
     # ── internals (overridable in tests) ───────────────────────────────
 
     async def _ensure_pool(self) -> None:
-        """Lazy-create the asyncpg pool with TLS verify-full."""
+        """Lazy-create the asyncpg pool, respecting the URL's ``sslmode``.
+
+        - ``sslmode=verify-full`` → strict: use the system CA bundle and
+          enforce hostname match (recommended for self-hosted Postgres).
+        - ``sslmode=require`` or anything else → delegate to asyncpg,
+          which gives you TLS without chain verification. This is what
+          managed providers like Railway need because their TCP proxies
+          present self-signed chains.
+        """
         if self._pool is not None:
             return
-        import ssl
+        from urllib.parse import parse_qs, urlparse
 
         import asyncpg
 
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = True
+        sslmode = (
+            parse_qs(urlparse(self.database_url).query)
+            .get("sslmode", [""])[0]
+            .lower()
+        )
+        if sslmode in ("verify-full", "verify-ca"):
+            import ssl
+
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = sslmode == "verify-full"
+            ssl_arg = ctx
+        else:
+            ssl_arg = None  # asyncpg reads sslmode from URL directly
         self._pool = await asyncpg.create_pool(
-            self.database_url, min_size=1, max_size=3, ssl=ctx
+            self.database_url, min_size=1, max_size=3, ssl=ssl_arg
         )
 
     async def _insert_batch(self, rows: list[dict]) -> None:
