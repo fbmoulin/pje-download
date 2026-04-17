@@ -173,3 +173,44 @@ dashboard_active_batches = Gauge(
     "Number of dashboard batches currently active in the control plane",
     registry=REGISTRY,
 )
+
+# ── Audit sync (CNJ 615/2025 Phase 2 — Railway Postgres) ─────────────────────
+
+audit_sync_rows_total = Counter(
+    "pje_audit_sync_rows_total",
+    "Audit rows written to Railway Postgres by outcome",
+    ["status"],  # success | conflict | failed
+    registry=REGISTRY,
+)
+
+audit_sync_batches_total = Counter(
+    "pje_audit_sync_batches_total",
+    "Audit sync batches by outcome",
+    ["status"],  # success | retry | failed
+    registry=REGISTRY,
+)
+
+audit_sync_lag_seconds = Gauge(
+    "pje_audit_sync_lag_seconds",
+    "Event-time lag between newest local JSON-L entry and newest synced row",
+    registry=REGISTRY,
+)
+
+audit_sync_latency_seconds = Histogram(
+    "pje_audit_sync_latency_seconds",
+    "Tick latency (read+insert+cursor-advance) in seconds",
+    buckets=[0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0],
+    registry=REGISTRY,
+)
+
+audit_sync_malformed_lines_total = Counter(
+    "pje_audit_sync_malformed_lines_total",
+    "Malformed (but \\n-terminated) JSON-L lines skipped during sync",
+    registry=REGISTRY,
+)
+
+audit_sync_files_vanished_total = Counter(
+    "pje_audit_sync_files_vanished_total",
+    "Cursor referenced an audit file that no longer exists (rotated/deleted)",
+    registry=REGISTRY,
+)

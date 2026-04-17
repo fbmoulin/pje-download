@@ -11,12 +11,16 @@ COPY requirements.txt .
 
 # ── Dashboard target: no Playwright, no Xvfb ──
 FROM base AS dashboard
-RUN pip install --no-cache-dir aiohttp prometheus_client structlog zeep requests gdown && \
+RUN pip install --no-cache-dir \
+        aiohttp prometheus_client structlog zeep requests gdown \
+        "redis[hiredis]" asyncpg && \
     apt-get update && apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 COPY --chown=appuser:appuser config.py mni_client.py gdrive_downloader.py \
-     batch_downloader.py dashboard_api.py dashboard.html metrics.py ./
+     batch_downloader.py dashboard_api.py dashboard.html metrics.py \
+     audit.py audit_sync.py pje_session.py ./
 COPY --chown=appuser:appuser static/ static/
+COPY --chown=appuser:appuser migrations/ migrations/
 RUN mkdir -p /data/downloads && chown -R appuser:appuser /data
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -sf http://127.0.0.1:8007/api/status || exit 1

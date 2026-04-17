@@ -6,3 +6,4 @@ zeep==4.3.2
 aiohttp==3.13.5
 gdown>=5.1.0
 requests>=2.31.0
+asyncpg==0.30.0

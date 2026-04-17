@@ -1158,6 +1158,134 @@ class TestRuntimeConfigValidation:
         assert isinstance(app, web.Application)
         mock_rotate.assert_called_once_with(max_days=45)
 
+    def test_create_app_no_syncer_when_audit_sync_disabled(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(dashboard_api, "APP_ENV", "development")
+        monkeypatch.setattr(dashboard_api, "AUDIT_SYNC_ENABLED", False)
+        with patch("audit.rotate_logs", return_value=0):
+            app = dashboard_api.create_app(tmp_path)
+        assert app.get(dashboard_api.AUDIT_SYNCER_KEY) is None
+
+    def test_create_app_installs_syncer_when_enabled(self, monkeypatch, tmp_path):
+        import audit_sync as audit_sync_mod
+
+        monkeypatch.setattr(dashboard_api, "APP_ENV", "development")
+        monkeypatch.setattr(dashboard_api, "AUDIT_SYNC_ENABLED", True)
+        monkeypatch.setattr(dashboard_api, "DATABASE_URL", "postgres://u:p@h/db")
+        monkeypatch.setattr(dashboard_api, "AUDIT_SYNC_CATCHUP_DAYS", 7)
+        monkeypatch.setattr(dashboard_api, "AUDIT_LOG_RETENTION_DAYS", 90)
+        with patch("audit.rotate_logs", return_value=0):
+            app = dashboard_api.create_app(tmp_path)
+        assert isinstance(
+            app.get(dashboard_api.AUDIT_SYNCER_KEY), audit_sync_mod.AuditSyncer
+        )
+
+
+class TestAuditSyncLifecycle:
+    """Verify on_startup / on_cleanup handle the audit syncer gracefully."""
+
+    @pytest.mark.asyncio
+    async def test_on_startup_spawns_run_forever_task(self, monkeypatch, tmp_path):
+        import audit_sync
+
+        syncer = audit_sync.create_syncer(
+            enabled=True,
+            database_url="postgres://u:p@h/db",
+            audit_dir=tmp_path,
+            interval_secs=10,
+            batch_size=100,
+            catchup_days=7,
+            retention_days=90,
+            drain_timeout_secs=1.0,
+            app_env="development",
+            auto_migrate=False,
+        )
+        assert syncer is not None
+        syncer._tick = AsyncMock()
+
+        app = web.Application()
+        app[dashboard_api.AUDIT_SYNCER_KEY] = syncer
+        dashboard_api.state = None  # skip resume path
+
+        await dashboard_api._on_startup(app)
+
+        task = app.get(dashboard_api.AUDIT_SYNC_TASK_KEY)
+        assert isinstance(task, asyncio.Task)
+        assert not task.done()
+
+        # cleanup
+        syncer.shutdown.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_on_cleanup_drains_syncer(self, tmp_path):
+        import audit_sync
+
+        syncer = audit_sync.create_syncer(
+            enabled=True,
+            database_url="postgres://u:p@h/db",
+            audit_dir=tmp_path,
+            interval_secs=10,
+            batch_size=100,
+            catchup_days=7,
+            retention_days=90,
+            drain_timeout_secs=1.0,
+            app_env="development",
+            auto_migrate=False,
+        )
+        assert syncer is not None
+        syncer._tick = AsyncMock()
+        syncer.close = AsyncMock()
+
+        app = web.Application()
+        app[dashboard_api.AUDIT_SYNCER_KEY] = syncer
+        task = asyncio.create_task(syncer.run_forever())
+        app[dashboard_api.AUDIT_SYNC_TASK_KEY] = task
+        dashboard_api.state = None
+
+        await dashboard_api._on_cleanup(app)
+
+        assert task.done()
+        syncer.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_on_cleanup_cancels_on_drain_timeout(self, tmp_path):
+        import audit_sync
+
+        syncer = audit_sync.create_syncer(
+            enabled=True,
+            database_url="postgres://u:p@h/db",
+            audit_dir=tmp_path,
+            interval_secs=10,
+            batch_size=100,
+            catchup_days=7,
+            retention_days=90,
+            drain_timeout_secs=0.1,
+            app_env="development",
+            auto_migrate=False,
+        )
+        assert syncer is not None
+
+        # Task ignores shutdown — simulate a hung run
+        async def hang():
+            while True:
+                await asyncio.sleep(60)
+
+        app = web.Application()
+        app[dashboard_api.AUDIT_SYNCER_KEY] = syncer
+        task = asyncio.create_task(hang())
+        app[dashboard_api.AUDIT_SYNC_TASK_KEY] = task
+        dashboard_api.state = None
+        syncer.close = AsyncMock()
+
+        # Override drain timeout module constant
+        from unittest.mock import patch
+
+        with patch.object(dashboard_api, "AUDIT_SYNC_DRAIN_TIMEOUT_SECS", 0.1):
+            await dashboard_api._on_cleanup(app)
+
+        assert task.cancelled() or task.done()
+        syncer.close.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_on_startup_resumes_active_batch(self, monkeypatch, tmp_path):
         dashboard_api.state = DashboardState(tmp_path)

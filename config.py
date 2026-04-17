@@ -115,3 +115,15 @@ DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8007"))
 DASHBOARD_API_KEY = os.getenv("DASHBOARD_API_KEY", "")
 # Forwarded headers are ignored unless explicitly enabled behind a trusted proxy.
 TRUST_X_FORWARDED_FOR = os.getenv("TRUST_X_FORWARDED_FOR", "false").lower() == "true"
+
+# Audit sync — CNJ 615/2025 Phase 2 (Railway Postgres redundancy).
+# Default disabled. Dashboard syncs local /data/audit/*.jsonl to audit_entries.
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+AUDIT_SYNC_ENABLED = os.getenv("AUDIT_SYNC_ENABLED", "false").lower() == "true"
+AUDIT_SYNC_INTERVAL_SECS = int(os.getenv("AUDIT_SYNC_INTERVAL_SECS", "300"))
+AUDIT_SYNC_BATCH_SIZE = int(os.getenv("AUDIT_SYNC_BATCH_SIZE", "100"))
+AUDIT_SYNC_CATCHUP_DAYS = int(os.getenv("AUDIT_SYNC_CATCHUP_DAYS", "7"))
+AUDIT_SYNC_AUTO_MIGRATE = (
+    os.getenv("AUDIT_SYNC_AUTO_MIGRATE", "false").lower() == "true"
+)
+AUDIT_SYNC_DRAIN_TIMEOUT_SECS = float(os.getenv("AUDIT_SYNC_DRAIN_TIMEOUT_SECS", "5.0"))

@@ -84,6 +84,10 @@ Sprint 6 — Graceful Shutdown + Redis Retry (2026-04-04):
 - Scope: Signal handlers (SIGTERM/SIGINT), Redis init retry (5x backoff), blpop exponential backoff, lpush retry with local fallback, dashboard progress save on shutdown
 - Status: DONE — 248→257 tests
 
+Sprint 7 — Audit Sync to Railway Postgres (2026-04-17):
+- Scope: `audit_sync.py` background syncer (tails JSON-L, inserts to Postgres, idempotent dedupe), `migrations/001_audit_entries.sql`, dashboard lifecycle hooks, 40+ new tests
+- Status: DONE — 303→348 tests
+
 ## Security
 
 - `DASHBOARD_API_KEY` env var required for POST endpoints in production (empty = dev mode, no auth)
@@ -93,11 +97,37 @@ Sprint 6 — Graceful Shutdown + Redis Retry (2026-04-04):
 - Worker health bound to 127.0.0.1 (not exposed externally)
 - CNJ 615/2025 audit trail: `audit.py` logs every document access to JSON-L (`/data/audit/audit-YYYY-MM-DD.jsonl`, 0600 perms, append-only)
 
+## Audit Sync (Railway Postgres, Phase 2)
+
+Local JSON-L remains the **source of truth**; Railway is a write-only redundant sink.
+Default disabled (`AUDIT_SYNC_ENABLED=false`).
+
+**Required for production:**
+- Use an **append-only** Postgres role, not the admin role. One-time setup:
+  ```sql
+  CREATE ROLE audit_writer LOGIN PASSWORD '...';
+  GRANT CONNECT ON DATABASE railway TO audit_writer;
+  GRANT USAGE ON SCHEMA public TO audit_writer;
+  GRANT INSERT, SELECT ON audit_entries TO audit_writer;
+  GRANT USAGE, SELECT ON SEQUENCE audit_entries_id_seq TO audit_writer;
+  ```
+  `SELECT` is required by Postgres for the arbiter-index lookup in `INSERT ... ON CONFLICT (cols) DO NOTHING`. The role is still effectively append-only — no UPDATE, DELETE, or TRUNCATE.
+- TLS: `sslmode=require` is enough for managed providers (Railway, Neon, Supabase). Only set `sslmode=verify-full` when the server has a CA-signed cert; the syncer respects the URL's `sslmode` and will only build a strict `SSLContext` for `verify-full`/`verify-ca`.
+- Never log `DATABASE_URL` — always pass through `audit_sync._scrub_url()` first. Covered by `test_no_password_in_logs_during_lifecycle`.
+
+**Bootstrap sequence:**
+1. Provision Railway Postgres, copy `DATABASE_URL`.
+2. Set `AUDIT_SYNC_AUTO_MIGRATE=true` + admin URL, restart dashboard → schema created.
+3. Flip `AUDIT_SYNC_AUTO_MIGRATE=false`, rotate `DATABASE_URL` to the `audit_writer` role, restart.
+
+**Correctness invariant:** a JSON-L line is complete only when it ends with `\n`. `_parse_complete_lines` stops at any partial tail so the cursor never advances past in-flight writes. Never violate this rule — tests in `tests/test_audit_sync.py::TestParseCompleteLines`.
+
+**Idempotency:** inserts use `ON CONFLICT (dedupe_key) DO NOTHING` with a generated dedupe column (`ts|event_type|processo_numero|documento_id`). Replaying a tick is a no-op.
+
 ## Known Issues (remaining)
 
 - MNI blocked by cloud IP — Playwright fallback via `pje_session.py`
 - Test coverage ~85% — remaining ~15% are deep Playwright integration paths (low ROI)
-- Audit trail Phase 1 (local JSON-L) done; Phase 2 (Supabase sync) deferred
 
 ## Paths
 - WSL: `/mnt/c/projetos-2026/pje-download`
