@@ -1275,6 +1275,81 @@ class TestRunBatch:
         assert job.progress["summary"]["partial"] == 1
 
     @pytest.mark.asyncio
+    async def test_run_batch_retries_transient_rpush_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """Audit P1: if Redis blips during job enqueue, _run_batch should
+        retry instead of failing the whole batch. Pattern mirrors
+        worker.py:_publish_result (3 attempts, exponential backoff).
+        """
+        import asyncio as _asyncio
+        import redis.asyncio as redis_asyncio
+
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="run_retry",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="queued",
+            output_dir=str(tmp_path / "run_retry"),
+        )
+        ds.batches["run_retry"] = job
+
+        fake_redis = FakeRedis()
+        original_rpush = fake_redis.rpush
+        attempts = {"n": 0}
+
+        async def flaky_rpush(key, *values):
+            if key == "kratos:pje:jobs":
+                attempts["n"] += 1
+                if attempts["n"] < 3:
+                    raise redis_asyncio.ConnectionError("transient")
+            return await original_rpush(key, *values)
+
+        fake_redis.rpush = flaky_rpush
+        ds.get_redis = AsyncMock(return_value=fake_redis)
+        monkeypatch.setattr(_asyncio, "sleep", AsyncMock())
+
+        await ds._run_batch(job)
+
+        assert attempts["n"] == 3, (
+            f"expected 3 rpush attempts (2 failures + 1 success), got {attempts['n']}"
+        )
+        assert job.status == "done"  # batch recovered from transient failure
+
+    @pytest.mark.asyncio
+    async def test_run_batch_fails_when_rpush_exhausts_retries(
+        self, tmp_path, monkeypatch
+    ):
+        """After all retries fail, batch must still mark failed — never
+        hang waiting for results that will never arrive.
+        """
+        import asyncio as _asyncio
+        import redis.asyncio as redis_asyncio
+
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="run_exhaust",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="queued",
+            output_dir=str(tmp_path / "run_exhaust"),
+        )
+        ds.batches["run_exhaust"] = job
+
+        fake_redis = FakeRedis()
+
+        async def always_fail_rpush(key, *values):
+            raise redis_asyncio.ConnectionError("redis down")
+
+        fake_redis.rpush = always_fail_rpush
+        ds.get_redis = AsyncMock(return_value=fake_redis)
+        monkeypatch.setattr(_asyncio, "sleep", AsyncMock())
+
+        await ds._run_batch(job)
+
+        assert job.status == "failed"
+        assert job.error and "redis" in job.error.lower()
+
+    @pytest.mark.asyncio
     async def test_run_batch_handles_exception(self, tmp_path):
         """_run_batch catches Redis/control-plane exceptions and sets failed status."""
         ds = DashboardState(tmp_path)

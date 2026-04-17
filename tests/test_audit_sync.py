@@ -523,6 +523,35 @@ class TestPasswordNeverLogged:
             assert "SUPER_SECRET_PW" not in str(rec.args or "")
 
 
+class TestEnsurePool:
+    """Pool configuration guards against Railway DB restart — kill stale
+    sockets before the next sync tick picks them up (audit P1)."""
+
+    @pytest.mark.asyncio
+    async def test_pool_created_with_inactive_lifetime_cap(
+        self, tmp_path: Path, monkeypatch
+    ):
+        import asyncpg
+
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        create_pool_mock = AsyncMock(return_value=object())  # fake pool
+        monkeypatch.setattr(asyncpg, "create_pool", create_pool_mock)
+
+        await syncer._ensure_pool()
+
+        create_pool_mock.assert_awaited_once()
+        kwargs = create_pool_mock.await_args.kwargs
+        assert kwargs.get("max_inactive_connection_lifetime") == 30.0, (
+            "without max_inactive_connection_lifetime dead Railway sockets "
+            "survive in the pool and the next tick retries against them"
+        )
+        assert kwargs.get("max_size") == 1, (
+            "write-only audit sync every 300s only needs one connection; "
+            "max_size=3 holds unnecessary slots on the Railway connection limit"
+        )
+
+
 class TestInsertBatch:
     @pytest.mark.asyncio
     async def test_insert_batch_retries_then_succeeds(
