@@ -45,8 +45,16 @@ log: structlog.BoundLogger = structlog.get_logger("kratos.dashboard-api")
 
 from config import (
     APP_ENV,
+    AUDIT_LOG_DIR,
     AUDIT_LOG_RETENTION_DAYS,
+    AUDIT_SYNC_AUTO_MIGRATE,
+    AUDIT_SYNC_BATCH_SIZE,
+    AUDIT_SYNC_CATCHUP_DAYS,
+    AUDIT_SYNC_DRAIN_TIMEOUT_SECS,
+    AUDIT_SYNC_ENABLED,
+    AUDIT_SYNC_INTERVAL_SECS,
     DASHBOARD_PORT as DEFAULT_PORT,
+    DATABASE_URL,
     DOWNLOAD_BASE_DIR as DEFAULT_OUTPUT,
     REDIS_URL,
     HEALTH_PORT as WORKER_HEALTH_PORT,
@@ -55,6 +63,10 @@ from config import (
     atomic_write_text,
     sanitize_filename,
 )
+import audit_sync
+
+AUDIT_SYNCER_KEY: web.AppKey = web.AppKey("audit_syncer", audit_sync.AuditSyncer)
+AUDIT_SYNC_TASK_KEY: web.AppKey = web.AppKey("audit_sync_task", asyncio.Task)
 
 
 # ─────────────────────────────────────────────
@@ -789,6 +801,10 @@ async def handle_healthz(request: web.Request) -> web.Response:
     if pending_resume:
         ready = False
 
+    syncer = request.app.get(AUDIT_SYNCER_KEY)
+    if isinstance(syncer, audit_sync.AuditSyncer):
+        checks["audit_sync"] = syncer.health_snapshot()
+
     status_code = 200 if ready else 503
     return web.json_response(
         {
@@ -1110,6 +1126,29 @@ async def handle_index(request: web.Request) -> web.Response:
 
 async def _on_cleanup(app: web.Application) -> None:
     """Cancela batch em execução ao encerrar o servidor. Saves progress first."""
+    syncer = app.get(AUDIT_SYNCER_KEY) if hasattr(app, "get") else None
+    sync_task = app.get(AUDIT_SYNC_TASK_KEY) if hasattr(app, "get") else None
+    if isinstance(syncer, audit_sync.AuditSyncer) and isinstance(
+        sync_task, asyncio.Task
+    ):
+        syncer.shutdown.set()
+        try:
+            await asyncio.wait_for(sync_task, timeout=AUDIT_SYNC_DRAIN_TIMEOUT_SECS)
+        except asyncio.TimeoutError:
+            log.warning(
+                "dashboard.audit_sync.drain_timeout",
+                timeout_s=AUDIT_SYNC_DRAIN_TIMEOUT_SECS,
+            )
+            sync_task.cancel()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            log.warning("dashboard.audit_sync.drain_failed", error=str(exc))
+        try:
+            await syncer.close()
+        except Exception as exc:
+            log.warning("dashboard.audit_sync.close_failed", error=str(exc))
+
     if state and state.current_batch_id:
         job = state.batches.get(state.current_batch_id)
         if job and job.progress:
@@ -1146,6 +1185,23 @@ async def _on_startup(app: web.Application) -> None:
     if state is not None:
         await state.resume_active_batch()
 
+    syncer = app.get(AUDIT_SYNCER_KEY) if hasattr(app, "get") else None
+    if not isinstance(syncer, audit_sync.AuditSyncer):
+        return
+    if syncer.auto_migrate:
+        try:
+            await syncer.init_schema()
+            log.info("dashboard.audit_sync.schema_initialised")
+        except Exception as exc:
+            log.error("dashboard.audit_sync.schema_init_failed", error=str(exc))
+            return
+    app[AUDIT_SYNC_TASK_KEY] = asyncio.create_task(syncer.run_forever())
+    log.info(
+        "dashboard.audit_sync.started",
+        interval_s=syncer.interval_secs,
+        batch_size=syncer.batch_size,
+    )
+
 
 def _validate_runtime_config() -> None:
     """Fail fast on insecure production dashboard configuration."""
@@ -1179,6 +1235,18 @@ def create_app(output_dir: Path) -> web.Application:
     state = DashboardState(output_dir)
 
     app = web.Application()
+    app[AUDIT_SYNCER_KEY] = audit_sync.create_syncer(
+        enabled=AUDIT_SYNC_ENABLED,
+        database_url=DATABASE_URL,
+        audit_dir=AUDIT_LOG_DIR,
+        interval_secs=AUDIT_SYNC_INTERVAL_SECS,
+        batch_size=AUDIT_SYNC_BATCH_SIZE,
+        catchup_days=AUDIT_SYNC_CATCHUP_DAYS,
+        retention_days=AUDIT_LOG_RETENTION_DAYS,
+        drain_timeout_secs=AUDIT_SYNC_DRAIN_TIMEOUT_SECS,
+        app_env=APP_ENV,
+        auto_migrate=AUDIT_SYNC_AUTO_MIGRATE,
+    )
     # Middleware stack (order matters: CORS first, then rate limit, then auth)
     app.middlewares.append(cors_middleware)
     app.middlewares.append(rate_limit_middleware)

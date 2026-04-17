@@ -255,7 +255,36 @@ pje_dashboard_batches_total{status="done"} 12.0
 pje_dashboard_batch_timeouts_total 0.0
 pje_dashboard_active_batch_recoveries_total 1.0
 pje_dashboard_active_batches 0.0
+
+# Audit sync para Railway Postgres (Phase 2, opcional)
+pje_audit_sync_rows_total{status="success"} 128.0
+pje_audit_sync_rows_total{status="failed"} 0.0
+pje_audit_sync_batches_total{status="success"} 3.0
+pje_audit_sync_batches_total{status="retry"} 0.0
+pje_audit_sync_lag_seconds 4.2
+pje_audit_sync_malformed_lines_total 0.0
+pje_audit_sync_files_vanished_total 0.0
+pje_audit_sync_latency_seconds_bucket{le="1.0"} 3.0
 ```
+
+**Audit sync health:** `GET /healthz` inclui a secao `checks.audit_sync` quando habilitado:
+
+```json
+{
+  "checks": {
+    "audit_sync": {
+      "enabled": true,
+      "lag_seconds_event_time": 4.2,
+      "last_error": null,
+      "last_tick_at": "2026-04-17T05:00:00+00:00",
+      "rows_total": 128,
+      "url": "postgres://audit_writer:***@host.railway.app:5432/db"
+    }
+  }
+}
+```
+
+Ver `CLAUDE.md#audit-sync-railway-postgres-phase-2` para bootstrap, role insert-only e requisitos de TLS.
 
 **Labels de status para `pje_mni_requests_total`:**
 
