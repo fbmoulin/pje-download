@@ -308,9 +308,7 @@ class AuditSyncer:
         import asyncpg
 
         sslmode = (
-            parse_qs(urlparse(self.database_url).query)
-            .get("sslmode", [""])[0]
-            .lower()
+            parse_qs(urlparse(self.database_url).query).get("sslmode", [""])[0].lower()
         )
         if sslmode in ("verify-full", "verify-ca"):
             import ssl
@@ -320,8 +318,17 @@ class AuditSyncer:
             ssl_arg = ctx
         else:
             ssl_arg = None  # asyncpg reads sslmode from URL directly
+        # max_inactive_connection_lifetime=30s culls sockets that Railway
+        # killed server-side (e.g. managed restart), preventing the next
+        # tick from failing in cascade against dead connections. max_size=1
+        # because this is a serial write-only loop every AUDIT_SYNC_INTERVAL
+        # seconds — extra slots just sit on Railway's connection quota.
         self._pool = await asyncpg.create_pool(
-            self.database_url, min_size=1, max_size=3, ssl=ssl_arg
+            self.database_url,
+            min_size=1,
+            max_size=1,
+            max_inactive_connection_lifetime=30.0,
+            ssl=ssl_arg,
         )
 
     async def _insert_batch(self, rows: list[dict]) -> None:
