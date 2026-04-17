@@ -257,12 +257,14 @@ class DummyRequest:
         headers: dict[str, str] | None = None,
         remote: str | None = "127.0.0.1",
         match_info: dict[str, str] | None = None,
+        path: str = "/",
     ):
         self.method = method
         self._json_data = json_data
         self.headers = headers or {}
         self.remote = remote
         self.match_info = match_info or {}
+        self.path = path
         self.app = {}
 
     async def json(self):
@@ -745,10 +747,163 @@ class TestApiKeyMiddleware:
 
         monkeypatch.setattr(config, "DASHBOARD_API_KEY", "correct-key")
         resp = await dashboard_api.api_key_middleware(
-            DummyRequest(method="POST", headers={"X-API-Key": "wrong-key"}),
+            DummyRequest(
+                method="POST",
+                path="/api/download",
+                headers={"X-API-Key": "wrong-key"},
+            ),
             _ok_handler,
         )
         assert resp.status == 401
+
+    @pytest.mark.asyncio
+    async def test_get_api_endpoint_without_key_returns_401(self, monkeypatch):
+        """GET /api/history (lists CNJ numbers) MUST require auth when key is set.
+
+        Audit P0.1: previously GET requests skipped the middleware entirely,
+        leaking batch history + session status to anyone who could reach :8007.
+        """
+        import config
+
+        monkeypatch.setattr(config, "DASHBOARD_API_KEY", "correct-key")
+        for path in [
+            "/api/history",
+            "/api/batch/abc",
+            "/api/session/status",
+            "/api/progress",
+            "/api/status",
+        ]:
+            resp = await dashboard_api.api_key_middleware(
+                DummyRequest(method="GET", path=path),
+                _ok_handler,
+            )
+            assert resp.status == 401, f"GET {path} should require auth"
+
+    @pytest.mark.asyncio
+    async def test_get_api_endpoint_with_valid_key_passes(self, monkeypatch):
+        import config
+
+        monkeypatch.setattr(config, "DASHBOARD_API_KEY", "correct-key")
+        resp = await dashboard_api.api_key_middleware(
+            DummyRequest(
+                method="GET",
+                path="/api/history",
+                headers={"X-API-Key": "correct-key"},
+            ),
+            _ok_handler,
+        )
+        assert resp.status == 200
+
+    @pytest.mark.asyncio
+    async def test_public_paths_never_require_auth(self, monkeypatch):
+        """/, /healthz, /metrics, /static/* are public — orchestrators + browsers
+        must reach them without the key.
+        """
+        import config
+
+        monkeypatch.setattr(config, "DASHBOARD_API_KEY", "correct-key")
+        for path in ["/", "/healthz", "/metrics", "/static/css/style.css"]:
+            resp = await dashboard_api.api_key_middleware(
+                DummyRequest(method="GET", path=path),
+                _ok_handler,
+            )
+            assert resp.status == 200, f"public path {path} was blocked"
+
+
+# ─────────────────────────────────────────────
+# _progress.json torn-read resilience (audit P0.3)
+# ─────────────────────────────────────────────
+
+
+class TestProgressTornRead:
+    """get_current_progress and handle_batch_detail both read _progress.json
+    in the hot path. The writer uses atomic rename; the file can momentarily
+    vanish between exists() and read_text() under concurrent rotation. These
+    tests pin the behaviour: torn-read NEVER crashes, and the error is
+    visible in logs (so ops can tell the difference between "truly empty
+    batch" and "silent IO contention").
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_current_progress_survives_vanished_file(
+        self, tmp_path, monkeypatch
+    ):
+        import structlog
+
+        ds = DashboardState(tmp_path)
+        batch_dir = tmp_path / "torn_batch"
+        batch_dir.mkdir()
+        progress = batch_dir / "_progress.json"
+        progress.write_text('{"summary": {"done": 1}, "processos": {}}')
+
+        job = BatchJob(
+            id="torn_batch",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="running",
+            output_dir=str(batch_dir),
+        )
+        ds.batches["torn_batch"] = job
+        ds.current_batch_id = "torn_batch"
+
+        import pathlib
+
+        real_read_text = pathlib.Path.read_text
+
+        def flaky_read(self, *args, **kwargs):
+            if self.name == "_progress.json":
+                raise FileNotFoundError(self)
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "read_text", flaky_read)
+
+        with structlog.testing.capture_logs() as logs:
+            result = ds.get_current_progress()
+
+        assert result is not None
+        assert result["batch_id"] == "torn_batch"
+        assert any(r.get("event") == "dashboard.progress.read_failed" for r in logs), (
+            f"torn-read was silent; got logs: {logs!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_handle_batch_detail_survives_vanished_progress(
+        self, tmp_path, monkeypatch
+    ):
+        import structlog
+
+        batch_dir = tmp_path / "td_batch"
+        batch_dir.mkdir()
+        progress = batch_dir / "_progress.json"
+        progress.write_text('{"summary": {"done": 1}, "processos": {}}')
+
+        job = BatchJob(
+            id="td_batch",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="running",
+            output_dir=str(batch_dir),
+        )
+
+        import pathlib
+
+        real_read_text = pathlib.Path.read_text
+
+        def flaky_read(self, *args, **kwargs):
+            if self.name == "_progress.json":
+                raise FileNotFoundError(self)
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "read_text", flaky_read)
+
+        with patch("dashboard_api.state") as mock_state:
+            mock_state.batches = {"td_batch": job}
+            with structlog.testing.capture_logs() as logs:
+                resp = await dashboard_api.handle_batch_detail(
+                    DummyRequest(match_info={"id": "td_batch"})
+                )
+        assert resp.status == 200
+        assert any(r.get("event") == "dashboard.progress.read_failed" for r in logs), (
+            f"torn-read was silent; got logs: {logs!r}"
+        )
 
 
 # ─────────────────────────────────────────────
