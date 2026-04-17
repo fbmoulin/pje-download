@@ -16,6 +16,7 @@ from gdrive_downloader import (
     _try_requests_parse,
     download_gdrive_folder,
     extract_folder_id,
+    extract_gdrive_link_from_pje,
     is_processo_antigo,
 )
 
@@ -699,4 +700,127 @@ class TestTryPlaywrightDownload:
                 "https://drive.google.com/drive/folders/ABC123", tmp_path
             )
 
+        assert result is None
+
+
+# ─────────────────────────────────────────────
+# extract_gdrive_link_from_pje — audit P0.2
+# Previously 0% covered. Characterization tests at the Playwright-Page
+# boundary: each fallback path (html content / href / iframe / doc-link)
+# gets at least one assertion without a real browser.
+# ─────────────────────────────────────────────
+
+
+def _page_stub_with(content: str = "", link_hrefs=(), iframe_srcs=(), doc_links=()):
+    """Return an async Page stub wired to the shapes the function expects.
+
+    - ``content`` is returned by ``page.content()``.
+    - ``link_hrefs`` tuples produce ``a[href*=drive.google.com]`` results.
+    - ``iframe_srcs`` produce ``iframe[src*=drive.google.com]`` results.
+    - ``doc_links`` produce ``a[href*=documento], [class*=doc]`` results.
+    """
+    page = AsyncMock()
+    page.content = AsyncMock(return_value=content)
+    page.keyboard = AsyncMock()
+    page.wait_for_load_state = AsyncMock()
+
+    def _mk_locator(n, attr_name, attr_values):
+        loc = MagicMock()
+        loc.count = AsyncMock(return_value=1)
+        loc.first = loc
+        loc.fill = AsyncMock()
+
+        async def _all():
+            nodes = []
+            for v in attr_values:
+                node = MagicMock()
+                node.get_attribute = AsyncMock(return_value=v)
+                node.click = AsyncMock()
+                nodes.append(node)
+            return nodes
+
+        loc.all = _all
+        return loc
+
+    input_loc = _mk_locator(1, "", [])
+    link_loc = _mk_locator(len(link_hrefs), "href", link_hrefs)
+    iframe_loc = _mk_locator(len(iframe_srcs), "src", iframe_srcs)
+    doc_loc = _mk_locator(len(doc_links), "href", doc_links)
+
+    def _locator(selector: str):
+        if "drive.google.com" in selector and "iframe" in selector:
+            return iframe_loc
+        if "drive.google.com" in selector:
+            return link_loc
+        if "documento" in selector or "doc" in selector:
+            return doc_loc
+        return input_loc
+
+    page.locator = MagicMock(side_effect=_locator)
+    return page
+
+
+class TestExtractGdriveLinkFromPje:
+    @pytest.mark.asyncio
+    async def test_link_in_html_content_is_returned(self, monkeypatch):
+        """Primary path: regex match in page.content() — found via direct
+        HTML scan before any fallback is attempted.
+        """
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        html = (
+            "<html>...see folder "
+            '<a href="https://drive.google.com/drive/folders/ABC123xyz">docs</a>'
+            "</html>"
+        )
+        page = _page_stub_with(content=html)
+
+        result = await extract_gdrive_link_from_pje(page, "0012345-67.2018.8.08.0001")
+        assert result == "https://drive.google.com/drive/folders/ABC123xyz"
+
+    @pytest.mark.asyncio
+    async def test_link_found_via_href_when_content_is_clean(self, monkeypatch):
+        """When the regex doesn't match the raw HTML, the href fallback
+        catches links that are only visible as DOM attributes.
+        """
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        page = _page_stub_with(
+            content="<html>nothing here</html>",
+            link_hrefs=["https://drive.google.com/drive/folders/HREF999"],
+        )
+
+        result = await extract_gdrive_link_from_pje(page, "0012345-67.2018.8.08.0001")
+        assert result == "https://drive.google.com/drive/folders/HREF999"
+
+    @pytest.mark.asyncio
+    async def test_link_found_via_iframe_src(self, monkeypatch):
+        """Iframe fallback: pick up folder id from embedded drive viewer."""
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        page = _page_stub_with(
+            content="<html>nothing</html>",
+            iframe_srcs=["https://drive.google.com/open?id=IFRAME_ID"],
+        )
+
+        result = await extract_gdrive_link_from_pje(page, "0012345-67.2018.8.08.0001")
+        # The function normalises iframe hits to the canonical folders/ form
+        assert result == "https://drive.google.com/drive/folders/IFRAME_ID"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_link_anywhere(self, monkeypatch):
+        """All paths return empty — function must NOT raise, must return
+        None so the caller can fall back to plain MNI."""
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        page = _page_stub_with(content="<html>no-drive-here</html>")
+
+        result = await extract_gdrive_link_from_pje(page, "0012345-67.2018.8.08.0001")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_navigation_error_returns_none(self):
+        """page.goto raising (network partition, session expired redirect)
+        must be caught; no traceback should leak into the batch run.
+        """
+        page = AsyncMock()
+        page.goto = AsyncMock(side_effect=RuntimeError("net partition"))
+
+        result = await extract_gdrive_link_from_pje(page, "0012345-67.2018.8.08.0001")
         assert result is None
