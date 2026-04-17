@@ -725,7 +725,11 @@ class DashboardState:
         if self._progress_cache is not None and (now - self._progress_cache_time) < 1.0:
             return {"batch_id": job.id, "status": "running", **self._progress_cache}
 
-        # Cache expirado — ler do disco e atualizar cache
+        # Cache expirado — ler do disco e atualizar cache.
+        # TOCTOU: o arquivo pode sumir entre exists() e read_text() durante
+        # rotacao/escrita atomica. Capturamos, logamos e servimos o ultimo
+        # cache valido (se houver) para que ops veja contengao de IO em vez
+        # de assumir que o batch esta vazio.
         progress_file = Path(job.output_dir) / "_progress.json"
         if progress_file.exists():
             try:
@@ -733,8 +737,13 @@ class DashboardState:
                 self._progress_cache = data
                 self._progress_cache_time = now
                 return {"batch_id": job.id, "status": "running", **data}
-            except Exception:
-                pass
+            except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+                log.warning(
+                    "dashboard.progress.read_failed",
+                    batch_id=job.id,
+                    path=str(progress_file),
+                    error_type=type(exc).__name__,
+                )
 
         return {"batch_id": job.id, "status": job.status, "processos": {}}
 
@@ -988,15 +997,22 @@ async def handle_batch_detail(request: web.Request) -> web.Response:
     if not job:
         return web.json_response({"error": "Batch não encontrado"}, status=404)
 
-    # Se batch em execução, ler progresso em tempo real
+    # Se batch em execução, ler progresso em tempo real. Torn-read aqui
+    # (arquivo sumindo entre exists() e read_text()) nao deve derrubar o
+    # endpoint — servimos job.progress antigo e logamos para ops.
     if job.status == "running":
         progress_file = Path(job.output_dir) / "_progress.json"
         if progress_file.exists():
             try:
                 live = json.loads(progress_file.read_text(encoding="utf-8"))
                 job.progress = live
-            except Exception:
-                pass
+            except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+                log.warning(
+                    "dashboard.progress.read_failed",
+                    batch_id=job.id,
+                    path=str(progress_file),
+                    error_type=type(exc).__name__,
+                )
 
     return web.json_response(
         {
@@ -1347,15 +1363,26 @@ async def rate_limit_middleware(request: web.Request, handler):
     return await handler(request)
 
 
+_AUTH_PUBLIC_PREFIXES = ("/healthz", "/metrics", "/static/")
+_AUTH_PUBLIC_EXACT = {"/"}
+
+
 @web.middleware
 async def api_key_middleware(request: web.Request, handler):
-    """Require API key for mutating endpoints. Skipped when DASHBOARD_API_KEY is empty."""
+    """Require API key for every /api/* route (any method).
+
+    Public paths (/, /healthz, /metrics, /static/*) stay open — orchestrators
+    and browsers need them. When ``DASHBOARD_API_KEY`` is empty the middleware
+    is a pass-through (dev mode). Before Sprint 8 this middleware only gated
+    POST; that leaked CNJ lists and session status on GET (see audit P0.1).
+    """
     from config import DASHBOARD_API_KEY
 
     if not DASHBOARD_API_KEY:
-        return await handler(request)  # No key configured = dev mode
+        return await handler(request)
 
-    if request.method != "POST":
+    path = request.path
+    if path in _AUTH_PUBLIC_EXACT or path.startswith(_AUTH_PUBLIC_PREFIXES):
         return await handler(request)
 
     provided = request.headers.get("X-API-Key", "")
