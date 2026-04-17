@@ -39,7 +39,7 @@ INSERT INTO audit_entries (
     api_key_hash, erro, duracao_s, raw
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
-) ON CONFLICT (dedupe_key) DO NOTHING
+) ON CONFLICT ON CONSTRAINT audit_entries_dedupe DO NOTHING
 """
 
 _URL_PASSWORD_RE = re.compile(r"(://[^:/@?#]+):([^@]+)@")

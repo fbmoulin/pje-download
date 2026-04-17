@@ -25,11 +25,11 @@ CREATE TABLE IF NOT EXISTS audit_entries (
   duracao_s       DOUBLE PRECISION,
   raw             JSONB NOT NULL,
   synced_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  dedupe_key      TEXT GENERATED ALWAYS AS (
-    ts::text || '|' || event_type || '|' || processo_numero
-              || '|' || COALESCE(documento_id, '')
-  ) STORED,
-  CONSTRAINT audit_entries_dedupe UNIQUE (dedupe_key)
+  -- Composite dedupe (ts + event_type + processo_numero + documento_id).
+  -- NULLS NOT DISTINCT makes NULL==NULL so events without documento_id
+  -- (e.g., batch_started, session_login) still dedupe correctly.
+  CONSTRAINT audit_entries_dedupe
+    UNIQUE NULLS NOT DISTINCT (ts, event_type, processo_numero, documento_id)
 );
 
 CREATE INDEX IF NOT EXISTS audit_entries_ts_idx
