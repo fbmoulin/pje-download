@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import random
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -94,8 +95,41 @@ class BatchJob:
 MAX_BATCH_SIZE = 500  # máximo de processos por batch
 MAX_BATCH_HISTORY = 100  # max completed batches kept in memory
 RESULT_WAIT_TIMEOUT_SECS = 360
+_RPUSH_MAX_ATTEMPTS = 3  # audit P1: transient Redis failure should not kill a batch
 
 TERMINAL_PROCESS_STATUSES = {"done", "failed", "partial"}
+
+
+async def _rpush_with_retry(client, key: str, *values: str):
+    """Retry ``RPUSH key *values`` with exponential backoff + jitter.
+
+    Mirrors ``worker.py:_publish_result``'s pattern. Only retries on Redis
+    connection/timeout errors — other exceptions propagate immediately.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(_RPUSH_MAX_ATTEMPTS):
+        try:
+            return await client.rpush(key, *values)
+        except Exception as exc:  # noqa: BLE001 — narrowed below
+            import redis.asyncio as redis_asyncio
+
+            if not isinstance(
+                exc, (redis_asyncio.ConnectionError, redis_asyncio.TimeoutError)
+            ):
+                raise
+            last_exc = exc
+            if attempt == _RPUSH_MAX_ATTEMPTS - 1:
+                break
+            delay = min(2**attempt + random.uniform(0, 1), 10)
+            log.warning(
+                "dashboard.rpush.retry",
+                key=key,
+                attempt=attempt + 1,
+                delay_s=delay,
+            )
+            await asyncio.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
 
 
 class DashboardState:
@@ -557,7 +591,8 @@ class DashboardState:
                 await redis_client.delete(reply_queue)
             self._persist_active_batch(job)
             if enqueue_jobs and serialized_payloads:
-                await redis_client.rpush(
+                await _rpush_with_retry(
+                    redis_client,
                     "kratos:pje:jobs",
                     *serialized_payloads.values(),
                 )

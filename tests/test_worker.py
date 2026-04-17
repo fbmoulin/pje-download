@@ -1168,3 +1168,90 @@ class TestMniOptimization:
             incluir_anexos=True,
             progress_cb=progress_cb,
         )
+
+
+class TestOfficialApiNoCookieLeak:
+    """Audit P1: `_try_official_api` logs ``str(exc)`` from response.json().
+    Playwright error payloads for PJe 5xx pages can include response body
+    (Set-Cookie, session tokens). Logs should carry status / type only.
+    """
+
+    @pytest.mark.asyncio
+    async def test_html_error_body_in_exception_not_logged(self, tmp_path):
+        import structlog
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        response = AsyncMock()
+        # Vulnerable path: status 200 but body is HTML (session expired login
+        # redirect etc.). response.json() raises; current code catches with
+        # `except Exception: log.warning(reason=str(exc))` which dumps the
+        # HTML — and some PJe login pages echo Set-Cookie in the body.
+        response.status = 200
+        response.json = AsyncMock(
+            side_effect=Exception(
+                "Set-Cookie: JSESSIONID=SECRET_SESSION_TOKEN; <html>server error</html>"
+            )
+        )
+        worker.page = AsyncMock()
+        worker.page.request.get = AsyncMock(return_value=response)
+
+        with structlog.testing.capture_logs() as logs:
+            result = await worker._try_official_api(
+                "5000003-00.2024.8.08.0001", tmp_path
+            )
+
+        assert result is None
+        for r in logs:
+            dump = repr(r)
+            assert "SECRET_SESSION_TOKEN" not in dump, (
+                f"cookie leaked into log record: {dump!r}"
+            )
+            assert "JSESSIONID" not in dump
+
+
+class TestMniCancelledPropagation:
+    """Audit P1: `_try_mni_download`'s broad ``except Exception`` swallowed
+    ``CancelledError`` too, so a SIGTERM mid-SOAP would report the job as
+    "no documents" instead of preserving partial state / letting the loop
+    shut down cleanly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self, tmp_path):
+        import asyncio
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.mni_client = AsyncMock()
+        worker.mni_client.consultar_processo = AsyncMock(
+            side_effect=asyncio.CancelledError()
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await worker._try_mni_download(
+                "5000001-00.2024.8.08.0001",
+                tmp_path,
+                incluir_anexos=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_other_exceptions_still_swallowed(self, tmp_path):
+        """Regression: non-cancel errors still fall back to the silent
+        return path so the strategy cascade can try the next one.
+        """
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.mni_client = AsyncMock()
+        worker.mni_client.consultar_processo = AsyncMock(
+            side_effect=RuntimeError("tribunal reset peer")
+        )
+
+        files, anexos, total = await worker._try_mni_download(
+            "5000001-00.2024.8.08.0001",
+            tmp_path,
+            incluir_anexos=True,
+        )
+        assert files is None
+        assert anexos == 0
+        assert total == 0

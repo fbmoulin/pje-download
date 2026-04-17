@@ -910,7 +910,19 @@ class PJeSessionWorker:
             )
 
             if response.status == 200:
-                docs = await response.json()
+                try:
+                    docs = await response.json()
+                except Exception as json_exc:
+                    # PJe sometimes returns 200 with HTML (session-expiry
+                    # redirect). The exception text may echo Set-Cookie or
+                    # session tokens from the body — never log ``str(exc)``.
+                    log.warning(
+                        "pje.api.invalid_json",
+                        processo=numero_processo,
+                        status=response.status,
+                        error_type=type(json_exc).__name__,
+                    )
+                    return None
                 if isinstance(docs, list):
                     docs_list = docs
                 else:
@@ -947,7 +959,13 @@ class PJeSessionWorker:
                 return files if files else None
 
         except Exception as exc:
-            log.warning("pje.api.unavailable", reason=str(exc))
+            # Network-layer errors only; JSON parse failures handled above
+            # without leaking body text into structured logs.
+            log.warning(
+                "pje.api.unavailable",
+                processo=numero_processo,
+                error_type=type(exc).__name__,
+            )
         return None
 
     async def _download_document_api(self, doc: dict, output_dir: Path) -> dict | None:
