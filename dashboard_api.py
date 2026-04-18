@@ -472,16 +472,18 @@ class DashboardState:
         )
 
     def _batch_job_payload(self, job: BatchJob, numero_processo: str) -> dict:
+        from protocol import JobMessage
+
         safe_name = sanitize_filename(numero_processo)
-        return {
-            "jobId": f"{job.id}:{uuid.uuid4().hex[:8]}",
-            "batchId": job.id,
-            "numeroProcesso": numero_processo,
-            "includeAnexos": job.include_anexos,
-            "replyQueue": self._result_queue(job.id),
-            "outputSubdir": f"{job.id}/{safe_name}",
-            "gdriveUrl": job.gdrive_map.get(numero_processo),
-        }
+        return JobMessage(
+            jobId=f"{job.id}:{uuid.uuid4().hex[:8]}",
+            batchId=job.id,
+            numeroProcesso=numero_processo,
+            includeAnexos=job.include_anexos,
+            replyQueue=self._result_queue(job.id),
+            outputSubdir=f"{job.id}/{safe_name}",
+            gdriveUrl=job.gdrive_map.get(numero_processo),
+        )
 
     def _apply_result(self, job: BatchJob, result: dict) -> str:
         numero = result.get("numeroProcesso", "")
@@ -724,8 +726,10 @@ class DashboardState:
                 continue
 
             _, result_json = item
+            from protocol import ProgressMessage, ResultMessage
+
             try:
-                result = json.loads(result_json)
+                result: ResultMessage | ProgressMessage = json.loads(result_json)
             except json.JSONDecodeError as exc:
                 log.warning(
                     "dashboard.batch.malformed_result",
