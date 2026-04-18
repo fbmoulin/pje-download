@@ -32,6 +32,7 @@ import structlog
 from playwright.async_api import BrowserContext, Page, async_playwright
 
 import metrics
+from file_utils import merge_file_lists, total_bytes
 from mni_client import MNIClient, MNIResult
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.pje-worker")
@@ -52,6 +53,11 @@ from config import (
     HEALTH_BIND_HOST,
     CONCURRENT_DOWNLOADS,
     MNI_ENABLED,
+    MNI_HEALTH_CACHE_TTL_SECS,
+    PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS,
+    PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS,
+    REDIS_BLPOP_TIMEOUT_SECS,
+    REDIS_CIRCUIT_THRESHOLD,
     sha256_file,
     sanitize_filename,
     unique_path,
@@ -66,21 +72,9 @@ def _unique_filename(directory: Path, filename: str) -> str:
     return unique_path(directory / filename).name
 
 
-def _merge_downloaded_files(*groups: list[dict]) -> list[dict]:
-    """Merge file metadata lists, preferring checksum-based deduplication."""
-    merged: list[dict] = []
-    seen: set[str] = set()
-    for group in groups:
-        for item in group:
-            key = (
-                item.get("checksum")
-                or f"{item.get('nome')}|{item.get('tamanhoBytes')}|{item.get('fonte')}"
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(item)
-    return merged
+# _merge_downloaded_files moved to file_utils.merge_file_lists (Sprint 2 Q2).
+# Kept this alias so existing call sites (and any external imports) keep working.
+_merge_downloaded_files = merge_file_lists
 
 
 # Padrões conhecidos de CAPTCHA no PJe
@@ -274,7 +268,7 @@ class PJeSessionWorker:
         try:
             await self.page.wait_for_url(
                 lambda url: "login" not in url.lower(),
-                timeout=300_000,  # 5 min
+                timeout=PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS,
             )
         except Exception:
             log.error("pje.session.manual_login_timeout")
@@ -387,9 +381,7 @@ class PJeSessionWorker:
 
         def _make_incremental_download_progress_cb(detail_prefix: str):
             base_docs = len(downloaded_files)
-            base_bytes = sum(
-                int(item.get("tamanhoBytes", 0) or 0) for item in downloaded_files
-            )
+            base_bytes = total_bytes(downloaded_files)
 
             async def _callback(
                 *,
@@ -422,10 +414,7 @@ class PJeSessionWorker:
                     "gdrive",
                     "Baixando pasta Google Drive",
                     docs_baixados=len(downloaded_files),
-                    tamanho_bytes=sum(
-                        int(item.get("tamanhoBytes", 0) or 0)
-                        for item in downloaded_files
-                    ),
+                    tamanho_bytes=total_bytes(downloaded_files),
                 )
                 gdrive_dir = output_dir / "escaneados_gdrive"
                 gdrive_files = await download_gdrive_folder(gdrive_url, gdrive_dir)
@@ -438,10 +427,7 @@ class PJeSessionWorker:
                         "gdrive",
                         f"GDrive: {len(gdrive_files)} docs",
                         docs_baixados=len(downloaded_files),
-                        tamanho_bytes=sum(
-                            int(item.get("tamanhoBytes", 0) or 0)
-                            for item in downloaded_files
-                        ),
+                        tamanho_bytes=total_bytes(downloaded_files),
                     )
                 if (
                     downloaded_files
@@ -458,10 +444,7 @@ class PJeSessionWorker:
                         warning,
                         status="partial",
                         docs_baixados=len(downloaded_files),
-                        tamanho_bytes=sum(
-                            int(item.get("tamanhoBytes", 0) or 0)
-                            for item in downloaded_files
-                        ),
+                        tamanho_bytes=total_bytes(downloaded_files),
                     )
                     await self._log_job_result(
                         job_id, numero_processo, downloaded_files
@@ -482,10 +465,7 @@ class PJeSessionWorker:
                     "mni_metadata",
                     "Consultando metadados via MNI SOAP",
                     docs_baixados=len(downloaded_files),
-                    tamanho_bytes=sum(
-                        int(item.get("tamanhoBytes", 0) or 0)
-                        for item in downloaded_files
-                    ),
+                    tamanho_bytes=total_bytes(downloaded_files),
                 )
                 mni_result = await self._try_mni_download(
                     numero_processo,
@@ -505,10 +485,7 @@ class PJeSessionWorker:
                     f"Metadados MNI: {expected_total_docs} docs esperados",
                     total_docs=max(expected_total_docs, len(downloaded_files)),
                     docs_baixados=len(downloaded_files),
-                    tamanho_bytes=sum(
-                        int(item.get("tamanhoBytes", 0) or 0)
-                        for item in downloaded_files
-                    ),
+                    tamanho_bytes=total_bytes(downloaded_files),
                 )
                 if mni_files:
                     downloaded_files = _merge_downloaded_files(
@@ -520,10 +497,7 @@ class PJeSessionWorker:
                         f"Documentos baixados: {len(downloaded_files)}",
                         total_docs=max(expected_total_docs, len(downloaded_files)),
                         docs_baixados=len(downloaded_files),
-                        tamanho_bytes=sum(
-                            int(item.get("tamanhoBytes", 0) or 0)
-                            for item in downloaded_files
-                        ),
+                        tamanho_bytes=total_bytes(downloaded_files),
                     )
                     log.info(
                         "pje.download.mni_success",
@@ -542,10 +516,7 @@ class PJeSessionWorker:
                             f"Concluído: {len(downloaded_files)} docs",
                             total_docs=max(expected_total_docs, len(downloaded_files)),
                             docs_baixados=len(downloaded_files),
-                            tamanho_bytes=sum(
-                                int(item.get("tamanhoBytes", 0) or 0)
-                                for item in downloaded_files
-                            ),
+                            tamanho_bytes=total_bytes(downloaded_files),
                         )
                         return self._result(
                             job_id, numero_processo, "success", downloaded_files
@@ -564,10 +535,7 @@ class PJeSessionWorker:
                     status="partial",
                     total_docs=max(expected_total_docs, len(downloaded_files)),
                     docs_baixados=len(downloaded_files),
-                    tamanho_bytes=sum(
-                        int(item.get("tamanhoBytes", 0) or 0)
-                        for item in downloaded_files
-                    ),
+                    tamanho_bytes=total_bytes(downloaded_files),
                 )
                 log.warning(
                     "pje.download.anexos_pending",
@@ -595,9 +563,7 @@ class PJeSessionWorker:
                 "mni_download",
                 "Tentando API REST autenticada",
                 docs_baixados=len(downloaded_files),
-                tamanho_bytes=sum(
-                    int(item.get("tamanhoBytes", 0) or 0) for item in downloaded_files
-                ),
+                tamanho_bytes=total_bytes(downloaded_files),
             )
 
             api_result = await self._try_official_api(
@@ -616,10 +582,7 @@ class PJeSessionWorker:
                     f"Documentos baixados: {len(downloaded_files)}",
                     total_docs=max(expected_total_docs, len(downloaded_files)),
                     docs_baixados=len(downloaded_files),
-                    tamanho_bytes=sum(
-                        int(item.get("tamanhoBytes", 0) or 0)
-                        for item in downloaded_files
-                    ),
+                    tamanho_bytes=total_bytes(downloaded_files),
                 )
                 log.info("pje.download.api_success", count=len(downloaded_files))
             else:
@@ -632,10 +595,7 @@ class PJeSessionWorker:
                         "failed",
                         "CAPTCHA detectado — intervenção manual necessária",
                         docs_baixados=len(downloaded_files),
-                        tamanho_bytes=sum(
-                            int(item.get("tamanhoBytes", 0) or 0)
-                            for item in downloaded_files
-                        ),
+                        tamanho_bytes=total_bytes(downloaded_files),
                     )
                     return self._result(
                         job_id,
@@ -649,10 +609,7 @@ class PJeSessionWorker:
                     "mni_download",
                     "Fallback no browser",
                     docs_baixados=len(downloaded_files),
-                    tamanho_bytes=sum(
-                        int(item.get("tamanhoBytes", 0) or 0)
-                        for item in downloaded_files
-                    ),
+                    tamanho_bytes=total_bytes(downloaded_files),
                 )
                 browser_files = await self._download_via_browser(
                     numero_processo,
@@ -678,10 +635,7 @@ class PJeSessionWorker:
                             status="partial",
                             total_docs=max(expected_total_docs, len(downloaded_files)),
                             docs_baixados=len(downloaded_files),
-                            tamanho_bytes=sum(
-                                int(item.get("tamanhoBytes", 0) or 0)
-                                for item in downloaded_files
-                            ),
+                            tamanho_bytes=total_bytes(downloaded_files),
                         )
                         return self._result(
                             job_id,
@@ -697,10 +651,7 @@ class PJeSessionWorker:
                         "Browser fallback indisponível ou sem arquivos",
                         total_docs=max(expected_total_docs, len(downloaded_files)),
                         docs_baixados=len(downloaded_files),
-                        tamanho_bytes=sum(
-                            int(item.get("tamanhoBytes", 0) or 0)
-                            for item in downloaded_files
-                        ),
+                        tamanho_bytes=total_bytes(downloaded_files),
                     )
                     return self._result(
                         job_id,
@@ -717,10 +668,7 @@ class PJeSessionWorker:
                     f"Documentos baixados: {len(downloaded_files)}",
                     total_docs=max(expected_total_docs, len(downloaded_files)),
                     docs_baixados=len(downloaded_files),
-                    tamanho_bytes=sum(
-                        int(item.get("tamanhoBytes", 0) or 0)
-                        for item in downloaded_files
-                    ),
+                    tamanho_bytes=total_bytes(downloaded_files),
                 )
                 log.info("pje.download.browser_success", count=len(downloaded_files))
 
@@ -738,9 +686,7 @@ class PJeSessionWorker:
                 warning or f"Concluído: {len(downloaded_files)} docs",
                 total_docs=max(expected_total_docs, len(downloaded_files)),
                 docs_baixados=len(downloaded_files),
-                tamanho_bytes=sum(
-                    int(item.get("tamanhoBytes", 0) or 0) for item in downloaded_files
-                ),
+                tamanho_bytes=total_bytes(downloaded_files),
             )
             return self._result(
                 job_id,
@@ -770,10 +716,7 @@ class PJeSessionWorker:
                     "Sessão expirada",
                     total_docs=max(expected_total_docs, len(downloaded_files)),
                     docs_baixados=len(downloaded_files),
-                    tamanho_bytes=sum(
-                        int(item.get("tamanhoBytes", 0) or 0)
-                        for item in downloaded_files
-                    ),
+                    tamanho_bytes=total_bytes(downloaded_files),
                 )
                 return self._result(job_id, numero_processo, "session_expired")
 
@@ -784,9 +727,7 @@ class PJeSessionWorker:
                 str(e),
                 total_docs=max(expected_total_docs, len(downloaded_files)),
                 docs_baixados=len(downloaded_files),
-                tamanho_bytes=sum(
-                    int(item.get("tamanhoBytes", 0) or 0) for item in downloaded_files
-                ),
+                tamanho_bytes=total_bytes(downloaded_files),
             )
             return self._result(job_id, numero_processo, "failed", error=str(e))
 
@@ -1060,9 +1001,7 @@ class PJeSessionWorker:
                         file_info=full_files[0],
                         completed=len(full_files),
                         total=len(full_files),
-                        local_bytes=sum(
-                            int(item.get("tamanhoBytes", 0) or 0) for item in full_files
-                        ),
+                        local_bytes=total_bytes(full_files),
                     )
                 return full_files
 
@@ -1170,7 +1109,7 @@ class PJeSessionWorker:
             # Downloads de processo inteiro podem demorar bastante
             try:
                 async with self.page.expect_download(
-                    timeout=300_000  # 5 min para processos grandes
+                    timeout=PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS
                 ) as download_info:
                     await download_btn.click()
 
@@ -1224,7 +1163,7 @@ class PJeSessionWorker:
                         )
                         if await confirm.count() > 0:
                             async with self.page.expect_download(
-                                timeout=300_000
+                                timeout=PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS
                             ) as dl2:
                                 await confirm.first.click()
                             download2 = await dl2.value
@@ -1340,7 +1279,9 @@ class PJeSessionWorker:
                 try:
                     dl_page = await self.context.new_page()
                     try:
-                        async with dl_page.expect_download(timeout=30_000) as dl_info:
+                        async with dl_page.expect_download(
+                            timeout=PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS
+                        ) as dl_info:
                             await dl_page.goto(url)
                         download = await dl_info.value
                         filename = download.suggested_filename or f"doc_{idx:03d}.pdf"
@@ -1401,7 +1342,9 @@ class PJeSessionWorker:
                         "pje.browser.individual.captcha_mid_download", downloaded=i
                     )
                     break
-                async with self.page.expect_download(timeout=30_000) as download_info:
+                async with self.page.expect_download(
+                    timeout=PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS
+                ) as download_info:
                     await link.click()
                 download = await download_info.value
                 filename = download.suggested_filename or f"doc_{i:03d}.pdf"
@@ -1571,8 +1514,8 @@ class PJeSessionWorker:
         consecutive_errors = 0
         # Circuit breaker: acima desse threshold marcamos o worker como
         # unreachable para que /health retorne 503 e o orquestrador possa
-        # decidir restartar o container.
-        REDIS_CIRCUIT_THRESHOLD = 20
+        # decidir restartar o container. Threshold imported from config.py
+        # (Sprint 2 Q4 — env-configurable via REDIS_CIRCUIT_THRESHOLD).
 
         while not (shutdown_event and shutdown_event.is_set()):
             # Verificar expiração de sessão (MNI não depende de sessão)
@@ -1584,7 +1527,9 @@ class PJeSessionWorker:
 
             # BLPOP: aguarda até 5s por um job
             try:
-                result = await self.redis.blpop("kratos:pje:jobs", timeout=5)
+                result = await self.redis.blpop(
+                    "kratos:pje:jobs", timeout=REDIS_BLPOP_TIMEOUT_SECS
+                )
                 consecutive_errors = 0  # reset on success
             except (redis.ConnectionError, redis.TimeoutError) as exc:
                 consecutive_errors += 1
@@ -1700,7 +1645,10 @@ class PJeSessionWorker:
 
         now = time.monotonic()
         if self.mni_client is not None:
-            if self._health_cache and (now - self._health_cache_time) < 30.0:
+            if (
+                self._health_cache
+                and (now - self._health_cache_time) < MNI_HEALTH_CACHE_TTL_SECS
+            ):
                 checks["mni"] = self._health_cache.get("status", "unknown")
             else:
                 try:

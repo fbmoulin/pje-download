@@ -37,6 +37,7 @@ from aiohttp import web
 import redis.asyncio as redis
 import structlog
 import metrics
+from file_utils import total_bytes
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.dashboard-api")
 
@@ -59,6 +60,8 @@ from config import (
     DOWNLOAD_BASE_DIR as DEFAULT_OUTPUT,
     REDIS_URL,
     HEALTH_PORT as WORKER_HEALTH_PORT,
+    RESULT_POLL_BLPOP_TIMEOUT_SECS,
+    RESULT_WAIT_TIMEOUT_SECS,
     WORKER_HEALTH_HOST,
     TRUST_X_FORWARDED_FOR,
     atomic_write_text,
@@ -94,10 +97,41 @@ class BatchJob:
 
 MAX_BATCH_SIZE = 500  # máximo de processos por batch
 MAX_BATCH_HISTORY = 100  # max completed batches kept in memory
-RESULT_WAIT_TIMEOUT_SECS = 360
+# RESULT_WAIT_TIMEOUT_SECS moved to config.py (Sprint 2 Q4 — env-configurable)
 _RPUSH_MAX_ATTEMPTS = 3  # audit P1: transient Redis failure should not kill a batch
 
 TERMINAL_PROCESS_STATUSES = {"done", "failed", "partial"}
+
+
+def _safe_load_json(path: Path) -> dict | None:
+    """Load + parse a JSON file, returning ``None`` on any failure.
+
+    Centralises the ``json.loads(path.read_text(...))`` + ``try/except Exception``
+    pattern that was repeated across ``_load_history``, ``_load_active_batch``,
+    and the progress-file reload path. Consumers no longer need to pre-check
+    ``path.exists()`` (FileNotFoundError returns None). Structured-log the
+    failure reason so ops can diagnose corrupted report files.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:  # noqa: BLE001 — parse errors, perm errors, etc.
+        log.warning(
+            "dashboard.json.load_failed",
+            file=str(path),
+            error=str(exc),
+        )
+        return None
+    if not isinstance(data, dict):
+        log.warning(
+            "dashboard.json.not_a_dict",
+            file=str(path),
+            type=type(data).__name__,
+        )
+        return None
+    return data
 
 
 async def _rpush_with_retry(client, key: str, *values: str):
@@ -176,8 +210,10 @@ class DashboardState:
         if not self.output_dir.exists():
             return
         for report_file in self.output_dir.glob("*/_report.json"):
+            data = _safe_load_json(report_file)
+            if data is None:
+                continue
             try:
-                data = json.loads(report_file.read_text(encoding="utf-8"))
                 batch_id = report_file.parent.name
                 job = BatchJob(
                     id=batch_id,
@@ -194,7 +230,7 @@ class DashboardState:
                 self.batches[batch_id] = job
             except Exception as exc:
                 log.warning(
-                    "dashboard.history.load_failed",
+                    "dashboard.history.build_failed",
                     file=str(report_file),
                     error=str(exc),
                 )
@@ -324,10 +360,10 @@ class DashboardState:
 
     def _load_active_batch(self) -> None:
         active_path = self._active_batch_path()
-        if not active_path.exists():
+        data = _safe_load_json(active_path)
+        if data is None:
             return
         try:
-            data = json.loads(active_path.read_text(encoding="utf-8"))
             batch_id = data["batch_id"]
             status = data.get("status", "running")
             if status in TERMINAL_PROCESS_STATUSES:
@@ -336,9 +372,8 @@ class DashboardState:
 
             output_dir = Path(data["output_dir"])
             progress_path = output_dir / "_progress.json"
-            if progress_path.exists():
-                progress = json.loads(progress_path.read_text(encoding="utf-8"))
-            else:
+            progress = _safe_load_json(progress_path)
+            if progress is None:
                 progress = self._build_initial_progress(
                     BatchJob(
                         id=batch_id,
@@ -441,7 +476,7 @@ class DashboardState:
         numero = result.get("numeroProcesso", "")
         files = result.get("arquivosDownloaded") or []
         docs_baixados = len(files)
-        tamanho_bytes = sum(int(item.get("tamanhoBytes", 0) or 0) for item in files)
+        tamanho_bytes = total_bytes(files)
         worker_status = result.get("status", "failed")
         error = result.get("errorMessage")
         if worker_status == "success":
@@ -607,7 +642,9 @@ class DashboardState:
             last_result_at = time.monotonic()
 
             while pending:
-                item = await redis_client.blpop(reply_queue, timeout=5)
+                item = await redis_client.blpop(
+                    reply_queue, timeout=RESULT_POLL_BLPOP_TIMEOUT_SECS
+                )
                 if not item:
                     if time.monotonic() - last_result_at > RESULT_WAIT_TIMEOUT_SECS:
                         timeout_error = (
