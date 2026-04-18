@@ -64,4 +64,14 @@ if [ -f ops/monitoring/stack/docker-compose.yml ]; then
     docker compose -f ops/monitoring/stack/docker-compose.yml config -q
 fi
 
+# ── 6. blackbox_exporter modules ──────────────────────────────────────
+# blackbox_exporter ships --config.check for standalone syntax validation.
+# Image default entrypoint is /bin/blackbox_exporter, so --entrypoint is
+# not needed here — the binary itself reads the flag.
+if [ -f ops/monitoring/stack/blackbox.yml ]; then
+    echo "  checking ops/monitoring/stack/blackbox.yml"
+    docker run --rm -v "$PWD/ops/monitoring/stack:/cfg" prom/blackbox-exporter:v0.25.0 \
+        --config.check --config.file=/cfg/blackbox.yml
+fi
+
 echo "✓ verify.sh: all present artifacts valid"
