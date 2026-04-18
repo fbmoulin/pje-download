@@ -1581,3 +1581,47 @@ class TestWorkerMetricsEndpoint:
                     assert 'reason="__pje_metrics_smoke__"' in body
         finally:
             await pje_worker.stop_health_server()
+
+
+# ─────────────────────────────────────────────
+# Sprint 5A regression — C1: circuit breaker health recovery
+# ─────────────────────────────────────────────
+
+
+class TestCircuitBreakerHealthRecovery:
+    @pytest.mark.asyncio
+    async def test_health_status_resets_to_consuming_after_redis_reconnects(self):
+        """BEFORE FIX: consecutive_errors reset to 0 on blpop success but
+        _health_status stayed "redis_unreachable" indefinitely.
+
+        Worker returned 503 on /health forever even after Redis reconnected,
+        triggering spurious orchestrator restarts.
+
+        The fix: when consecutive_errors resets, also reset _health_status
+        to "consuming" if it was "redis_unreachable".
+        """
+        import asyncio as _asyncio
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.mni_client = None
+        worker._health_status = "redis_unreachable"
+
+        shutdown = _asyncio.Event()
+
+        async def fake_blpop(queue, timeout):
+            shutdown.set()  # stop after this one successful blpop
+            return None  # timeout (no job ready), but the call itself succeeded
+
+        worker.redis = AsyncMock()
+        worker.redis.blpop = fake_blpop
+
+        worker.is_session_expired = MagicMock(return_value=False)
+
+        await worker.consume_queue(shutdown)
+
+        assert worker._health_status == "consuming", (
+            f"BEFORE FIX: status stayed 'redis_unreachable' after Redis reconnected; "
+            f"got '{worker._health_status}'. "
+            "After fix: successful blpop resets status to 'consuming'."
+        )

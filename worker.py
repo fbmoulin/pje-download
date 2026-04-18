@@ -1577,7 +1577,9 @@ class PJeSessionWorker:
                 result = await self.redis.blpop(
                     "kratos:pje:jobs", timeout=REDIS_BLPOP_TIMEOUT_SECS
                 )
-                consecutive_errors = 0  # reset on success
+                consecutive_errors = 0
+                if self._health_status == "redis_unreachable":
+                    self._health_status = "consuming"
             except (redis.ConnectionError, redis.TimeoutError) as exc:
                 consecutive_errors += 1
                 delay = min(2**consecutive_errors + random.uniform(0, 1), 60)

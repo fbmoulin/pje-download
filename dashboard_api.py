@@ -708,7 +708,15 @@ class DashboardState:
                 continue
 
             _, result_json = item
-            result = json.loads(result_json)
+            try:
+                result = json.loads(result_json)
+            except json.JSONDecodeError as exc:
+                log.warning(
+                    "dashboard.batch.malformed_result",
+                    batch_id=job.id,
+                    error=str(exc),
+                )
+                continue
             if result.get("eventType") == "progress":
                 self._apply_progress_event(job, result)
                 state.last_result_at = time.monotonic()
@@ -729,11 +737,9 @@ class DashboardState:
             if worker_status in _FATAL_WORKER_STATUSES and state.pending:
                 fatal_error = result.get("errorMessage") or worker_status
                 for pending_numero in state.pending:
-                    await redis_client.lrem(
-                        "kratos:pje:jobs",
-                        0,
-                        state.serialized_payloads[pending_numero],
-                    )
+                    payload = state.serialized_payloads.get(pending_numero)
+                    if payload:
+                        await redis_client.lrem("kratos:pje:jobs", 0, payload)
                 self._fail_remaining_processes(job, state.pending, fatal_error)
                 job.error = fatal_error
                 state.fatal_error = fatal_error
