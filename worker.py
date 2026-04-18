@@ -635,7 +635,7 @@ class PJeSessionWorker:
         )
         log.info("pje.download.browser_success", count=len(ctx.downloaded_files))
         # falls through to shared success path in orchestrator
-        return None  # type: ignore[return-value]  # sentinel: caller checks for None
+        return None  # sentinel: caller checks for None
 
     async def download_process(self, job: dict) -> dict:
         """
