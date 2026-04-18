@@ -1535,3 +1535,49 @@ class TestTryFullDownloadButton:
             "5000001-00.2024.8.08.0001", tmp_path
         )
         assert result is None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# /metrics endpoint (Prometheus scrape) — added for Grafana dashboard (P0.4)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestWorkerMetricsEndpoint:
+    """The worker must expose its Prometheus registry at /metrics on the
+    same aiohttp health server that serves /health, so that Prometheus can
+    scrape worker-side counters (dead_letters, publish_failures, results,
+    progress_events) that are unreachable via the dashboard's /metrics.
+    """
+
+    @pytest.mark.asyncio
+    async def test_metrics_endpoint_returns_prometheus_text(self, monkeypatch):
+        """GET /metrics returns Prometheus text with worker-counter names."""
+        w = _load_worker_module()
+
+        # Rebind module-level constants: worker.py does `from config import
+        # HEALTH_PORT, HEALTH_BIND_HOST` at load time, so env-var monkeypatching
+        # has no effect after import. We rebind directly on the worker module.
+        monkeypatch.setattr(w, "HEALTH_PORT", 18006)  # off-band from prod :8006
+        monkeypatch.setattr(w, "HEALTH_BIND_HOST", "127.0.0.1")
+
+        import metrics as m
+
+        # Pre-populate a known counter so the scrape output is non-trivial.
+        # NOTE: metrics.REGISTRY is process-wide; this leaves a stale sample
+        # in the counter for the rest of the test session.
+        m.worker_dead_letters_total.labels(reason="__pje_metrics_smoke__").inc()
+
+        pje_worker = w.PJeSessionWorker()
+        await pje_worker.start_health_server()
+        try:
+            import aiohttp
+
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get("http://127.0.0.1:18006/metrics") as resp:
+                    assert resp.status == 200
+                    assert resp.headers["Content-Type"].startswith("text/plain")
+                    body = await resp.text()
+                    assert "pje_worker_dead_letters_total" in body
+                    assert 'reason="__pje_metrics_smoke__"' in body
+        finally:
+            await pje_worker.stop_health_server()

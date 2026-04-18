@@ -1608,7 +1608,7 @@ class PJeSessionWorker:
     # ──────────────────────
 
     async def start_health_server(self) -> None:
-        """Inicia servidor HTTP minimalista para health checks."""
+        """Inicia servidor HTTP minimalista para health checks + /metrics."""
         from aiohttp import web
 
         if self._health_runner is not None:
@@ -1616,6 +1616,7 @@ class PJeSessionWorker:
 
         app = web.Application()
         app.router.add_get("/health", self._health_handler)
+        app.router.add_get("/metrics", self._metrics_handler)
 
         runner = web.AppRunner(app)
         await runner.setup()
@@ -1623,6 +1624,23 @@ class PJeSessionWorker:
         await site.start()
         self._health_runner = runner
         log.info("pje.health.started", host=HEALTH_BIND_HOST, port=HEALTH_PORT)
+
+    async def _metrics_handler(self, request):
+        """GET /metrics — Prometheus scrape of worker-process registry.
+
+        Worker-process counters (dead_letters, publish_failures, results,
+        progress_events) live in their own CollectorRegistry; the dashboard's
+        /metrics cannot see them. This endpoint exposes them to Prometheus.
+        """
+        from aiohttp import web
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+        import metrics as m
+
+        return web.Response(
+            body=generate_latest(m.REGISTRY),
+            headers={"Content-Type": CONTENT_TYPE_LATEST},
+        )
 
     async def stop_health_server(self) -> None:
         """Encerra o servidor de health checks e libera a porta."""
