@@ -32,6 +32,7 @@ import structlog
 from playwright.async_api import BrowserContext, Page, async_playwright
 
 import metrics
+from async_retry import AsyncRetry
 from file_utils import merge_file_lists, total_bytes
 from mni_client import MNIClient, MNIResult
 
@@ -153,22 +154,22 @@ class PJeSessionWorker:
             self._session_lock_fh = None
 
     async def init(self, max_redis_retries: int = 5) -> None:
-        for attempt in range(max_redis_retries):
-            try:
-                self.redis = redis.from_url(REDIS_URL, decode_responses=True)
-                await self.redis.ping()
-                break
-            except (redis.ConnectionError, redis.TimeoutError, OSError) as exc:
-                if attempt == max_redis_retries - 1:
-                    raise
-                delay = min(2**attempt + random.uniform(0, 1), 30)
-                log.warning(
-                    "pje.redis.init_retry",
-                    attempt=attempt + 1,
-                    delay=round(delay, 1),
-                    error=str(exc),
-                )
-                await asyncio.sleep(delay)
+        # Sprint 3 R3: delegates Redis-init retry to AsyncRetry. Historical
+        # semantics preserved: 5 attempts, 30s backoff cap, re-raise on
+        # exhaustion so the orchestrator (or systemd) sees a hard failure
+        # rather than a silently-stuck worker.
+        async def _ping() -> None:
+            self.redis = redis.from_url(REDIS_URL, decode_responses=True)
+            await self.redis.ping()
+
+        retry = AsyncRetry(
+            attempts=max_redis_retries,
+            backoff_cap_secs=30,
+            retry_on=(redis.ConnectionError, redis.TimeoutError, OSError),
+            log_event="pje.redis.init_retry",
+            logger=log,
+        )
+        await retry.run(_ping)
 
         # Inicializar cliente MNI se habilitado e credenciais configuradas
         if MNI_ENABLED:
