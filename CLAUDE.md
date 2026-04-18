@@ -30,7 +30,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest (257 tests) — run with `pytest tests/ -q` before any commit
+- Test suite: pytest (377 tests) — run with `pytest tests/ -q` before any commit
+- Audit sink: asyncpg → Railway Postgres (optional, opt-in via `AUDIT_SYNC_ENABLED`)
 
 ## Env Loading (critical gotcha)
 - `config.py` constants are module-level — they may be empty strings if `.env` not yet loaded
@@ -84,9 +85,26 @@ Sprint 6 — Graceful Shutdown + Redis Retry (2026-04-04):
 - Scope: Signal handlers (SIGTERM/SIGINT), Redis init retry (5x backoff), blpop exponential backoff, lpush retry with local fallback, dashboard progress save on shutdown
 - Status: DONE — 248→257 tests
 
-Sprint 7 — Audit Sync to Railway Postgres (2026-04-17):
-- Scope: `audit_sync.py` background syncer (tails JSON-L, inserts to Postgres, idempotent dedupe), `migrations/001_audit_entries.sql`, dashboard lifecycle hooks, 40+ new tests
+Sprint 7 — Audit Sync to Railway Postgres (2026-04-17, merge 6612135 #3):
+- Scope: `audit_sync.py` background syncer (tails JSON-L, inserts to Postgres, idempotent dedupe via composite UNIQUE NULLS NOT DISTINCT), `migrations/001_audit_entries.sql`, dashboard lifecycle hooks, Dockerfile fix (faltava redis + asyncpg). Validado end-to-end contra Railway 18.3 real.
 - Status: DONE — 303→348 tests
+
+Sprint 8 — P0 Audit: auth on GET + torn-read logging (2026-04-17, merge dd27556 #6):
+- Scope: `api_key_middleware` agora exige X-API-Key em todo `/api/*` (só POST antes; vazava CNJs). `dashboard.progress.read_failed` log estruturado nos `except` antes silenciosos. Removido `_test_dashboard_import.py` morto.
+- Status: DONE — 348→353 tests
+
+Sprint 9 — P1 Audit: pool lifetime + rpush retry + log hygiene (2026-04-17, merge de4d57f #7):
+- Scope: `asyncpg.create_pool(max_inactive_connection_lifetime=30.0, max_size=1)` contra restart do Railway. `_rpush_with_retry` com 3 tentativas + backoff exponencial. `_try_official_api` com `except` isolado para `json()` que NUNCA loga `str(exc)` (vazava Set-Cookie).
+- Status: DONE — 353→359 tests
+
+Sprint 10 — P0.2 Audit: browser fallback characterization (2026-04-17, merge 3f9dde7 #8):
+- Scope: 12 testes cobrindo `_download_via_browser`, `_try_full_download_button` e `extract_gdrive_link_from_pje` (eram 0% covered). Helpers `_fake_locator` e `_page_stub_with` para stubar Playwright Page boundary. Zero código de produção alterado.
+- Status: DONE — 359→371 tests
+
+Sprint 11 — P2 Audit: circuit breaker + PJe retry + cursor cleanup (2026-04-17, merge 574c1fb #9):
+- Scope: blpop circuit breaker (`REDIS_CIRCUIT_THRESHOLD=20` → `_health_status="redis_unreachable"` → `/health` 503). `_try_official_api` com `timeout=10_000ms` + 3 tentativas em 5xx/exception (backoff cap 5s). `rotate_logs` limpa sidecars `.cursor` junto com `.jsonl`.
+- Status: DONE — 371→377 tests
+- Falsos-positivos descartados: indexes em audit_entries (migration 001 já cria), pipelining hset (zero chamadas no código).
 
 ## Security
 
@@ -122,12 +140,25 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 **Correctness invariant:** a JSON-L line is complete only when it ends with `\n`. `_parse_complete_lines` stops at any partial tail so the cursor never advances past in-flight writes. Never violate this rule — tests in `tests/test_audit_sync.py::TestParseCompleteLines`.
 
-**Idempotency:** inserts use `ON CONFLICT (dedupe_key) DO NOTHING` with a generated dedupe column (`ts|event_type|processo_numero|documento_id`). Replaying a tick is a no-op.
+**Idempotency:** inserts use `ON CONFLICT (ts, event_type, processo_numero, documento_id) DO NOTHING` against a composite `UNIQUE NULLS NOT DISTINCT` constraint (PG 15+). Replaying a tick is a no-op. (The earlier design of a generated dedupe column had a PG immutability issue — see `docs/superpowers/specs/` for the story.)
+
+**Railway project:** `pje-audit` (id `3c561ec2-27d4-4278-aa49-9f7187a49e2b`, host `nozomi.proxy.rlwy.net:27048/railway`). Migration 001+002 already applied. Admin URL + `audit_writer` URL in local `.env` (not committed).
 
 ## Known Issues (remaining)
 
 - MNI blocked by cloud IP — Playwright fallback via `pje_session.py`
 - Test coverage ~85% — remaining ~15% are deep Playwright integration paths (low ROI)
+
+## Backlog (não-código)
+
+Tudo acionável-via-código da auditoria técnica de 2026-04-17 está em master. Falta:
+
+1. **Deploy prod** — SSH na VPS, setar `AUDIT_SYNC_ENABLED=true` + `DATABASE_URL=<audit_writer URL>`, restart do container `pje-dashboard`. Validado localmente via docker-compose + Playwright.
+2. **Grafana dashboard** (fecha P0.4) — provisionar Grafana (reusar VPS openclaw se possível), consumir `/metrics` do `:8007`. Alertas:
+   - `pje_audit_sync_lag_seconds_event_time > 60` → atraso de sync
+   - `pje_audit_sync_batches_total{status="failed"}` → Railway caiu
+   - `pje_worker_dead_letters_total > 0` → jobs malformados
+   - Liveness probe via `/health` detecta circuit breaker (`_health_status=redis_unreachable`)
 
 ## Paths
 - WSL: `/mnt/c/projetos-2026/pje-download`
