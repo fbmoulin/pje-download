@@ -1621,7 +1621,7 @@ class TestCircuitBreakerHealthRecovery:
         await worker.consume_queue(shutdown)
 
         assert worker._health_status == "consuming", (
-            f"BEFORE FIX: status stayed 'redis_unreachable' after Redis reconnected; "
+            "BEFORE FIX: status stayed 'redis_unreachable' after Redis reconnected; "
             f"got '{worker._health_status}'. "
             "After fix: successful blpop resets status to 'consuming'."
         )
