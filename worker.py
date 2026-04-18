@@ -549,8 +549,8 @@ class PJeSessionWorker:
             return True
         return False
 
-    async def _phase_browser_fallback(self, ctx: DownloadContext) -> dict:
-        """Phase 3: Browser automation fallback. Always returns a final result dict."""
+    async def _phase_browser_fallback(self, ctx: DownloadContext) -> dict | None:
+        """Phase 3: Browser automation fallback. Returns final result dict on early exit, None to continue."""
         if await self._detect_captcha():
             self._health_status = "captcha_required"
             await self._publish_progress(
