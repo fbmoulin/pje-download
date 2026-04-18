@@ -1435,7 +1435,9 @@ class PJeSessionWorker:
         queue_name: str = "kratos:pje:results",
     ) -> None:
         """Publish job result to Redis with retry. Falls back to local log on failure."""
-        result_json = json.dumps(result_data)
+        from protocol import result_to_json
+
+        result_json = result_to_json(result_data)
         for attempt in range(max_retries):
             try:
                 await self.redis.rpush(queue_name, result_json)

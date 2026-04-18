@@ -96,9 +96,11 @@ def job_from_json(raw: str | bytes) -> JobMessage:
 
     Raises:
         json.JSONDecodeError: if ``raw`` is not valid JSON.
-        ValueError: if ``jobId`` or ``numeroProcesso`` is missing.
+        ValueError: if the payload is not a JSON object or required fields are missing.
     """
     data: dict = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected JSON object, got {type(data).__name__}")
     missing = [key for key in ("jobId", "numeroProcesso") if key not in data]
     if missing:
         raise ValueError(f"JobMessage missing required fields: {missing}")
