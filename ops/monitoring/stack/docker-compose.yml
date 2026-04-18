@@ -1,0 +1,100 @@
+# ops/monitoring/stack/docker-compose.yml
+# Monitoring stack for openclaw VPS. Deploy: `docker compose up -d` (from this directory).
+#
+# Spec: docs/superpowers/specs/2026-04-18-grafana-dashboard-design.md §3
+# Deploy runbook: DEPLOY.md
+#
+# Requires pre-deploy envsubst to resolve ${PJE_TAILNET_IP}, ${BOT_TOKEN}, ${CHAT_ID}
+# in prometheus.yml and alertmanager.yml. See DEPLOY.md step 5.
+
+name: openclaw-monitoring
+
+services:
+  # ────────────────────────────────
+  # PROMETHEUS (TSDB + scraper + alert evaluator)
+  # ────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: openclaw-prometheus
+    restart: unless-stopped
+    mem_limit: 512m
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--storage.tsdb.retention.size=10GB"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../pje:/etc/prometheus/rules/pje:ro   # per-app rules bind-mount
+      - prometheus_data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux local-dev scrape (§9 step 3)
+    networks:
+      - ops-net
+
+  # ────────────────────────────────
+  # ALERTMANAGER
+  # ────────────────────────────────
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: openclaw-alertmanager
+    restart: unless-stopped
+    mem_limit: 128m
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    networks:
+      - ops-net
+
+  # ────────────────────────────────
+  # BLACKBOX EXPORTER (HTTP probes for /healthz + /health)
+  # ────────────────────────────────
+  blackbox:
+    image: prom/blackbox-exporter:v0.25.0
+    container_name: openclaw-blackbox
+    restart: unless-stopped
+    mem_limit: 64m
+    command:
+      - "--config.file=/config/blackbox.yml"
+    volumes:
+      - ./blackbox.yml:/config/blackbox.yml:ro
+    networks:
+      - ops-net
+
+  # ────────────────────────────────
+  # GRAFANA (dashboards + datasource)
+  # ────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: openclaw-grafana
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SERVER_ROOT_URL: "http://localhost:3000/"
+    ports:
+      - "127.0.0.1:3000:3000"    # LOOPBACK ONLY — access via SSH tunnel
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../pje:/var/lib/grafana/dashboards/pje:ro  # dashboard JSON bind-mount
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - ops-net
+
+networks:
+  ops-net:
+    name: ops-net
+
+volumes:
+  prometheus_data:
+  alertmanager_data:
+  grafana_data:
