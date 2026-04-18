@@ -33,25 +33,14 @@ from pathlib import Path
 import structlog
 
 import metrics
+from file_utils import merge_file_lists, total_bytes
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.batch-downloader")
 
 
-def _merge_downloaded_files(*groups: list[dict]) -> list[dict]:
-    """Merge file metadata lists, preferring checksum-based deduplication."""
-    merged: list[dict] = []
-    seen: set[str] = set()
-    for group in groups:
-        for item in group:
-            key = (
-                item.get("checksum")
-                or f"{item.get('nome')}|{item.get('tamanhoBytes')}|{item.get('fonte')}"
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(item)
-    return merged
+# _merge_downloaded_files moved to file_utils.merge_file_lists (Sprint 2 Q2).
+# Alias kept so local call sites and any external imports keep working.
+_merge_downloaded_files = merge_file_lists
 
 
 # NOTA: mni_client é importado DEPOIS de _load_env() para que as env vars
@@ -456,9 +445,7 @@ async def download_batch(
                 if not mni_available and pje_client is None:
                     if all_files:
                         ps.docs_baixados = len(all_files)
-                        ps.tamanho_bytes = sum(
-                            int(f.get("tamanhoBytes", 0) or 0) for f in all_files
-                        )
+                        ps.tamanho_bytes = total_bytes(all_files)
                         ps.status = "done"
                         ps.phase = "done"
                         ps.phase_detail = f"GDrive: {len(all_files)} docs"
@@ -508,9 +495,7 @@ async def download_batch(
                         all_files = _merge_downloaded_files(all_files, pje_files)
                         if all_files:
                             ps.docs_baixados = len(all_files)
-                            ps.tamanho_bytes = sum(
-                                int(f.get("tamanhoBytes", 0) or 0) for f in all_files
-                            )
+                            ps.tamanho_bytes = total_bytes(all_files)
                             ps.status = "done"
                             ps.phase = "done"
                             ps.phase_detail = f"Playwright: {len(all_files)} docs"
@@ -557,9 +542,7 @@ async def download_batch(
                             gdrive_docs=len(all_files),
                         )
                         ps.docs_baixados = len(all_files)
-                        ps.tamanho_bytes = sum(
-                            int(f.get("tamanhoBytes", 0) or 0) for f in all_files
-                        )
+                        ps.tamanho_bytes = total_bytes(all_files)
                         ps.status = "done"
                         ps.phase = "done"
                         ps.phase_detail = (
@@ -661,9 +644,7 @@ async def download_batch(
                         )
 
                 ps.docs_baixados = len(all_files)
-                ps.tamanho_bytes = sum(
-                    int(f.get("tamanhoBytes", 0) or 0) for f in all_files
-                )
+                ps.tamanho_bytes = total_bytes(all_files)
                 ps.status = "done"
                 ps.phase = "done"
                 ps.phase_detail = (
@@ -714,7 +695,12 @@ async def download_batch(
     elapsed = time.monotonic() - start_time
 
     # Relatório final
-    total_bytes = sum(ps.tamanho_bytes for ps in progress.processos.values())
+    # NOTE: deliberately not named `total_bytes` to avoid shadowing the imported
+    # helper of the same name (which is called earlier in this function at
+    # lines ~448, 498, 545, 647). Python's function-scope rule makes any name
+    # assigned anywhere in the function local throughout — which would raise
+    # UnboundLocalError on the helper calls above. Shipped as Sprint 2 / Q1.
+    batch_total_bytes = sum(ps.tamanho_bytes for ps in progress.processos.values())
     total_docs = sum(ps.docs_baixados for ps in progress.processos.values())
     if elapsed > 0 and total_docs > 0:
         metrics.batch_throughput_docs_per_min.set(total_docs / (elapsed / 60.0))
@@ -724,7 +710,7 @@ async def download_batch(
         done=progress.done,
         failed=progress.failed,
         total_docs=total_docs,
-        total_mb=round(total_bytes / 1024 / 1024, 2),
+        total_mb=round(batch_total_bytes / 1024 / 1024, 2),
         elapsed_s=round(elapsed, 1),
     )
     audit.log_access(
@@ -746,7 +732,7 @@ async def download_batch(
         "done": progress.done,
         "failed": progress.failed,
         "total_documentos": total_docs,
-        "total_bytes": total_bytes,
+        "total_bytes": batch_total_bytes,
         "incluir_anexos": incluir_anexos,
         "processos": {
             num: {

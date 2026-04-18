@@ -127,3 +127,41 @@ AUDIT_SYNC_AUTO_MIGRATE = (
     os.getenv("AUDIT_SYNC_AUTO_MIGRATE", "false").lower() == "true"
 )
 AUDIT_SYNC_DRAIN_TIMEOUT_SECS = float(os.getenv("AUDIT_SYNC_DRAIN_TIMEOUT_SECS", "5.0"))
+
+# ─────────────────────────────────────────────
+# Runtime timeouts & thresholds (Sprint 2 Q4 — extracted from inline literals)
+# ─────────────────────────────────────────────
+# Previously hardcoded inside worker.py / dashboard_api.py. Exposing as env-
+# configurable constants lets ops retune without a code deploy during tribunal
+# slowness windows or Redis degradation events. Names chosen to make their
+# meaning self-evident on a Grafana alert page.
+
+# Playwright per-download timeouts (ms). The "full download" button triggers
+# a bulk ZIP download which can take minutes on large processes; individual
+# doc downloads should be snappy. Both are hard caps: a miss here bubbles up
+# as a failed document, not a hung worker.
+PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS = int(
+    os.getenv("PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS", "300000")
+)  # 5 minutes
+PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS = int(
+    os.getenv("PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS", "30000")
+)  # 30 seconds
+
+# Redis queue-consumer tuning. BLPOP timeout is the max per-iteration wait;
+# CIRCUIT_THRESHOLD is the # of consecutive BLPOP errors before the worker
+# marks itself unreachable (triggers PjeWorkerCircuitBreakerOpen alert via
+# the /health 503 path).
+REDIS_BLPOP_TIMEOUT_SECS = int(os.getenv("REDIS_BLPOP_TIMEOUT_SECS", "5"))
+REDIS_CIRCUIT_THRESHOLD = int(os.getenv("REDIS_CIRCUIT_THRESHOLD", "20"))
+
+# MNI health is polled lazily inside /health responses. Cache TTL prevents a
+# slow MNI SOAP probe from blocking the orchestrator — short cache means a
+# tribunal outage becomes visible in ~30 s; long cache hides intermittents.
+MNI_HEALTH_CACHE_TTL_SECS = int(os.getenv("MNI_HEALTH_CACHE_TTL_SECS", "30"))
+
+# Dashboard result-polling. RESULT_WAIT_TIMEOUT_SECS is the max time a single
+# process can occupy the queue before the orchestrator times it out and marks
+# it failed (prevents a hung worker from blocking the whole batch).
+# RESULT_POLL_BLPOP_TIMEOUT_SECS is per-iteration BLPOP inside the poll loop.
+RESULT_WAIT_TIMEOUT_SECS = int(os.getenv("RESULT_WAIT_TIMEOUT_SECS", "360"))
+RESULT_POLL_BLPOP_TIMEOUT_SECS = int(os.getenv("RESULT_POLL_BLPOP_TIMEOUT_SECS", "5"))
