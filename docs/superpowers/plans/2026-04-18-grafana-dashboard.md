@@ -1568,11 +1568,9 @@ Run: `pytest tests/ -q`
 
 Expected: 378 passed.
 
-- [ ] **Step 4: Lint**
+- [ ] **Step 4: Lint (no-op check)**
 
-Run: `ruff check worker.py tests/test_worker.py && ruff format worker.py tests/test_worker.py`
-
-Expected: no changes (the files were already clean from Task 1).
+Task 13 only touches `CLAUDE.md` (markdown — no Python linting applies). Skip unless a previous task left something un-lint-clean. To double-check, run `ruff check worker.py tests/test_worker.py` — it should exit 0 silently.
 
 - [ ] **Step 5: Commit**
 
@@ -1593,7 +1591,7 @@ invariant, e aponta para README + DEPLOY + verify.sh."
 
 After Task 13 commits:
 
-- [ ] `git log --oneline -15` shows ~13 new commits (1 per task + 1 smoke-test empty commit).
+- [ ] `git log --oneline -16` shows 14 new commits: Tasks 1, 2, 3, 4, 5, 6, 7, 8a, 8b, 9, 10 (empty smoke-test gate), 11, 12, 13 — plus the pre-existing spec/plan commits.
 - [ ] `pytest tests/ -q` → 378 passed.
 - [ ] `./ops/monitoring/verify.sh` → full pass.
 - [ ] `git status` → clean.
