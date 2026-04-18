@@ -270,7 +270,7 @@ groups:
 | pje-dashboard container down | `up{job="pje-dashboard"}==0` for 2m | `PjeDashboardDown` critical |
 | pje-worker container down | `up{job="pje-worker"}==0` | visible on dashboard scrape-health row but **not alerted in v1** — the worker profile may be intentionally stopped during audits; adding an alert would fire on every planned maintenance. Deferred to v2 with a `worker_expected_up` toggle. |
 | Tailscale offline on pje VPS | Prometheus can't reach `:8007`/`:8006` → all four jobs flip to `up==0` | `PjeDashboardDown` fires; the operator recognizes the pattern (all pje jobs down simultaneously) as tailnet outage vs container crash |
-| Tailscale offline on openclaw | all jobs `up==0` across all future apps; Prometheus itself isolated | alerts cannot fire from Prometheus itself — see §11 **Out of scope** (DeadMansSwitch). During current 48h FIRAC observation window (kratos-case-pipeline), such an outage would be blind to this stack; mitigated operationally because KCP has its own kcp-monitor with independent Telegram. |
+| Tailscale offline on openclaw | all jobs `up==0` across all future apps; Prometheus itself isolated | alerts cannot fire from Prometheus itself — see §11 **Out of scope** (DeadMansSwitch). Operational redundancy: KCP has its own kcp-monitor with independent Telegram, so a monitoring-stack outage does not leave the broader personal-infra fleet fully blind. |
 | Telegram API rate-limit / down | Alertmanager retries (default 1 min); failures visible in `:9093/#/status` | alerts queue until Telegram recovers |
 | Railway audit DB down (cascading) | both `PjeAuditSyncBatchesFailing` and `PjeAuditSyncLagHigh` fire | Alertmanager groups by `app=pje-download` → single Telegram message with both alerts |
 | Grafana down | alerting is unaffected (Alertmanager is independent) | dashboard inaccessible, alerts still reach Telegram |
@@ -344,7 +344,7 @@ The plan that follows this spec must produce, at minimum:
 - `ops/monitoring/stack/grafana/provisioning/` — datasource + dashboard providers (bind-mount of `ops/monitoring/pje/`).
 - `ops/monitoring/stack/DEPLOY.md` — the 10-step deploy runbook, complete with exact commands.
 - `ops/monitoring/verify.sh` — pre-commit validation script; exits nonzero on any syntax failure.
-- `worker.py` — **one surgical change** (per §2a): add `/metrics` route next to the existing `/health` route on the aiohttp health server. No business-logic changes.
+- `worker.py` — **one surgical change** (per §2a): add `/metrics` route next to the existing `/health` route on the aiohttp health server. No business-logic changes. The `docker-compose.yml:112` override `HEALTH_BIND_HOST: 0.0.0.0` must be preserved (the override is what makes `:8006` reachable from the Docker bridge network and therefore from the tailnet peer; reverting to the CLAUDE.md-documented default of `127.0.0.1` would break all `:8006/*` scrapes).
 - `tests/test_worker_health.py` (or equivalent) — 1 new test asserting `worker.py`'s `/metrics` endpoint returns 200 + valid Prometheus text; test count goes from 377 to 378.
 - `CLAUDE.md` → backlog item #2 marked complete; new "Observability" section added describing the stack and how to add another app.
 
