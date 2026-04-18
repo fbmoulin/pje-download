@@ -661,3 +661,123 @@ async def test_batch_audit_completed(tmp_path, monkeypatch):
     assert entry.status == "success"
     assert entry.duracao_s is not None
     assert "2000001-01.2024.8.08.0001" in entry.processo_numero
+
+
+# ─────────────────────────────────────────────
+# Sprint 1 Bug Fixes — 2026-04-18 audit
+# ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_B1_playwright_success_persists_progress_before_return(
+    tmp_path, monkeypatch
+):
+    """B1: Playwright-only success path (MNI unavailable, pje_client present) must
+    call progress.save(force=True) before its early return, so a crash immediately
+    after the worker finishes does not leave _progress.json with status='downloading'
+    (which BatchProgress.load auto-resets to 'pending' — triggering a re-download).
+
+    Bug site: batch_downloader.py line ~517 (Playwright-fallback branch).
+    """
+    # Force credentials empty (setenv to "" rather than delenv — module-level
+    # setdefault at file top makes delenv unreliable across the test suite).
+    monkeypatch.setenv("MNI_USERNAME", "")
+    monkeypatch.setenv("MNI_PASSWORD", "")
+    import pje_session
+
+    # pje_client is constructed iff SESSION_FILE.exists() — see batch_downloader.py:353.
+    session_file = tmp_path / "session.json"
+    session_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(pje_session, "SESSION_FILE", session_file)
+
+    from batch_downloader import BatchProgress, download_batch
+
+    pje_file = {
+        "nome": "doc.pdf",
+        "tipo": "pdf",
+        "tamanhoBytes": 42,
+        "localPath": str(tmp_path / "doc.pdf"),
+        "checksum": "c1",
+        "fonte": "pje_session",
+    }
+
+    mock_pje_client = AsyncMock()
+    mock_pje_client.download_processo.return_value = [pje_file]
+
+    # Use a "new" processo number (is_processo_antigo returns False) to skip
+    # the GDrive branch and go directly to the Playwright fallback at line 498.
+    with patch("pje_session.PJeSessionClient", return_value=mock_pje_client):
+        await download_batch(
+            numeros=["5555555-55.2026.8.08.0001"],
+            output_dir=tmp_path,
+            incluir_anexos=False,
+            delay_entre_processos=0.0,
+        )
+
+    # Read the on-disk _progress.json directly (bypassing in-memory state). If
+    # progress.save(force=True) was missed before the return at line 517, the
+    # on-disk JSON would still show status='downloading', which BatchProgress.load
+    # then resets to 'pending' on recovery — causing re-download.
+    on_disk = BatchProgress.load(tmp_path / "_progress.json")
+    ps = on_disk.get("5555555-55.2026.8.08.0001")
+    assert ps is not None
+    assert ps.status == "done", (
+        f"progress.save(force=True) missing before return; on-disk status is "
+        f"{ps.status!r}, which load() auto-resets to 'pending' → re-download"
+    )
+
+
+@pytest.mark.asyncio
+async def test_B3_missing_tamanhoBytes_does_not_fail_processo(tmp_path, monkeypatch):
+    """B3: File metadata without 'tamanhoBytes' must NOT crash via KeyError and
+    mark a successful download as failed. Happens when GDrive returns a file whose
+    size is unknown (some Drive scans) or when Playwright extracts a doc without
+    size headers.
+
+    Bug sites: batch_downloader.py lines 459, 509, 555, 657 (the sum() calls).
+    """
+    monkeypatch.delenv("MNI_USERNAME", raising=False)
+    monkeypatch.delenv("MNI_PASSWORD", raising=False)
+    import pje_session
+
+    monkeypatch.setattr(pje_session, "SESSION_FILE", tmp_path / "missing.json")
+
+    from batch_downloader import download_batch
+
+    # NOTE: tamanhoBytes intentionally omitted — would KeyError pre-fix.
+    gdrive_file_no_size = {
+        "nome": "scan-sem-tamanho.pdf",
+        "tipo": "pdf",
+        "localPath": str(tmp_path / "scan.pdf"),
+        "checksum": "abc",
+        "fonte": "google_drive",
+        # tamanhoBytes: missing — this is the regression scenario
+    }
+
+    with (
+        patch("gdrive_downloader.is_processo_antigo", return_value=True),
+        patch(
+            "gdrive_downloader.download_gdrive_folder",
+            new_callable=AsyncMock,
+            return_value=[gdrive_file_no_size],
+        ),
+        patch("mni_client.MNIClient"),
+    ):
+        progress = await download_batch(
+            numeros=["2000001-01.2024.8.08.0001"],
+            output_dir=tmp_path,
+            gdrive_url_map={
+                "2000001-01.2024.8.08.0001": "https://drive.google.com/drive/folders/ABC"
+            },
+            delay_entre_processos=0.0,
+        )
+
+    ps = progress.processos["2000001-01.2024.8.08.0001"]
+    assert ps.status == "done", (
+        f"Missing tamanhoBytes caused KeyError → except caught it and marked "
+        f"status={ps.status!r}. Sum should tolerate missing key with .get(..., 0)."
+    )
+    assert ps.tamanho_bytes == 0, (
+        f"When tamanhoBytes is missing, total should be 0, got {ps.tamanho_bytes}"
+    )
+    assert ps.docs_baixados == 1

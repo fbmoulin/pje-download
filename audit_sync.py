@@ -50,6 +50,22 @@ def _scrub_url(url: str) -> str:
     return _URL_PASSWORD_RE.sub(r"\1:***@", url)
 
 
+def _coerce_utc(dt: datetime | None) -> datetime | None:
+    """Force any ``datetime`` to be tz-aware UTC.
+
+    ``audit.py`` may have been written with naive ``datetime.utcnow()`` at
+    different times; mixing naive and aware datetimes raises ``TypeError``
+    on comparison. The sync loop caught that exception silently, which froze
+    the ``lag_seconds_event_time`` gauge on its last-good value — giving ops
+    false comfort that sync was current. Always coerce to tz-aware UTC.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
+
+
 def _cursor_path(jsonl_path: Path) -> Path:
     """Return the sidecar cursor path for a JSON-L audit file."""
     return jsonl_path.with_suffix(jsonl_path.suffix + ".cursor")
@@ -146,7 +162,7 @@ def _row_to_params(row: dict) -> tuple:
     ts_value: datetime | None = None
     if ts_raw:
         try:
-            ts_value = datetime.fromisoformat(ts_raw)
+            ts_value = _coerce_utc(datetime.fromisoformat(ts_raw))
         except (TypeError, ValueError):
             ts_value = None
     return (
@@ -202,6 +218,9 @@ class AuditSyncer:
         self._last_synced_event_ts: datetime | None = None
         self._last_tick_at: datetime | None = None
         self._rows_total = 0
+        # Set to True by _verify_pg_version when Postgres < 15 is detected.
+        # Once disabled, ticks early-return and run_forever exits on next wait.
+        self._disabled = False
         self.shutdown = asyncio.Event()
 
     def __repr__(self) -> str:
@@ -330,6 +349,56 @@ class AuditSyncer:
             max_inactive_connection_lifetime=30.0,
             ssl=ssl_arg,
         )
+        await self._verify_pg_version()
+
+    async def _verify_pg_version(self) -> None:
+        """Assert Postgres >= 15; else disable syncer + stop the loop.
+
+        The ``audit_entries`` dedupe constraint uses ``UNIQUE NULLS NOT
+        DISTINCT`` (PG 15+). On older servers the clause is silently
+        ignored and NULL values in the composite key never match each
+        other — so any event with ``documento_id IS NULL`` (batch_started,
+        batch_completed, etc.) produces duplicate rows on every replay.
+        Fail loudly at pool creation rather than silently corrupting the
+        audit table.
+        """
+        try:
+            async with self._pool.acquire() as conn:
+                version_num = await conn.fetchval(
+                    "SELECT current_setting('server_version_num')::int"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "audit_sync.pg_version_check_failed",
+                extra={"error": f"{type(exc).__name__}: {exc}"},
+            )
+            return  # don't disable on transient query failure; next tick will retry
+        if version_num is None or version_num < 150000:
+            logger.error(
+                "audit_sync.postgres_too_old",
+                extra={
+                    "server_version_num": version_num,
+                    "required": 150000,
+                    "reason": (
+                        "UNIQUE NULLS NOT DISTINCT requires PG 15+; "
+                        "older servers silently allow duplicate NULL-keyed rows"
+                    ),
+                },
+            )
+            self._disabled = True
+            self.shutdown.set()
+            # Close the pool so we don't hold the connection slot
+            pool = self._pool
+            self._pool = None
+            if pool is not None:
+                try:
+                    await pool.close()
+                except Exception:
+                    pass
+            raise RuntimeError(
+                f"audit_sync requires Postgres >= 15 "
+                f"(found server_version_num={version_num}); refusing to sync"
+            )
 
     async def _insert_batch(self, rows: list[dict]) -> None:
         """Insert ``rows`` via a single ``executemany`` with dedupe.
@@ -343,10 +412,12 @@ class AuditSyncer:
             try:
                 async with self._pool.acquire() as conn:
                     await conn.executemany(_INSERT_SQL, params)
-                if _metrics is not None:
-                    _metrics.audit_sync_rows_total.labels(status="success").inc(
-                        len(rows)
-                    )
+                # NOTE: rows_total{status="success"} increment happens in
+                # _sync_file AFTER _save_cursor succeeds, not here. Incrementing
+                # here would overcount on crash-recovery: a replay of rows that
+                # ON CONFLICT-skipped is indistinguishable from a fresh insert
+                # at the asyncpg level, and counter growth between ticks is the
+                # only signal ops has that sync is doing real work.
                 return
             except Exception as exc:  # noqa: BLE001 — retry any DB error
                 last_exc = exc
@@ -368,6 +439,8 @@ class AuditSyncer:
 
     async def _tick(self) -> None:
         """One sweep over files within the catchup window."""
+        if self._disabled:
+            return
         await self._ensure_pool()
         today = date.today()
         oldest_allowed = today - timedelta(days=self.catchup_days)
@@ -413,15 +486,28 @@ class AuditSyncer:
 
         _save_cursor(jsonl_path, offset + consumed)
         self._rows_total += len(parsed)
+        # Increment the Prometheus counter only after the cursor is persisted.
+        # If the process crashes mid-file (batches committed but cursor not
+        # saved), tick N+1 replays the rows; ON CONFLICT dedupes them at the
+        # DB but asyncpg can't distinguish fresh insert from skip, so counting
+        # inside _insert_batch would inflate the counter on every replay. By
+        # gating on cursor save, we count once per successfully-persisted file
+        # delta — the value ops expects to see grow.
+        if _metrics is not None:
+            _metrics.audit_sync_rows_total.labels(status="success").inc(len(parsed))
 
-        # Track newest event timestamp for lag metric
+        # Track newest event timestamp for lag metric. Always coerce to
+        # tz-aware UTC — mixing naive and aware datetimes would raise
+        # TypeError on comparison and silently freeze the lag gauge.
         for row in parsed:
             ts_raw = row.get("timestamp")
             if not ts_raw:
                 continue
             try:
-                ts = datetime.fromisoformat(ts_raw)
+                ts = _coerce_utc(datetime.fromisoformat(ts_raw))
             except (TypeError, ValueError):
+                continue
+            if ts is None:
                 continue
             if self._last_synced_event_ts is None or ts > self._last_synced_event_ts:
                 self._last_synced_event_ts = ts
