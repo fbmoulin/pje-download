@@ -165,3 +165,9 @@ MNI_HEALTH_CACHE_TTL_SECS = int(os.getenv("MNI_HEALTH_CACHE_TTL_SECS", "30"))
 # RESULT_POLL_BLPOP_TIMEOUT_SECS is per-iteration BLPOP inside the poll loop.
 RESULT_WAIT_TIMEOUT_SECS = int(os.getenv("RESULT_WAIT_TIMEOUT_SECS", "360"))
 RESULT_POLL_BLPOP_TIMEOUT_SECS = int(os.getenv("RESULT_POLL_BLPOP_TIMEOUT_SECS", "5"))
+
+# Per-batch absolute timeout ceiling — prevents a stuck poll loop from running forever (H2).
+BATCH_MAX_DURATION_SECS = int(os.getenv("BATCH_MAX_DURATION_SECS", "3600"))
+
+# Disk free-space floor in MB — worker returns 503 / marks disk "low" below this (M7).
+DISK_LOW_THRESHOLD_MB = int(os.getenv("DISK_LOW_THRESHOLD_MB", "2000"))

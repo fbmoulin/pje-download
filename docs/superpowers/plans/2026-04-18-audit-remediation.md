@@ -111,6 +111,33 @@ Shipped:
 - Orchestrator reduced from 438L to ~80L.
 - 9 tests in `tests/test_download_phases.py` — each phase testable without Playwright/MNI/GDrive stacks.
 
+## Sprint 5A — 3 Critical Reliability Bugs (DONE)
+
+**Status:** SHIPPED 2026-04-18. Branch `refactor/sprint3b-download-process-split`, commit `1ffb544`.
+**Tests:** 408 → 411 (+3 targeted regression tests)
+
+Surfaced by 4-lens parallel audit (architecture, reliability, test-coverage, APIs/integrations).
+
+| ID | Bug | File:line | Fix |
+|----|-----|-----------|-----|
+| C1 | Circuit breaker health status never recovered after Redis reconnected — worker stayed 503 forever | `worker.py:1580` | After `consecutive_errors = 0`, reset `_health_status = "consuming"` if was `"redis_unreachable"` |
+| C2 | Unhandled `json.JSONDecodeError` in `_poll_results_loop` crashed entire batch loop — batch hung forever | `dashboard_api.py:711` | `try/except JSONDecodeError` around `json.loads`, log warning, `continue` |
+| C3 | `serialized_payloads[pending_numero]` direct dict access → `KeyError` when key absent in crash-resume scenario | `dashboard_api.py:735` | `.get()` + `if payload:` guard skips missing entries safely |
+
+## Sprint 5B — 6 Reliability + Monitoring Fixes (DONE)
+
+**Status:** SHIPPED 2026-04-18. Branch `refactor/sprint3-runbatch-retry`, commit pending.
+**Tests:** 411 → 416 (+5 targeted regression tests)
+
+| ID | Fix | Files | Action |
+|----|-----|-------|--------|
+| H2 | Absolute batch timeout — poll loop had no wall-clock ceiling | `dashboard_api.py`, `config.py` | `BATCH_MAX_DURATION_SECS` env-var (default 3600s); check fires at top of each loop tick |
+| H3 | MNI SOAP timeout retry — single timeout marked processo failed | `mni_client.py` | `AsyncRetry(attempts=3, backoff_cap_secs=10)` wraps `wait_for(to_thread(...))` |
+| H4 | GDrive 429 silent skip — rate-limited files omitted silently | `gdrive_downloader.py` | 429 check → `asyncio.sleep(Retry-After)` → one retry; second `if ≠200` handles retry failure |
+| H5 | Payload size cap — no Content-Length guard on POST /api/download | `dashboard_api.py` | `_MAX_DOWNLOAD_PAYLOAD_BYTES = 10 MB`; 413 before json() call |
+| M7 | Disk threshold hardcoded at 100 MB — far too low for production | `worker.py`, `config.py` | `DISK_LOW_THRESHOLD_MB` env-var (default 2000 MB) replaces literal `100` |
+| M8 | Alert fatigue — `PjeAuditSyncBatchesFailing` fires on any single failure | `ops/monitoring/pje/alert-rules.yml` | `> 0` → `> 3` (3 failures in 10 min window before paging) |
+
 ## Sprint 4 — Architectural (DEFERRED, schedule-when-touched)
 
 Low urgency. Schedule only when the affected code is being modified for another reason:
@@ -121,15 +148,17 @@ Low urgency. Schedule only when the affected code is being modified for another 
 
 ## Cumulative Outcome
 
-| Metric | Before audit (2026-04-18) | After Sprint 3A | Delta |
+| Metric | Before audit (2026-04-18) | After Sprint 5B | Delta |
 |--------|---------------------------|-----------------|-------|
-| Test count | 377 | 398 | +21 |
+| Test count | 377 | 416 | +39 |
 | Duplicated helpers | 2 copies of `_merge_downloaded_files`, 17 copies of `sum(tamanhoBytes)`, 2 retry loops | 0 duplicates | Consolidated |
-| Inline magic numbers | 9 timeouts/thresholds | 0 | 7 now env-configurable in `config.py` |
-| 438-line mega-method | `download_process` | (unchanged, Sprint 3B) | Deferred |
-| 170-line god-method | `_run_batch` | Split 3 phases + orchestrator | Closed |
+| Inline magic numbers | 9 timeouts/thresholds | 0 | Now env-configurable in `config.py` |
+| 438-line mega-method | `download_process` | Split + orchestrator | Closed (Sprint 3B) |
+| 170-line god-method | `_run_batch` | Split 3 phases + orchestrator | Closed (Sprint 3A) |
 | Production bugs | 5 latent in audit_sync + batch_downloader | 0 | Closed (B1-B5) |
-| Config constants | ~33 public | ~40 public | +7 env-configurable runtime knobs |
+| Reliability gaps | 3 crash paths (C1-C3) + 6 hardening items (H2-H5,M7,M8) | 0 | Closed (Sprint 5A+5B) |
+| Config constants | ~33 public | ~42 public | +9 env-configurable runtime knobs |
+| Alert fatigue | `PjeAuditSyncBatchesFailing > 0` (fires on first transient) | `> 3` (3 in 10min) | Closed (M8) |
 
 ## Verification
 

@@ -897,3 +897,56 @@ class TestHealthCheck:
 
         assert result["status"] == "unhealthy"
         assert "timeout" in result["error"].lower()
+
+
+# ─────────────────────────────────────────────
+# Sprint 5B regression — H3: SOAP timeout retry
+# ─────────────────────────────────────────────
+
+
+class TestSoapTimeoutRetry:
+    @pytest.mark.asyncio
+    async def test_soap_timeout_retried_up_to_three_attempts(self, monkeypatch):
+        """BEFORE FIX: asyncio.TimeoutError on the first SOAP attempt immediately
+        returned MNIResult(success=False) with no retry. A single transient TCP
+        timeout caused the entire processo to be marked failed.
+
+        After fix: AsyncRetry wraps the SOAP call with 3 attempts. A processo that
+        times out twice but succeeds on the third attempt completes successfully.
+        """
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+        client = _make_client()
+        call_count = 0
+
+        def _call_that_times_out_twice(soap_client, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise asyncio.TimeoutError("transient mock timeout")
+            mock_result = MagicMock()
+            mock_result.sucesso = True
+            mock_result.mensagem = ""
+            return mock_result
+
+        mock_soap_client = MagicMock()
+
+        with (
+            patch.object(client, "_get_client", return_value=mock_soap_client),
+            patch.object(
+                client,
+                "_call_consultar_processo",
+                side_effect=_call_that_times_out_twice,
+            ),
+            patch.object(
+                client, "_parse_processo", return_value=MagicMock(documentos=[])
+            ),
+        ):
+            result = await client.consultar_processo("5000001-00.2024.8.08.0001")
+
+        assert result.success is True, (
+            "BEFORE FIX: first timeout → MNIResult(success=False), no retry. "
+            "After fix: 3-attempt AsyncRetry → succeeds on attempt 3. "
+            f"Got: success={result.success!r}, error={result.error!r}"
+        )
+        assert call_count == 3, f"Expected exactly 3 SOAP attempts, got {call_count}"

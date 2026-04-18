@@ -824,3 +824,56 @@ class TestExtractGdriveLinkFromPje:
 
         result = await extract_gdrive_link_from_pje(page, "0012345-67.2018.8.08.0001")
         assert result is None
+
+
+# ─────────────────────────────────────────────
+# Sprint 5B regression — H4: GDrive 429 retry
+# ─────────────────────────────────────────────
+
+
+class TestGDrive429Retry:
+    @pytest.mark.asyncio
+    async def test_rate_limited_429_retries_and_succeeds(self, tmp_path):
+        """BEFORE FIX: HTTP 429 from GDrive was silently skipped (treated as any
+        other non-200), causing the file to be omitted from the download list.
+
+        After fix: a 429 triggers one retry after Retry-After seconds. If the
+        retry succeeds the file is counted as downloaded.
+        """
+        folder_html = _make_folder_html([("D" * 33, "rate_limited.pdf")])
+
+        session = MagicMock()
+        folder_resp = MagicMock()
+        folder_resp.status_code = 200
+        folder_resp.text = folder_html
+
+        rate_resp = MagicMock()
+        rate_resp.status_code = 429
+        rate_resp.headers = {"Retry-After": "0"}
+
+        file_resp = MagicMock()
+        file_resp.status_code = 200
+        file_resp.headers = {
+            "Content-Disposition": 'attachment; filename="rate_limited.pdf"',
+            "Content-Type": "application/pdf",
+        }
+        file_resp.iter_content = MagicMock(return_value=[b"PDF_AFTER_RETRY"])
+
+        session.get = MagicMock(side_effect=[folder_resp, rate_resp, file_resp])
+        session.headers = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch("requests.Session", return_value=session),
+            patch("gdrive_downloader.metrics"),
+            patch("gdrive_downloader.audit"),
+        ):
+            result = await _try_requests_parse("FOLDER_ID_RATELIMIT", tmp_path)
+
+        assert result is not None, (
+            "BEFORE FIX: 429 was skipped silently → result is None. "
+            "After fix: retry after Retry-After=0 succeeds → file included."
+        )
+        assert len(result) == 1
+        assert result[0]["fonte"] == "google_drive"

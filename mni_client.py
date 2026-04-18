@@ -223,18 +223,30 @@ class MNIClient:
 
             client = await asyncio.to_thread(self._get_client)
 
-            # Executa chamada SOAP em thread separada (zeep é síncrono)
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._call_consultar_processo,
-                    client,
-                    numero_processo,
-                    incluir_documentos,
-                    incluir_cabecalho,
-                    incluir_movimentacoes,
-                    documento_ids,
+            # Executa chamada SOAP em thread separada (zeep é síncrono), com retry em timeout.
+            from async_retry import AsyncRetry as _AsyncRetry
+
+            _soap_retry = _AsyncRetry(
+                attempts=3,
+                backoff_cap_secs=10.0,
+                retry_on=(asyncio.TimeoutError,),
+                log_event="mni.consultar_processo.timeout_retry",
+                logger=log,
+            )
+            result = await _soap_retry.run(
+                lambda: asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._call_consultar_processo,
+                        client,
+                        numero_processo,
+                        incluir_documentos,
+                        incluir_cabecalho,
+                        incluir_movimentacoes,
+                        documento_ids,
+                    ),
+                    timeout=self.timeout,
                 ),
-                timeout=self.timeout,
+                processo=numero_processo,
             )
 
             # Verificar resposta MNI (sucesso/mensagem/processo)

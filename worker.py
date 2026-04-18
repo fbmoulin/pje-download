@@ -60,6 +60,7 @@ from config import (
     PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS,
     REDIS_BLPOP_TIMEOUT_SECS,
     REDIS_CIRCUIT_THRESHOLD,
+    DISK_LOW_THRESHOLD_MB,
     sha256_file,
     sanitize_filename,
     unique_path,
@@ -1747,7 +1748,7 @@ class PJeSessionWorker:
             usage = shutil.disk_usage(DOWNLOAD_BASE_DIR)
             free_mb = usage.free / 1_048_576
             checks["disk_free_mb"] = round(free_mb, 1)
-            if free_mb < 100:
+            if free_mb < DISK_LOW_THRESHOLD_MB:
                 checks["disk"] = "low"
                 healthy = False
             else:

@@ -190,6 +190,21 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
                         timeout=30,
                     )
 
+                    if dl_resp.status_code == 429:
+                        retry_after = int(dl_resp.headers.get("Retry-After", "60"))
+                        log.warning(
+                            "gdrive.requests.rate_limited",
+                            file_id=file_id,
+                            retry_after=retry_after,
+                        )
+                        await asyncio.sleep(retry_after)
+                        dl_resp = await asyncio.to_thread(
+                            session.get,
+                            dl_url,
+                            stream=True,
+                            allow_redirects=True,
+                            timeout=30,
+                        )
                     if dl_resp.status_code != 200:
                         log.warning(
                             "gdrive.requests.file_error",
