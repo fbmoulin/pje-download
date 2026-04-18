@@ -16,12 +16,14 @@ echo "→ verify.sh: validating ops/monitoring/ artifacts"
 PROMTOOL="${PROMTOOL:-promtool}"
 AMTOOL="${AMTOOL:-amtool}"
 
-# If promtool / amtool missing, use docker wrappers
+# If promtool / amtool missing, use docker wrappers.
+# Images default ENTRYPOINT to /bin/prometheus and /bin/alertmanager respectively,
+# so we must override with --entrypoint. -i passes stdin (for `check config /dev/stdin`).
 if ! command -v "$PROMTOOL" >/dev/null 2>&1; then
-    PROMTOOL="docker run --rm -v $PWD:/work -w /work prom/prometheus:v2.55.0 promtool"
+    PROMTOOL="docker run --rm -i --entrypoint promtool -v $PWD:/work -w /work prom/prometheus:v2.55.0"
 fi
 if ! command -v "$AMTOOL" >/dev/null 2>&1; then
-    AMTOOL="docker run --rm -v $PWD:/work -w /work prom/alertmanager:v0.27.0 amtool"
+    AMTOOL="docker run --rm -i --entrypoint amtool -v $PWD:/work -w /work prom/alertmanager:v0.27.0"
 fi
 
 # ── 1. Prometheus alert rules (per-app) ───────────────────────────────
@@ -45,7 +47,7 @@ fi
 # envsubst with whitelist avoids eating stray $-sigils elsewhere in the file.
 if [ -f ops/monitoring/stack/alertmanager.yml ]; then
     echo "  checking ops/monitoring/stack/alertmanager.yml (with dummy envsubst)"
-    BOT_TOKEN=dummy CHAT_ID=0 envsubst '${BOT_TOKEN} ${CHAT_ID}' \
+    BOT_TOKEN=dummy CHAT_ID=1 envsubst '${BOT_TOKEN} ${CHAT_ID}' \
         < ops/monitoring/stack/alertmanager.yml \
         | $AMTOOL check-config /dev/stdin
 fi
