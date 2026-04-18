@@ -62,6 +62,7 @@ from config import (
     HEALTH_PORT as WORKER_HEALTH_PORT,
     RESULT_POLL_BLPOP_TIMEOUT_SECS,
     RESULT_WAIT_TIMEOUT_SECS,
+    BATCH_MAX_DURATION_SECS,
     WORKER_HEALTH_HOST,
     TRUST_X_FORWARDED_FOR,
     atomic_write_text,
@@ -71,6 +72,8 @@ import audit_sync
 
 AUDIT_SYNCER_KEY: web.AppKey = web.AppKey("audit_syncer", audit_sync.AuditSyncer)
 AUDIT_SYNC_TASK_KEY: web.AppKey = web.AppKey("audit_sync_task", asyncio.Task)
+
+_MAX_DOWNLOAD_PAYLOAD_BYTES = 10 * 1024 * 1024  # hard cap for POST /api/download (H5)
 
 
 # ─────────────────────────────────────────────
@@ -685,7 +688,20 @@ class DashboardState:
 
         Mutates ``state`` in place: pending, last_result_at, timed_out, fatal_error.
         """
+        batch_start_time = time.monotonic()
         while state.pending:
+            if time.monotonic() - batch_start_time > BATCH_MAX_DURATION_SECS:
+                abs_error = f"Batch absolute timeout ({BATCH_MAX_DURATION_SECS}s)"
+                self._fail_remaining_processes(job, state.pending, abs_error)
+                job.error = abs_error
+                state.timed_out = True
+                metrics.dashboard_batch_timeouts_total.inc()
+                log.error(
+                    "dashboard.batch.absolute_timeout",
+                    batch_id=job.id,
+                    pending=len(state.pending),
+                )
+                return
             item = await redis_client.blpop(
                 state.reply_queue, timeout=RESULT_POLL_BLPOP_TIMEOUT_SECS
             )
@@ -708,7 +724,15 @@ class DashboardState:
                 continue
 
             _, result_json = item
-            result = json.loads(result_json)
+            try:
+                result = json.loads(result_json)
+            except json.JSONDecodeError as exc:
+                log.warning(
+                    "dashboard.batch.malformed_result",
+                    batch_id=job.id,
+                    error=str(exc),
+                )
+                continue
             if result.get("eventType") == "progress":
                 self._apply_progress_event(job, result)
                 state.last_result_at = time.monotonic()
@@ -729,11 +753,9 @@ class DashboardState:
             if worker_status in _FATAL_WORKER_STATUSES and state.pending:
                 fatal_error = result.get("errorMessage") or worker_status
                 for pending_numero in state.pending:
-                    await redis_client.lrem(
-                        "kratos:pje:jobs",
-                        0,
-                        state.serialized_payloads[pending_numero],
-                    )
+                    payload = state.serialized_payloads.get(pending_numero)
+                    if payload:
+                        await redis_client.lrem("kratos:pje:jobs", 0, payload)
                 self._fail_remaining_processes(job, state.pending, fatal_error)
                 job.error = fatal_error
                 state.fatal_error = fatal_error
@@ -1005,6 +1027,11 @@ async def handle_download(request: web.Request) -> web.Response:
     """POST /api/download — Submeter processos para download."""
     if state is None:
         return web.json_response({"error": "Service not initialized"}, status=503)
+    cl = request.content_length
+    if cl is not None and cl > _MAX_DOWNLOAD_PAYLOAD_BYTES:
+        return web.json_response(
+            {"error": "Payload muito grande (máx 10 MB)"}, status=413
+        )
     try:
         body = await request.json()
         # aiohttp pode retornar string se content-type não for detectado

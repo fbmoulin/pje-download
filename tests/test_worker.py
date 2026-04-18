@@ -1581,3 +1581,83 @@ class TestWorkerMetricsEndpoint:
                     assert 'reason="__pje_metrics_smoke__"' in body
         finally:
             await pje_worker.stop_health_server()
+
+
+# ─────────────────────────────────────────────
+# Sprint 5A regression — C1: circuit breaker health recovery
+# ─────────────────────────────────────────────
+
+
+class TestCircuitBreakerHealthRecovery:
+    @pytest.mark.asyncio
+    async def test_health_status_resets_to_consuming_after_redis_reconnects(self):
+        """BEFORE FIX: consecutive_errors reset to 0 on blpop success but
+        _health_status stayed "redis_unreachable" indefinitely.
+
+        Worker returned 503 on /health forever even after Redis reconnected,
+        triggering spurious orchestrator restarts.
+
+        The fix: when consecutive_errors resets, also reset _health_status
+        to "consuming" if it was "redis_unreachable".
+        """
+        import asyncio as _asyncio
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.mni_client = None
+        worker._health_status = "redis_unreachable"
+
+        shutdown = _asyncio.Event()
+
+        async def fake_blpop(queue, timeout):
+            shutdown.set()  # stop after this one successful blpop
+            return None  # timeout (no job ready), but the call itself succeeded
+
+        worker.redis = AsyncMock()
+        worker.redis.blpop = fake_blpop
+
+        worker.is_session_expired = MagicMock(return_value=False)
+
+        await worker.consume_queue(shutdown)
+
+        assert worker._health_status == "consuming", (
+            "BEFORE FIX: status stayed 'redis_unreachable' after Redis reconnected; "
+            f"got '{worker._health_status}'. "
+            "After fix: successful blpop resets status to 'consuming'."
+        )
+
+
+# Sprint 5B regression — M7: disk low threshold env-var
+
+
+class TestDiskLowThreshold:
+    @pytest.mark.asyncio
+    async def test_disk_low_threshold_uses_env_configurable_constant(self):
+        """BEFORE FIX: worker had 'if free_mb < 100' hardcoded. A deploy with
+        only 200 MB free would not trigger the disk-low alert, even though that
+        is dangerously low for a download-heavy workload.
+
+        After fix: DISK_LOW_THRESHOLD_MB defaults to 2000 MB and is
+        env-configurable. With free_mb=500, the worker marks disk as "low".
+        """
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.redis = AsyncMock()
+        worker.redis.ping = AsyncMock(return_value=True)
+        worker.mni_client = MagicMock()
+        worker._health_status = "consuming"
+
+        # Simulate 500 MB free — below the 2000 MB default threshold.
+        mock_usage = MagicMock()
+        mock_usage.free = 500 * 1_048_576  # 500 MB in bytes
+
+        with patch("shutil.disk_usage", return_value=mock_usage):
+            response = await worker._health_handler(MagicMock())
+
+        body = json.loads(response.text)
+        assert body["checks"]["disk"] == "low", (
+            "BEFORE FIX: hardcoded 100 MB threshold — 500 MB free would pass. "
+            "After fix: 2000 MB default threshold — 500 MB free is 'low'. "
+            f"Got: {body['checks'].get('disk')!r}"
+        )
+        assert response.status == 503

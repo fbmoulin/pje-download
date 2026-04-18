@@ -19,7 +19,7 @@ groups:
           runbook: "docker compose logs dashboard | grep audit_sync"
 
       - alert: PjeAuditSyncBatchesFailing
-        expr: increase(pje_audit_sync_batches_total{status="failed"}[10m]) > 0
+        expr: increase(pje_audit_sync_batches_total{status="failed"}[10m]) > 3
         for: 0s
         labels:
           severity: critical

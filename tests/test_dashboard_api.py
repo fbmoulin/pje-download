@@ -258,6 +258,7 @@ class DummyRequest:
         remote: str | None = "127.0.0.1",
         match_info: dict[str, str] | None = None,
         path: str = "/",
+        content_length: int | None = None,
     ):
         self.method = method
         self._json_data = json_data
@@ -266,6 +267,7 @@ class DummyRequest:
         self.match_info = match_info or {}
         self.path = path
         self.app = {}
+        self.content_length = content_length
 
     async def json(self):
         if isinstance(self._json_data, Exception):
@@ -1592,6 +1594,144 @@ class TestSessionLoginAudit:
         dashboard_api._login_running = False
 
 
+# ─────────────────────────────────────────────
+# Sprint 5A regression tests — C2 + C3 critical fixes
+# ─────────────────────────────────────────────
+
+
+class TestPollResultsLoopRobustness:
+    @pytest.mark.asyncio
+    async def test_malformed_json_in_reply_queue_does_not_crash_batch(self, tmp_path):
+        """BEFORE FIX: json.JSONDecodeError in _poll_results_loop crashed the
+        entire batch loop, causing it to hang indefinitely.
+
+        Regression: malformed reply-queue message must be skipped; subsequent
+        valid messages must still be processed and the batch must complete.
+        """
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="c2_malformed",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="queued",
+            output_dir=str(tmp_path / "c2_malformed"),
+        )
+        ds.batches["c2_malformed"] = job
+
+        fake_redis = FakeRedis()
+
+        async def rpush_with_corrupt_msg(key, *values):
+            queue = fake_redis.queues.setdefault(key, [])
+            queue.extend(values)
+            if key == "kratos:pje:jobs":
+                for raw in values:
+                    payload = json.loads(raw)
+                    reply_q = payload["replyQueue"]
+                    dest = fake_redis.queues.setdefault(reply_q, [])
+                    # Inject malformed JSON first — this is the bug trigger
+                    dest.append("THIS IS NOT JSON {{}")
+                    # Then the real (valid) terminal result
+                    dest.append(
+                        json.dumps(
+                            {
+                                "jobId": payload["jobId"],
+                                "batchId": payload["batchId"],
+                                "numeroProcesso": payload["numeroProcesso"],
+                                "status": "success",
+                                "arquivosDownloaded": [
+                                    {"nome": "doc.pdf", "tamanhoBytes": 42}
+                                ],
+                                "errorMessage": None,
+                                "downloadedAt": "2026-01-01T00:00:00+00:00",
+                            }
+                        )
+                    )
+            return len(queue)
+
+        fake_redis.rpush = rpush_with_corrupt_msg
+        ds.get_redis = AsyncMock(return_value=fake_redis)
+
+        await ds._run_batch(job)
+
+        assert job.status == "done", (
+            f"BEFORE FIX: malformed JSON crashed the loop, leaving batch in '{job.status}'. "
+            "After fix: malformed message is skipped and the valid result completes the batch."
+        )
+        assert job.progress["summary"]["done"] == 1
+
+    @pytest.mark.asyncio
+    async def test_fatal_status_lrem_missing_payload_does_not_keyerror(self, tmp_path):
+        """BEFORE FIX: `state.serialized_payloads[pending_numero]` (direct access)
+        crashed with KeyError when a processo was in state.pending but absent from
+        serialized_payloads — possible in crash-resume scenarios.
+
+        Regression: .get() + if-guard must safely skip missing entries.
+        """
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="c3_fatal",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="queued",
+            output_dir=str(tmp_path / "c3_fatal"),
+        )
+        ds.batches["c3_fatal"] = job
+
+        fake_redis = FakeRedis()
+
+        async def rpush_fatal(key, *values):
+            queue = fake_redis.queues.setdefault(key, [])
+            queue.extend(values)
+            if key == "kratos:pje:jobs":
+                for raw in values:
+                    payload = json.loads(raw)
+                    reply_q = payload["replyQueue"]
+                    fake_redis.queues.setdefault(reply_q, []).append(
+                        json.dumps(
+                            {
+                                "jobId": payload["jobId"],
+                                "batchId": payload["batchId"],
+                                "numeroProcesso": payload["numeroProcesso"],
+                                "status": "session_expired",
+                                "arquivosDownloaded": [],
+                                "errorMessage": "session_expired",
+                                "downloadedAt": "2026-01-01T00:00:00+00:00",
+                            }
+                        )
+                    )
+            return len(queue)
+
+        fake_redis.rpush = rpush_fatal
+
+        # Simulate the gap: inject a ghost numero into state.pending that is
+        # absent from serialized_payloads (the exact pre-fix crash condition).
+        original_enqueue = ds._enqueue_batch
+
+        async def patched_enqueue(
+            job, redis, *, serialized_payloads, reply_queue, enqueue_jobs
+        ):
+            state = await original_enqueue(
+                job,
+                redis,
+                serialized_payloads=serialized_payloads,
+                reply_queue=reply_queue,
+                enqueue_jobs=enqueue_jobs,
+            )
+            state.pending.add(
+                "9999999-99.2024.8.08.9999"
+            )  # ghost — not in serialized_payloads
+            return state
+
+        ds._enqueue_batch = patched_enqueue
+        ds.get_redis = AsyncMock(return_value=fake_redis)
+
+        # Must NOT raise KeyError
+        await ds._run_batch(job)
+
+        assert job.status == "failed", (
+            "BEFORE FIX: direct dict access raised KeyError on the ghost numero. "
+            "After fix: .get() returns None, if-guard skips LREM, batch fails cleanly."
+        )
+
+
 class TestCleanupSavesProgress:
     @pytest.mark.asyncio
     async def test_progress_saved_on_shutdown(self, tmp_path):
@@ -1619,3 +1759,77 @@ class TestCleanupSavesProgress:
         assert progress_file.exists()
         data = json.loads(progress_file.read_text())
         assert data["done"] == 3
+
+
+# ─────────────────────────────────────────────
+# Sprint 5B regression tests — H2 + H5
+# ─────────────────────────────────────────────
+
+
+class TestSprintFiveBFixes:
+    @pytest.mark.asyncio
+    async def test_absolute_batch_timeout_fails_remaining_processos(self, tmp_path):
+        """BEFORE FIX: _poll_results_loop had no wall-clock ceiling. A stuck reply
+        queue (e.g. Playwright worker hung waiting for captcha) could hold the loop
+        open indefinitely, blocking all subsequent batches.
+
+        Regression: once BATCH_MAX_DURATION_SECS elapses, remaining processos are
+        failed and the loop exits cleanly — batch lands at "failed".
+        """
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="h2_abs_timeout",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="queued",
+            output_dir=str(tmp_path / "h2_abs_timeout"),
+        )
+        ds.batches["h2_abs_timeout"] = job
+
+        # FakeRedis that enqueues jobs but never sends any reply.
+        fake_redis = FakeRedis()
+
+        async def never_reply(key, *values):
+            queue = fake_redis.queues.setdefault(key, [])
+            queue.extend(values)
+            return len(queue)
+
+        fake_redis.rpush = never_reply
+        ds.get_redis = AsyncMock(return_value=fake_redis)
+
+        # -1 makes elapsed > -1 always True from the very first check.
+        with patch("dashboard_api.BATCH_MAX_DURATION_SECS", -1):
+            await ds._run_batch(job)
+
+        assert job.status == "failed", (
+            "BEFORE FIX: no absolute ceiling — loop ran forever on stuck queue. "
+            "After fix: BATCH_MAX_DURATION_SECS=-1 triggers timeout on first tick, "
+            f"batch completes as 'failed'. Got: {job.status!r}"
+        )
+        assert job.error is not None and "absolute timeout" in job.error.lower(), (
+            f"Expected 'absolute timeout' in job.error; got: {job.error!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_oversized_download_payload_returns_413(self):
+        """BEFORE FIX: no Content-Length guard on POST /api/download. A malformed
+        client could send a multi-MB JSON body that aiohttp would buffer in full
+        before any validation ran.
+
+        Regression: Content-Length > 10 MB → 413 before JSON parsing.
+        """
+        with patch("dashboard_api.state") as mock_state:
+            mock_state.current_batch_id = None
+            mock_state.batches = {}
+            resp = await dashboard_api.handle_download(
+                DummyRequest(
+                    method="POST",
+                    json_data={"processos": []},
+                    content_length=11 * 1024 * 1024,  # 11 MB — over 10 MB cap
+                )
+            )
+        assert resp.status == 413, (
+            "BEFORE FIX: no Content-Length guard. "
+            f"After fix: 11 MB payload → 413. Got status: {resp.status}"
+        )
+        body = json.loads(resp.body.decode())
+        assert "grande" in body["error"].lower() or "10" in body["error"]
