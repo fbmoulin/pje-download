@@ -45,17 +45,20 @@ CLI offline:
 
 | Arquivo | Linhas | Funcao |
 |---------|--------|--------|
-| `worker.py` | ~1111 | Worker PJe com 3 estrategias em cascata, reply queues por batch, downloads paralelos, dead-letter e health detalhado |
-| `mni_client.py` | ~798 | Cliente SOAP para MNI — download em 2 fases com dedup por checksum |
-| `batch_downloader.py` | ~744 | Download em lote via CLI com progresso atomico, retomada e relatorio |
-| `dashboard_api.py` | ~701 | Control plane aiohttp — valida batches, publica jobs Redis, agrega resultados, recupera batch ativo e expõe status/readiness |
-| `pje_session.py` | ~393 | Login interativo PJe (Playwright), persistencia de sessao Keycloak, API REST + browser fallback |
+| `worker.py` | ~1861 | Worker PJe com 3 estrategias em cascata (MNI > API > browser), reply queues por batch, downloads paralelos, dead-letter, circuit breaker no blpop, health detalhado |
+| `dashboard_api.py` | ~1494 | Control plane aiohttp — valida batches, publica jobs Redis com retry, agrega resultados, recupera batch ativo, `api_key` em todo `/api/*`, spawn do audit syncer, expõe status/readiness/metrics |
+| `batch_downloader.py` | ~914 | Download em lote via CLI com progresso atomico, retomada e relatorio |
+| `mni_client.py` | ~876 | Cliente SOAP para MNI — download em 2 fases com dedup por checksum |
+| `gdrive_downloader.py` | ~696 | Download de pastas Google Drive (processos antigos escaneados) + `extract_gdrive_link_from_pje` |
+| `audit_sync.py` | ~474 | Background syncer: tails `/data/audit/*.jsonl` → Railway Postgres (CNJ 615/2025 Phase 2), partial-line invariant, cursor atomico com fsync, ON CONFLICT dedupe, TLS sslmode-aware |
+| `pje_session.py` | ~440 | Login interativo PJe (Playwright), persistencia de sessao Keycloak, API REST + browser fallback |
+| `metrics.py` | ~216 | Registry Prometheus dedicado — MNI, GDrive, worker, control plane, audit sync (6 series) |
+| `config.py` | ~129 | Configuracao centralizada — todas as variaveis env-configuraveis (incl. audit sync) |
+| `audit.py` | ~100 | CNJ 615/2025 audit trail append-only (JSON-L) + `rotate_logs` com cleanup de sidecars `.cursor` |
 | `dashboard.html` | ~193 | Frontend HTML com Google Fonts, data-animate attrs e card de sessao PJe |
 | `static/css/style.css` | ~685 | Design system — glassmorphism, Oswald KPIs, dot-grid bg, staggered animations |
 | `static/js/app.js` | ~618 | Dashboard — adaptive polling, pipeline renderer (SVG), toasts, file upload, sessao PJe |
-| `gdrive_downloader.py` | ~628 | Download de pastas Google Drive (processos antigos escaneados) |
-| `config.py` | ~64 | Configuracao centralizada — todas as variaveis env-configuraveis |
-| `metrics.py` | ~108 | Registry Prometheus dedicado — metricas de MNI, GDrive, worker e control plane |
+| `migrations/` | 2 files | Schema SQL idempotente para `audit_entries` (Railway Postgres) |
 
 ## Estrategias de Download
 
