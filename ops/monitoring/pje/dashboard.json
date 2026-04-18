@@ -1,0 +1,123 @@
+{
+  "annotations": {"list": []},
+  "description": "pje-download operational observability — 8 panels covering MNI SOAP, GDrive, batch, worker, and Railway audit sync. Spec: 2026-04-18-grafana-dashboard-design.md",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 100,
+      "type": "stat",
+      "title": "Scrape health (dashboard)",
+      "gridPos": {"x": 0, "y": 0, "w": 4, "h": 3},
+      "targets": [{"expr": "up{job=\"pje-dashboard\"}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}}
+    },
+    {
+      "id": 101,
+      "type": "stat",
+      "title": "Scrape health (worker)",
+      "gridPos": {"x": 4, "y": 0, "w": 4, "h": 3},
+      "targets": [{"expr": "up{job=\"pje-worker\"}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}}
+    },
+    {
+      "id": 102,
+      "type": "stat",
+      "title": "Active batches",
+      "gridPos": {"x": 8, "y": 0, "w": 4, "h": 3},
+      "targets": [{"expr": "pje_dashboard_active_batches", "refId": "A"}]
+    },
+    {
+      "id": 103,
+      "type": "stat",
+      "title": "Audit sync lag (s)",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 3},
+      "targets": [{"expr": "pje_audit_sync_lag_seconds", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 30}, {"color": "red", "value": 60}]}}}
+    },
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "1. Audit sync lag",
+      "gridPos": {"x": 0, "y": 3, "w": 8, "h": 7},
+      "targets": [{"expr": "pje_audit_sync_lag_seconds", "refId": "A", "legendFormat": "lag"}],
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 30}, {"color": "red", "value": 60}]}}}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "2. Sync batches by status",
+      "gridPos": {"x": 8, "y": 3, "w": 8, "h": 7},
+      "targets": [{"expr": "rate(pje_audit_sync_batches_total[5m])", "refId": "A", "legendFormat": "{{status}}"}],
+      "fieldConfig": {"defaults": {"custom": {"stacking": {"mode": "normal"}}}}
+    },
+    {
+      "id": 3,
+      "type": "heatmap",
+      "title": "3. Sync tick latency (heatmap)",
+      "gridPos": {"x": 16, "y": 3, "w": 8, "h": 7},
+      "targets": [{"expr": "sum(rate(pje_audit_sync_latency_seconds_bucket[5m])) by (le)", "refId": "A", "format": "heatmap", "legendFormat": "{{le}}"}]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "4. Worker dead letters by reason",
+      "gridPos": {"x": 0, "y": 10, "w": 12, "h": 7},
+      "targets": [{"expr": "increase(pje_worker_dead_letters_total[1h])", "refId": "A", "legendFormat": "{{reason}}"}]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "5. Publish failures / timeouts / recoveries",
+      "gridPos": {"x": 12, "y": 10, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "rate(pje_worker_publish_failures_total[5m])", "refId": "A", "legendFormat": "publish_failures (worker) {{kind}}"},
+        {"expr": "rate(pje_dashboard_batch_timeouts_total[5m])", "refId": "B", "legendFormat": "batch_timeouts (dashboard)"},
+        {"expr": "increase(pje_dashboard_active_batch_recoveries_total[1h])", "refId": "C", "legendFormat": "active_batch_recoveries (dashboard) [1h]"}
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "6. MNI latency p50/p95/p99 (by operation)",
+      "gridPos": {"x": 0, "y": 17, "w": 12, "h": 7},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(pje_mni_latency_seconds_bucket[5m])) by (le, operation))", "refId": "A", "legendFormat": "p50 {{operation}}"},
+        {"expr": "histogram_quantile(0.95, sum(rate(pje_mni_latency_seconds_bucket[5m])) by (le, operation))", "refId": "B", "legendFormat": "p95 {{operation}}"},
+        {"expr": "histogram_quantile(0.99, sum(rate(pje_mni_latency_seconds_bucket[5m])) by (le, operation))", "refId": "C", "legendFormat": "p99 {{operation}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "7. MNI request outcomes",
+      "gridPos": {"x": 12, "y": 17, "w": 12, "h": 7},
+      "targets": [{"expr": "rate(pje_mni_requests_total[5m])", "refId": "A", "legendFormat": "{{operation}} / {{status}}"}],
+      "fieldConfig": {"defaults": {"custom": {"stacking": {"mode": "normal"}}}}
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "8. GDrive strategy success rate",
+      "gridPos": {"x": 0, "y": 24, "w": 24, "h": 7},
+      "targets": [{"expr": "sum(rate(pje_gdrive_attempts_total{status=\"success\"}[5m])) by (strategy) / clamp_min(sum(rate(pje_gdrive_attempts_total[5m])) by (strategy), 1e-9)", "refId": "A", "legendFormat": "{{strategy}} success rate"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "custom": {"stacking": {"mode": "none"}}, "min": 0, "max": 1}}
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["pje-download", "observability", "backlog-p04"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "pje-download — operational",
+  "uid": "pje-download-ops",
+  "version": 1,
+  "weekStart": ""
+}
