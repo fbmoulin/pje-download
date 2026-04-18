@@ -81,6 +81,8 @@ Note the exact pattern: `generate_latest(m.REGISTRY)` returned with `headers={"C
 
 - [ ] **Step 3: Write the failing test (add to `tests/test_worker.py`)**
 
+**Important:** the existing file uses a helper `_load_worker_module()` at line 11 that mocks `redis`, `redis.asyncio`, `playwright`, `playwright.async_api`, and `mni_client` in `sys.modules` before importing `worker`. Without this helper the import fails or side-effects production. All async tests use `@pytest.mark.asyncio`. The class name is `PJeSessionWorker` (not `PJeWorker`). Additionally, `config.py:94-95` captures `HEALTH_PORT` / `HEALTH_BIND_HOST` at its module load and `worker.py` imports them with `from config import ...` — reloading `worker` does NOT re-read `config`'s values. So monkeypatching env vars has no effect on the already-bound names; we must rebind them on the worker module directly after loading.
+
 Find the end of `tests/test_worker.py` and append:
 
 ```python
@@ -96,23 +98,25 @@ class TestWorkerMetricsEndpoint:
     progress_events) that are unreachable via the dashboard's /metrics.
     """
 
-    async def test_metrics_endpoint_returns_prometheus_text(self, tmp_path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_metrics_endpoint_returns_prometheus_text(self, monkeypatch):
         """GET /metrics returns Prometheus text with worker-counter names."""
-        import importlib
+        w = _load_worker_module()
 
-        # worker.py has import side-effects — isolate downloads dir
-        monkeypatch.setenv("DOWNLOAD_BASE_DIR", str(tmp_path / "dl"))
-        monkeypatch.setenv("HEALTH_PORT", "18006")  # avoid collision with real worker
-        monkeypatch.setenv("HEALTH_BIND_HOST", "127.0.0.1")
-
-        import worker as w
-        importlib.reload(w)
+        # Rebind module-level constants: worker.py does `from config import
+        # HEALTH_PORT, HEALTH_BIND_HOST` at load time, so env-var monkeypatching
+        # has no effect after import. We rebind directly on the worker module.
+        monkeypatch.setattr(w, "HEALTH_PORT", 18006)  # off-band from prod :8006
+        monkeypatch.setattr(w, "HEALTH_BIND_HOST", "127.0.0.1")
 
         import metrics as m
-        # Pre-populate a known counter so the scrape output is non-trivial
-        m.worker_dead_letters_total.labels(reason="test").inc()
+        # Pre-populate a known counter so the scrape output is non-trivial.
+        # NOTE: metrics.REGISTRY is process-wide; this leaves a stale sample
+        # in the counter for the rest of the test session. Any future test
+        # asserting exact counter values across this line must account for it.
+        m.worker_dead_letters_total.labels(reason="__pje_metrics_smoke__").inc()
 
-        pje_worker = w.PJeWorker()
+        pje_worker = w.PJeSessionWorker()
         await pje_worker.start_health_server()
         try:
             import aiohttp
@@ -122,7 +126,7 @@ class TestWorkerMetricsEndpoint:
                     assert resp.headers["Content-Type"].startswith("text/plain")
                     body = await resp.text()
                     assert "pje_worker_dead_letters_total" in body
-                    assert 'reason="test"' in body
+                    assert 'reason="__pje_metrics_smoke__"' in body
         finally:
             await pje_worker.stop_health_server()
 ```
@@ -133,7 +137,13 @@ Commit nothing yet — this test is expected to fail.
 
 Run: `pytest tests/test_worker.py::TestWorkerMetricsEndpoint::test_metrics_endpoint_returns_prometheus_text -v`
 
-Expected: FAIL with a 404 on `/metrics` (the route does not exist yet). If the error is anything other than "404" or "route not found", stop and investigate before continuing — a different failure means the test setup is wrong, not the production code.
+Expected: FAIL with `AssertionError: assert 404 == 200` (the route does not exist yet).
+
+If the error is **anything else**, stop and investigate — something in the test setup is broken, not the production code. Common wrong failures:
+- `AttributeError: module 'worker' has no attribute 'PJeSessionWorker'` → class was renamed; re-verify with `grep '^class PJe' worker.py`.
+- `ModuleNotFoundError: No module named 'redis'` → the `_load_worker_module()` helper wasn't used; re-read Step 3.
+- `OSError: [Errno 98] Address already in use` → another worker is bound to the same port; change `monkeypatch.setattr(w, "HEALTH_PORT", 18006)` to a different free port.
+- Warning "coroutine was never awaited" / test "SKIPPED" → `@pytest.mark.asyncio` decorator missing.
 
 - [ ] **Step 5: Implement the route**
 
@@ -280,16 +290,24 @@ if [ -f ops/monitoring/pje/alert-rules.yml ]; then
     $PROMTOOL check rules ops/monitoring/pje/alert-rules.yml
 fi
 
-# ── 2. Prometheus main config ─────────────────────────────────────────
+# ── 2. Prometheus main config (with dummy envsubst for ${PJE_TAILNET_IP}) ─
+# promtool validates target host:port syntax, so a raw ${PJE_TAILNET_IP}
+# placeholder fails. Substitute a dummy before piping to promtool.
 if [ -f ops/monitoring/stack/prometheus.yml ]; then
-    echo "  checking ops/monitoring/stack/prometheus.yml"
-    $PROMTOOL check config ops/monitoring/stack/prometheus.yml
+    echo "  checking ops/monitoring/stack/prometheus.yml (with dummy envsubst)"
+    PJE_TAILNET_IP=127.0.0.1 envsubst '${PJE_TAILNET_IP}' \
+        < ops/monitoring/stack/prometheus.yml \
+        | $PROMTOOL check config /dev/stdin
 fi
 
-# ── 3. Alertmanager config ────────────────────────────────────────────
+# ── 3. Alertmanager config (with dummy envsubst for ${BOT_TOKEN} ${CHAT_ID}) ─
+# Raw ${CHAT_ID} placeholder is not a valid YAML integer; amtool rejects it.
+# envsubst with whitelist avoids eating stray $-sigils elsewhere in the file.
 if [ -f ops/monitoring/stack/alertmanager.yml ]; then
-    echo "  checking ops/monitoring/stack/alertmanager.yml"
-    $AMTOOL check-config ops/monitoring/stack/alertmanager.yml
+    echo "  checking ops/monitoring/stack/alertmanager.yml (with dummy envsubst)"
+    BOT_TOKEN=dummy CHAT_ID=0 envsubst '${BOT_TOKEN} ${CHAT_ID}' \
+        < ops/monitoring/stack/alertmanager.yml \
+        | $AMTOOL check-config /dev/stdin
 fi
 
 # ── 4. Grafana dashboard JSON (parse only) ────────────────────────────
@@ -704,9 +722,9 @@ scrape_configs:
 
 Run: `./ops/monitoring/verify.sh`
 
-Expected: `checking ops/monitoring/stack/prometheus.yml` passes. promtool **does** tolerate `${VAR}` placeholders — it only checks structure.
+Expected: `checking ops/monitoring/stack/prometheus.yml (with dummy envsubst)` passes. promtool validates `static_configs.targets` as host:port, so the Task-2 verify.sh pipes the file through `PJE_TAILNET_IP=127.0.0.1 envsubst '${PJE_TAILNET_IP}'` first. This catches real syntax errors without requiring Prometheus to actually reach the tailnet address.
 
-If promtool errors on `rule_files`, it is because the path (`/etc/prometheus/rules/pje/*.yml`) does not exist at validation time. That is expected — Prometheus only enforces the path at load time inside the container where the bind-mount lives. If promtool fails on this specifically, wrap the `rule_files:` line in a comment during verify and uncomment before commit. Most promtool versions do not error on missing rule files.
+If promtool errors on `rule_files`, it is because the path (`/etc/prometheus/rules/pje/*.yml`) does not exist at validation time on the dev host. Prometheus only enforces that path at load time inside the container where the bind-mount lives. Most promtool versions warn but do not fail on a missing glob — if your version fails, temporarily comment out the `rule_files:` block during verify and restore it before commit.
 
 - [ ] **Step 3: Commit**
 
@@ -787,23 +805,14 @@ inhibit_rules:
 
 Run: `./ops/monitoring/verify.sh`
 
-Expected: `checking ops/monitoring/stack/alertmanager.yml` passes. amtool **does not** pre-substitute env vars. It will complain about `${CHAT_ID}` not being a valid integer. To work around this during validation but keep production unambiguous, temporarily substitute a dummy: `CHAT_ID=123 BOT_TOKEN=x envsubst < alertmanager.yml | amtool check-config /dev/stdin`. Update verify.sh to do this if amtool errors:
+Expected: `checking ops/monitoring/stack/alertmanager.yml (with dummy envsubst)` passes. The Task-2 `verify.sh` already includes the `BOT_TOKEN=dummy CHAT_ID=0 envsubst '${BOT_TOKEN} ${CHAT_ID}'` preprocessing step (amtool rejects the raw `${CHAT_ID}` placeholder as a non-integer), so no edit to verify.sh is needed here — amtool receives a pre-substituted stream and validates it.
 
-```bash
-# In verify.sh, replace the bare amtool call with:
-if [ -f ops/monitoring/stack/alertmanager.yml ]; then
-    echo "  checking ops/monitoring/stack/alertmanager.yml (with dummy envsubst)"
-    BOT_TOKEN=dummy CHAT_ID=0 envsubst < ops/monitoring/stack/alertmanager.yml | \
-        $AMTOOL check-config /dev/stdin
-fi
-```
-
-Commit verify.sh update alongside alertmanager.yml.
+If amtool errors with a message mentioning `chat_id` and "cannot unmarshal" or "integer", the dummy-envsubst step in verify.sh is missing — go back to Task 2 and confirm the alertmanager.yml check block uses the pipe form. If amtool errors on something else, the issue is real YAML syntax — fix the committed file.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add ops/monitoring/stack/alertmanager.yml ops/monitoring/verify.sh
+git add ops/monitoring/stack/alertmanager.yml
 git commit -m "ops(monitoring): alertmanager.yml with native telegram_configs
 
 Routes all alerts to @kaiOpsBot (spec §3). group_by=[app] coalesces
@@ -815,8 +824,8 @@ critical severity overrides group_wait to 0s for immediate paging.
 inhibit_rule: PjeDashboardDown suppresses lag/batch alerts from
 same app (symptom suppression).
 
-verify.sh: run amtool on envsubst-preprocessed stream so ${CHAT_ID}
-placeholder doesn't fail integer-type check at lint time."
+Validator (Task 2 verify.sh) already handles the ${CHAT_ID} / ${BOT_TOKEN}
+integer-type gotcha via envsubst preprocessing — no verify.sh edit needed."
 ```
 
 ---
@@ -1104,9 +1113,15 @@ forced-change prompted on first login)."
 
 **Rationale:** Before shipping `DEPLOY.md` we validate the stack actually works end-to-end. This catches gotchas that static validation cannot — missing bind mounts, wrong volume paths, container restart loops.
 
-- [ ] **Step 1: Start local pje-download (needed for scrape targets)**
+- [ ] **Step 1: Rebuild both images so the Task 1 code change is picked up**
 
-From repo root: `docker compose --profile worker up -d`
+From repo root:
+```bash
+docker compose --profile worker build worker dashboard
+docker compose --profile worker up -d
+```
+
+The `build` call is required because Task 1 modified `worker.py`; if the worker container was already running from a pre-Task-1 image, `up -d` alone would not pick up the new `/metrics` route and Step 2 below would 404.
 
 Wait 15 s. Verify both containers healthy: `docker ps --format 'table {{.Names}}\t{{.Status}}' | grep -E 'pje-dashboard|pje-worker'`. Expected two rows with `(healthy)`.
 
@@ -1118,31 +1133,38 @@ curl -sf http://localhost:8006/metrics | head -5
 curl -sf http://localhost:8006/health  | jq .
 ```
 
-All four should return data. If `:8006/metrics` 404s, the Task 1 change did not land — rebuild the worker image: `docker compose build worker && docker compose up -d worker`.
+All four should return data. If `:8006/metrics` returns 404, the rebuild did not include the Task-1 change — re-run `docker compose build --no-cache worker` and retry.
 
-- [ ] **Step 2: Prepare a local-dev variant of prometheus.yml**
+- [ ] **Step 2: Prepare local-dev variants of prometheus.yml and alertmanager.yml via a `docker-compose.override.yml` (NOT by editing the tracked compose file)**
 
-The committed `prometheus.yml` scrapes `${PJE_TAILNET_IP}`. For local dev, substitute with `host.docker.internal`:
+Reason for the override pattern: editing the tracked `docker-compose.yml` and reverting later is fragile — if anyone forgets the revert, a broken local path ends up committed. Docker Compose **automatically merges** any `docker-compose.override.yml` sitting next to `docker-compose.yml`, so we use that (git-ignored) file to swap bind-mounts without touching the tracked one.
 
+From `ops/monitoring/stack/`:
 ```bash
-cd ops/monitoring/stack
-PJE_TAILNET_IP=host.docker.internal envsubst '${PJE_TAILNET_IP}' < prometheus.yml > /tmp/prometheus.local.yml
+# Substitute the env vars into temp files (/tmp — outside the repo tree).
+PJE_TAILNET_IP=host.docker.internal envsubst '${PJE_TAILNET_IP}' \
+    < prometheus.yml > /tmp/prometheus.local.yml
+
+BOT_TOKEN=dummy CHAT_ID=0 envsubst '${BOT_TOKEN} ${CHAT_ID}' \
+    < alertmanager.yml > /tmp/alertmanager.local.yml
+
+# Create the override file (auto-picked-up by docker compose, never committed).
+cat > docker-compose.override.yml <<'EOF'
+services:
+  prometheus:
+    volumes:
+      - /tmp/prometheus.local.yml:/etc/prometheus/prometheus.yml:ro
+  alertmanager:
+    volumes:
+      - /tmp/alertmanager.local.yml:/etc/alertmanager/alertmanager.yml:ro
+EOF
 ```
 
-Edit `docker-compose.yml` temporarily to bind-mount `/tmp/prometheus.local.yml` instead:
-```yaml
-# replace the prometheus.yml volume with:
-- /tmp/prometheus.local.yml:/etc/prometheus/prometheus.yml:ro
-```
-
-(Revert this change before Task 13 commit.)
-
-Similarly for alertmanager.yml:
+Verify it's out of git: `git status` should **not** list `docker-compose.override.yml`. If it does, add an entry to the repo root `.gitignore`:
 ```bash
-BOT_TOKEN=dummy CHAT_ID=0 envsubst < alertmanager.yml > /tmp/alertmanager.local.yml
+echo "ops/monitoring/stack/docker-compose.override.yml" >> .gitignore
 ```
-
-And bind-mount `/tmp/alertmanager.local.yml` in the compose.
+(This .gitignore entry can stay committed — it's idiomatic.)
 
 - [ ] **Step 3: Start the monitoring stack**
 
@@ -1194,10 +1216,20 @@ If the dashboard is missing, check `docker logs openclaw-grafana | grep provisio
 
 ```bash
 cd ops/monitoring/stack
-docker compose down -v     # removes volumes; fresh TSDB next time
+docker compose down -v                          # removes volumes; fresh TSDB next time
 rm /tmp/prometheus.local.yml /tmp/alertmanager.local.yml
-git checkout docker-compose.yml     # revert the local bind-mount swap
+rm docker-compose.override.yml                  # drop the local override
 ```
+
+Then confirm no tracked-file edits leaked:
+```bash
+git diff --stat ops/monitoring/stack/docker-compose.yml
+# expected: no output
+git status --short ops/monitoring/stack/
+# expected: no output (override.yml should be gitignored, nothing else modified)
+```
+
+If either command shows output, revert before the Step 9 empty commit.
 
 - [ ] **Step 8: Run verify.sh one more time to confirm committed state is clean**
 
