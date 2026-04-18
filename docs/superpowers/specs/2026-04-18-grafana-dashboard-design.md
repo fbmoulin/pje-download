@@ -60,6 +60,8 @@ This mirrors the pattern already in use in `dashboard_api.py:1153-1159` (kept co
 
 **Scrape implication:** the Prometheus stack gains a third scrape job (`pje-worker-metrics`) targeting `:8006/metrics` over the tailnet, in addition to the two already planned (`pje-dashboard` for `:8007/metrics` and `pje-health-probe` blackbox probes).
 
+**Note on worker bind host:** `config.py` defaults `HEALTH_BIND_HOST="127.0.0.1"` and CLAUDE.md explicitly says "Worker health bound to 127.0.0.1 (not exposed externally)". The Docker deploy already overrides this in `docker-compose.yml:112` (`HEALTH_BIND_HOST: 0.0.0.0`), so the `:8006` surface is reachable from the Docker host (and therefore from the tailnet peer). This override must be preserved — the implementation plan should not revert it. Local non-Docker dev reproduction of the scrape (developer running `python worker.py` directly) requires `export HEALTH_BIND_HOST=0.0.0.0` to let Prometheus reach the endpoint; §9 step 3 uses `docker compose --profile worker up -d` and inherits the correct binding automatically.
+
 **Non-goals (v1):**
 
 - SLO burn-rate alerts (multiwindow/multiburn-rate) — pje-download has no external SLA; premature.
@@ -175,7 +177,7 @@ Unit of time: default **last 1h** (user-selectable). Refresh: **30 s**. Data sou
 **Row 2 — Worker & control plane — 2 panels**
 
 4. **Dead letters by reason (time series)** — `increase(pje_worker_dead_letters_total[1h])` by `reason`. Correlates with alert #3 (`PjeWorkerDeadLetters`).
-5. **Publish failures / timeouts / recoveries (time series, 3 lines)** — `rate(pje_worker_publish_failures_total[5m])`, `rate(pje_dashboard_batch_timeouts_total[5m])`, `increase(pje_dashboard_active_batch_recoveries_total[1h])`. Redis-loop health signal.
+5. **Publish failures / timeouts / recoveries (time series, 3 lines)** — `rate(pje_worker_publish_failures_total[5m])` (worker process), `rate(pje_dashboard_batch_timeouts_total[5m])` (dashboard process), `increase(pje_dashboard_active_batch_recoveries_total[1h])` (dashboard process). Legend must clarify source process (e.g., `publish_failures {worker}`, `timeouts {dashboard}`, `recoveries {dashboard}`) — Prometheus federates both scrape jobs into a single dashboard datasource, but the panel mixes metrics from the two processes and the operator needs to know which one to SSH into. Redis-loop health signal overall.
 
 **Row 3 — MNI SOAP — 2 panels**
 
@@ -277,7 +279,7 @@ groups:
 
 ## 9. Testing Strategy
 
-No Python test changes. Test count remains 377. Validation layers:
+Python test changes are limited to the single new test added in §2a (the worker `/metrics` endpoint smoke test). **Test count goes from 377 to 378.** All other validation happens at the config layer:
 
 1. **Config syntax (CI-ready, pre-commit):**
 
@@ -338,7 +340,7 @@ The plan that follows this spec must produce, at minimum:
 - `ops/monitoring/stack/docker-compose.yml` — pins Prometheus 2.55, Grafana 11.3, Alertmanager 0.27, blackbox_exporter 0.25; all named containers; all restart `unless-stopped`; Grafana bound to `127.0.0.1:3000` only.
 - `ops/monitoring/stack/prometheus.yml` — **four** scrape jobs (`pje-dashboard` → `:8007/metrics`, `pje-worker` → `:8006/metrics`, `pje-dashboard-probe` → blackbox on `:8007/healthz`, `pje-worker-probe` → blackbox on `:8006/health`), 30 s interval; includes `rule_files:` pointing to `../pje/alert-rules.yml`.
 - `ops/monitoring/stack/alertmanager.yml` — native Alertmanager 0.27 `telegram_configs` receiver (not `webhook_configs`; the native integration is documented in Alertmanager since 0.26 and takes `bot_token` + `chat_id` directly), env-var-substitutable via `$BOT_TOKEN` / `$CHAT_ID`, grouped by `[app]`.
-- `ops/monitoring/stack/blackbox.yml` — HTTP `http_2xx` prober module used by both `*-probe` jobs; must not treat 503 as failure at the exporter level (we want the 503 to surface as `probe_http_status_code=503` for alerting, not as a probe success-level failure).
+- `ops/monitoring/stack/blackbox.yml` — defines a custom module named `http_2xx_or_503` (copy of the default `http_2xx` with `valid_status_codes: [200, 503]` added). The `*-probe` jobs reference this module by name in `prometheus.yml` so that a 503 response produces `probe_success=1` and `probe_http_status_code=503` simultaneously — the alert rule `PjeWorkerCircuitBreakerOpen` keys on `probe_http_status_code==503`, but keeping `probe_success=1` prevents an unrelated "probe failed" alert from firing at the same time (which would double-page the operator). The default `http_2xx` module would set `probe_success=0` on 503, producing confusing cascades.
 - `ops/monitoring/stack/grafana/provisioning/` — datasource + dashboard providers (bind-mount of `ops/monitoring/pje/`).
 - `ops/monitoring/stack/DEPLOY.md` — the 10-step deploy runbook, complete with exact commands.
 - `ops/monitoring/verify.sh` — pre-commit validation script; exits nonzero on any syntax failure.
