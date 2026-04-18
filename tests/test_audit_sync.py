@@ -6,7 +6,7 @@ import json
 import logging
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -624,3 +624,259 @@ class TestInsertBatch:
         with pytest.raises(RuntimeError, match="down"):
             await syncer._insert_batch([_audit_entry()])
         assert conn.executemany.await_count == syncer._MAX_INSERT_ATTEMPTS
+
+
+# ─────────────────────────────────────────────
+# Sprint 1 Bug Fixes — 2026-04-18 audit
+# ─────────────────────────────────────────────
+
+
+class TestB2_CoerceUtc:
+    """B2: Mixed naive/aware datetime comparison silently killed the lag gauge
+    (TypeError was caught by bare `except` in _sync_file). _coerce_utc normalises
+    to tz-aware UTC so comparison is always well-defined.
+    """
+
+    def test_coerce_naive_adds_utc_tzinfo(self):
+        from datetime import datetime as _dt
+
+        naive = _dt(2026, 4, 17, 12, 0, 0)
+        assert naive.tzinfo is None
+        result = audit_sync._coerce_utc(naive)
+        assert result is not None
+        assert result.tzinfo is not None
+        assert result.utcoffset().total_seconds() == 0
+
+    def test_coerce_aware_is_unchanged(self):
+        from datetime import datetime as _dt, timezone as _tz
+
+        aware = _dt(2026, 4, 17, 12, 0, 0, tzinfo=_tz.utc)
+        assert audit_sync._coerce_utc(aware) is aware
+
+    def test_coerce_none_returns_none(self):
+        assert audit_sync._coerce_utc(None) is None
+
+    @pytest.mark.asyncio
+    async def test_lag_metric_survives_mixed_tz_ts_in_jsonl(self, tmp_path: Path):
+        """Ingest both a naive-UTC and an aware-UTC timestamp in the same file.
+        Pre-fix, comparison at line 426 raised TypeError, caught by the outer
+        except at line 424, silently freezing _last_synced_event_ts. Post-fix,
+        both are coerced and the newest one wins.
+        """
+        from datetime import date as _date
+
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        syncer._ensure_pool = AsyncMock()
+        syncer._insert_batch = AsyncMock()
+
+        jsonl = tmp_path / f"audit-{_date.today()}.jsonl"
+        _make_jsonl(
+            jsonl,
+            [
+                _audit_entry(timestamp="2026-04-17T04:00:00"),  # naive UTC
+                _audit_entry(timestamp="2026-04-17T05:00:00+00:00"),  # aware UTC
+            ],
+        )
+
+        # Pre-fix this would succeed silently with _last_synced_event_ts=None.
+        # Post-fix it updates to the newer aware ts.
+        await syncer._tick()
+
+        assert syncer._last_synced_event_ts is not None
+        assert syncer._last_synced_event_ts.tzinfo is not None
+        assert syncer._last_synced_event_ts.hour == 5, (
+            "Newest ts (05:00) should win; pre-fix this was None because "
+            "naive-vs-aware comparison raised TypeError and was swallowed."
+        )
+
+
+class TestB4_RowsTotalMetricAfterCursor:
+    """B4: `audit_sync_rows_total{success}` previously incremented inside
+    _insert_batch, before the cursor was persisted. A crash between executemany
+    and _save_cursor re-ran the whole file on the next tick; asyncpg does not
+    distinguish ON CONFLICT skips from real inserts, so the counter inflated
+    on every replay. Fix: increment only after _save_cursor succeeds.
+    """
+
+    @pytest.mark.asyncio
+    async def test_insert_batch_does_not_increment_rows_total_directly(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """_insert_batch must NOT touch rows_total{success} anymore."""
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+
+        # Capture any calls to the metric
+        metric_calls = []
+
+        class _FakeCounter:
+            def __init__(self, label):
+                self._label = label
+
+            def inc(self, n=1):
+                metric_calls.append((self._label, n))
+
+        class _FakeLabels:
+            def labels(self, *, status):
+                return _FakeCounter(status)
+
+        fake_metrics = MagicMock()
+        fake_metrics.audit_sync_rows_total = _FakeLabels()
+        fake_metrics.audit_sync_batches_total = _FakeLabels()
+        monkeypatch.setattr(audit_sync, "_metrics", fake_metrics)
+
+        # Mock pool + conn so executemany succeeds
+        conn = AsyncMock()
+        conn.executemany = AsyncMock(return_value=None)
+
+        class _FakeAcquire:
+            async def __aenter__(self_inner):
+                return conn
+
+            async def __aexit__(self_inner, *a):
+                return None
+
+        class _FakePool:
+            def acquire(self_inner):
+                return _FakeAcquire()
+
+        syncer._pool = _FakePool()
+
+        await syncer._insert_batch([_audit_entry()])
+
+        # No success increment should happen inside _insert_batch
+        success_calls = [c for c in metric_calls if c[0] == "success"]
+        assert success_calls == [], (
+            f"_insert_batch should no longer increment rows_total{{success}} "
+            f"(moved to _sync_file post-_save_cursor); got {success_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sync_file_increments_rows_total_after_cursor_save(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """_sync_file must increment rows_total{success} AFTER _save_cursor."""
+        from datetime import date as _date
+
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        syncer._ensure_pool = AsyncMock()
+        syncer._insert_batch = AsyncMock()
+
+        increments: list[int] = []
+
+        class _FakeCounter:
+            def inc(self, n):
+                increments.append(n)
+
+        class _FakeLabels:
+            def labels(self, *, status):
+                return _FakeCounter() if status == "success" else MagicMock()
+
+        fake_metrics = MagicMock()
+        fake_metrics.audit_sync_rows_total = _FakeLabels()
+        fake_metrics.audit_sync_malformed_lines_total = MagicMock()
+        monkeypatch.setattr(audit_sync, "_metrics", fake_metrics)
+
+        jsonl = tmp_path / f"audit-{_date.today()}.jsonl"
+        _make_jsonl(jsonl, [_audit_entry(documento_id=f"D{i}") for i in range(3)])
+
+        await syncer._sync_file(jsonl)
+
+        # Cursor advanced
+        assert audit_sync._load_cursor(jsonl) == jsonl.stat().st_size
+        # And exactly one increment of 3 rows happened (after the cursor save)
+        assert increments == [3], (
+            f"Expected exactly one rows_total{{success}}.inc(3) call after "
+            f"_save_cursor; got {increments}"
+        )
+
+
+class TestB5_PgVersionGuard:
+    """B5: audit_entries UNIQUE NULLS NOT DISTINCT requires Postgres 15+; older
+    servers silently ignore the clause and NULLs never match, producing
+    duplicate rows for any event with NULL documento_id. Fail loud instead.
+    """
+
+    @pytest.mark.asyncio
+    async def test_verify_pg_version_disables_syncer_on_pg14(self, tmp_path: Path):
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+
+        conn = AsyncMock()
+        conn.fetchval = AsyncMock(return_value=140000)  # PG 14
+
+        class _FakeAcquire:
+            async def __aenter__(self_inner):
+                return conn
+
+            async def __aexit__(self_inner, *a):
+                return None
+
+        pool_closed = False
+
+        class _FakePool:
+            def acquire(self_inner):
+                return _FakeAcquire()
+
+            async def close(self_inner):
+                nonlocal pool_closed
+                pool_closed = True
+
+        syncer._pool = _FakePool()
+
+        with pytest.raises(RuntimeError, match="Postgres >= 15"):
+            await syncer._verify_pg_version()
+
+        assert syncer._disabled is True
+        assert syncer.shutdown.is_set()
+        assert pool_closed
+        assert syncer._pool is None
+
+    @pytest.mark.asyncio
+    async def test_verify_pg_version_passes_on_pg15(self, tmp_path: Path):
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+
+        conn = AsyncMock()
+        conn.fetchval = AsyncMock(return_value=150000)  # PG 15
+
+        class _FakeAcquire:
+            async def __aenter__(self_inner):
+                return conn
+
+            async def __aexit__(self_inner, *a):
+                return None
+
+        class _FakePool:
+            def acquire(self_inner):
+                return _FakeAcquire()
+
+        original_pool = _FakePool()
+        syncer._pool = original_pool
+
+        await syncer._verify_pg_version()
+
+        assert syncer._disabled is False
+        assert not syncer.shutdown.is_set()
+        assert syncer._pool is original_pool  # pool retained on success
+
+    @pytest.mark.asyncio
+    async def test_tick_early_returns_when_disabled(self, tmp_path: Path):
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        syncer._disabled = True
+        syncer._ensure_pool = AsyncMock()
+        syncer._insert_batch = AsyncMock()
+
+        from datetime import date as _date
+
+        jsonl = tmp_path / f"audit-{_date.today()}.jsonl"
+        _make_jsonl(jsonl, [_audit_entry()])
+
+        await syncer._tick()
+
+        # Must not reach pool creation or insert
+        syncer._ensure_pool.assert_not_awaited()
+        syncer._insert_batch.assert_not_awaited()

@@ -456,7 +456,9 @@ async def download_batch(
                 if not mni_available and pje_client is None:
                     if all_files:
                         ps.docs_baixados = len(all_files)
-                        ps.tamanho_bytes = sum(f["tamanhoBytes"] for f in all_files)
+                        ps.tamanho_bytes = sum(
+                            int(f.get("tamanhoBytes", 0) or 0) for f in all_files
+                        )
                         ps.status = "done"
                         ps.phase = "done"
                         ps.phase_detail = f"GDrive: {len(all_files)} docs"
@@ -506,7 +508,9 @@ async def download_batch(
                         all_files = _merge_downloaded_files(all_files, pje_files)
                         if all_files:
                             ps.docs_baixados = len(all_files)
-                            ps.tamanho_bytes = sum(f["tamanhoBytes"] for f in all_files)
+                            ps.tamanho_bytes = sum(
+                                int(f.get("tamanhoBytes", 0) or 0) for f in all_files
+                            )
                             ps.status = "done"
                             ps.phase = "done"
                             ps.phase_detail = f"Playwright: {len(all_files)} docs"
@@ -514,6 +518,7 @@ async def download_batch(
                             metrics.batch_processos_total.labels(status="done").inc()
                             metrics.batch_docs_total.inc(ps.docs_baixados)
                             metrics.batch_bytes_total.inc(ps.tamanho_bytes)
+                            progress.save(force=True)
                             return
                         ps.status = "failed"
                         ps.phase = "failed"
@@ -552,7 +557,9 @@ async def download_batch(
                             gdrive_docs=len(all_files),
                         )
                         ps.docs_baixados = len(all_files)
-                        ps.tamanho_bytes = sum(f["tamanhoBytes"] for f in all_files)
+                        ps.tamanho_bytes = sum(
+                            int(f.get("tamanhoBytes", 0) or 0) for f in all_files
+                        )
                         ps.status = "done"
                         ps.phase = "done"
                         ps.phase_detail = (
@@ -654,7 +661,9 @@ async def download_batch(
                         )
 
                 ps.docs_baixados = len(all_files)
-                ps.tamanho_bytes = sum(f["tamanhoBytes"] for f in all_files)
+                ps.tamanho_bytes = sum(
+                    int(f.get("tamanhoBytes", 0) or 0) for f in all_files
+                )
                 ps.status = "done"
                 ps.phase = "done"
                 ps.phase_detail = (
