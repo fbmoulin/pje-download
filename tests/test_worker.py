@@ -1255,3 +1255,169 @@ class TestMniCancelledPropagation:
         assert files is None
         assert anexos == 0
         assert total == 0
+
+
+# ─────────────────────────────────────────────
+# Browser fallback (strategy 3) — audit P0.2
+# worker.py:1003-1361 was 0% covered. These are characterization tests
+# that pin current behaviour at the Playwright-Page boundary; each one
+# tightens a narrow path without needing a real browser.
+# ─────────────────────────────────────────────
+
+
+def _fake_locator(count: int = 0, visible: bool = True):
+    """Build a Playwright-locator stub with ``.first``, ``.count()``,
+    ``.is_visible()``, ``.click()``, ``.fill()``, ``.get_attribute()``.
+    """
+    loc = MagicMock()
+    loc.count = AsyncMock(return_value=count)
+    loc.is_visible = AsyncMock(return_value=visible)
+    loc.click = AsyncMock()
+    loc.fill = AsyncMock()
+    loc.get_attribute = AsyncMock(return_value=None)
+    loc.all = AsyncMock(return_value=[])
+    loc.first = loc  # chainable .first
+    loc.locator = MagicMock(return_value=loc)
+    return loc
+
+
+class TestDownloadViaBrowser:
+    @pytest.mark.asyncio
+    async def test_returns_none_when_session_not_initialized(self, tmp_path):
+        """Without `page` + `context`, the browser strategy is a no-op."""
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.page = None
+        worker.context = None
+
+        result = await worker._download_via_browser(
+            "5000001-00.2024.8.08.0001", tmp_path
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_happy_path_returns_full_download_and_fires_progress(self, tmp_path):
+        """When the full-download button succeeds the result short-circuits
+        past the individual-download fallback.
+        """
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.page = AsyncMock()
+        worker.context = AsyncMock()
+
+        full_files = [
+            {"nome": "completo.pdf", "tipo": "completo", "tamanhoBytes": 12345}
+        ]
+        worker._try_full_download_button = AsyncMock(return_value=full_files)
+        worker._download_docs_individually = AsyncMock()  # must NOT be called
+        progress = AsyncMock()
+
+        result = await worker._download_via_browser(
+            "5000001-00.2024.8.08.0001",
+            tmp_path,
+            progress_cb=progress,
+        )
+
+        assert result == full_files
+        worker._download_docs_individually.assert_not_awaited()
+        progress.assert_awaited_once()
+        kwargs = progress.await_args.kwargs
+        assert kwargs["completed"] == 1
+        assert kwargs["total"] == 1
+        assert kwargs["local_bytes"] == 12345
+
+    @pytest.mark.asyncio
+    async def test_allow_full_download_false_skips_to_individual(self, tmp_path):
+        """When called for the anexos top-up we must NOT redownload the whole
+        process; go straight to individual documents.
+        """
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.page = AsyncMock()
+        worker.context = AsyncMock()
+        worker._try_full_download_button = AsyncMock(
+            return_value=["should-not-be-used"]
+        )
+        worker._download_docs_individually = AsyncMock(
+            return_value=[{"nome": "anexo.pdf"}]
+        )
+
+        result = await worker._download_via_browser(
+            "5000001-00.2024.8.08.0001",
+            tmp_path,
+            allow_full_download=False,
+        )
+
+        worker._try_full_download_button.assert_not_awaited()
+        worker._download_docs_individually.assert_awaited_once()
+        assert result == [{"nome": "anexo.pdf"}]
+
+    @pytest.mark.asyncio
+    async def test_full_download_empty_result_falls_through_to_individual(
+        self, tmp_path
+    ):
+        """If strategy 3a returns [] or None, strategy 3b is attempted."""
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.page = AsyncMock()
+        worker.context = AsyncMock()
+        worker._try_full_download_button = AsyncMock(return_value=None)
+        worker._download_docs_individually = AsyncMock(return_value=[{"nome": "x.pdf"}])
+
+        result = await worker._download_via_browser(
+            "5000001-00.2024.8.08.0001", tmp_path
+        )
+        assert result == [{"nome": "x.pdf"}]
+        worker._download_docs_individually.assert_awaited_once()
+
+
+class TestTryFullDownloadButton:
+    @pytest.mark.asyncio
+    async def test_captcha_after_first_navigation_aborts(self, tmp_path):
+        """If PJe shows a CAPTCHA the method returns None — the strategy
+        cascade should then try the next option, not retry.
+        """
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.page = AsyncMock()
+        worker.page.locator = MagicMock(return_value=_fake_locator())
+        worker._detect_captcha = AsyncMock(return_value=True)
+
+        result = await worker._try_full_download_button(
+            "5000001-00.2024.8.08.0001", tmp_path
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_button_not_found_returns_none(self, tmp_path, monkeypatch):
+        """When every download-button selector yields ``count=0`` the
+        method exits cleanly without a spurious click.
+        """
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.page = AsyncMock()
+        # Every locator call returns "no elements"
+        worker.page.locator = MagicMock(return_value=_fake_locator(count=0))
+        worker._detect_captcha = AsyncMock(return_value=False)
+        # _try_full_download_button does a couple of asyncio.sleep — shortcut
+        monkeypatch.setattr(w.asyncio, "sleep", AsyncMock())
+
+        result = await worker._try_full_download_button(
+            "5000001-00.2024.8.08.0001", tmp_path
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_is_swallowed_and_logged(self, tmp_path):
+        """Any error during navigation is logged and returns None — it must
+        NEVER propagate out of the strategy cascade.
+        """
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.page = AsyncMock()
+        worker.page.goto = AsyncMock(side_effect=RuntimeError("net broke"))
+
+        result = await worker._try_full_download_button(
+            "5000001-00.2024.8.08.0001", tmp_path
+        )
+        assert result is None
