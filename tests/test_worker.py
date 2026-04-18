@@ -615,6 +615,60 @@ class TestConsumeQueueShutdown:
             "kratos:pje:results:batch-1"
         )
 
+    @pytest.mark.asyncio
+    async def test_session_expired_mid_job_exits_loop(self):
+        """consume_queue must stop after a job returns status='session_expired' when MNI unavailable.
+
+        Without this guard the worker would block indefinitely retrying jobs
+        with an invalidated PJe session, producing cascading failures.
+        Line ~1643 in worker.py: `if result_data["status"] == "session_expired" and self.mni_client is None`.
+        """
+        import asyncio
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        shutdown = asyncio.Event()
+
+        called_count = 0
+
+        async def blpop_one_job(*args, **kwargs):
+            nonlocal called_count
+            called_count += 1
+            return (
+                "kratos:pje:jobs",
+                json.dumps(
+                    {
+                        "jobId": "J-expire",
+                        "numeroProcesso": "1234567-00.2024.8.08.0001",
+                    }
+                ),
+            )
+
+        mock_r.blpop = blpop_one_job
+        worker.redis = mock_r
+        worker.mni_client = None  # no MNI fallback — session expiry must break loop
+        worker.is_session_expired = MagicMock(return_value=False)
+        worker.download_process = AsyncMock(
+            return_value={
+                "jobId": "J-expire",
+                "numeroProcesso": "1234567-00.2024.8.08.0001",
+                "status": "session_expired",
+                "arquivosDownloaded": [],
+                "errorMessage": "session expired",
+            }
+        )
+        worker._publish_result = AsyncMock()
+
+        with patch.object(w, "log", MagicMock()):
+            await worker.consume_queue(shutdown)
+
+        # Must have processed exactly one job then exited (not looped forever).
+        assert called_count == 1, (
+            f"Expected loop to exit after session_expired, but blpop was called {called_count} times"
+        )
+        worker._publish_result.assert_awaited_once()
+
 
 class TestPublishResult:
     """_publish_result() retries on Redis failure."""

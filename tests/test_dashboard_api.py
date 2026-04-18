@@ -685,6 +685,32 @@ class TestRateLimitMiddleware:
         )
         assert ip == spoofed_ip
 
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_from_same_ip_rate_limited(self):
+        """Concurrent asyncio.gather requests from one IP must trigger 429.
+
+        Sequential-loop tests (above) can't catch bucket-update ordering bugs
+        because coroutines only interleave at await points. gather() exercises
+        the sliding-window update under realistic concurrent scheduling.
+        """
+        ip = "10.77.77.77"
+        dashboard_api._rate_buckets.pop(ip, None)
+        dashboard_api._rate_bucket_last_seen.pop(ip, None)
+
+        async def one_request():
+            return await dashboard_api.rate_limit_middleware(
+                DummyRequest(method="POST", remote=ip),
+                _ok_handler,
+            )
+
+        # Fire 15 concurrent POST requests — RATE_LIMIT_MAX is 10, so ≥5 must be 429.
+        responses = await asyncio.gather(*[one_request() for _ in range(15)])
+        statuses = [r.status for r in responses]
+        assert statuses.count(429) >= 5, f"Expected ≥5 rate-limited, got: {statuses}"
+
+        dashboard_api._rate_buckets.pop(ip, None)
+        dashboard_api._rate_bucket_last_seen.pop(ip, None)
+
 
 # ─────────────────────────────────────────────
 # CORS middleware
