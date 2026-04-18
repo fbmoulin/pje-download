@@ -1,0 +1,19 @@
+# blackbox_exporter 0.25 modules.
+# Spec: docs/superpowers/specs/2026-04-18-grafana-dashboard-design.md §12
+
+modules:
+  # Standard 2xx+503 — 503 is an expected signal from /health when the
+  # Sprint-11 circuit breaker opens. Keeping probe_success=1 on 503
+  # prevents a spurious "probe failed" alert from firing alongside
+  # PjeWorkerCircuitBreakerOpen (same root cause, double page).
+  http_2xx_or_503:
+    prober: http
+    timeout: 5s
+    http:
+      valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+      valid_status_codes: [200, 503]
+      method: GET
+      preferred_ip_protocol: ip4
+      follow_redirects: false
+      fail_if_ssl: false
+      fail_if_not_ssl: false

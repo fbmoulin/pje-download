@@ -1,0 +1,69 @@
+# pje-download alert rules — Grafana dashboard P0.4
+# Evaluated every 30s by Prometheus. Labels: severity, app=pje-download.
+#
+# Spec: docs/superpowers/specs/2026-04-18-grafana-dashboard-design.md §7
+
+groups:
+  - name: pje-download.audit-sync
+    interval: 30s
+    rules:
+      - alert: PjeAuditSyncLagHigh
+        expr: pje_audit_sync_lag_seconds > 60
+        for: 2m
+        labels:
+          severity: warning
+          app: pje-download
+        annotations:
+          summary: "Audit sync lag > 60s ({{ $value | humanizeDuration }})"
+          description: "Railway sync atrás do JSON-L local. Railway degradado ou syncer travado."
+          runbook: "docker compose logs dashboard | grep audit_sync"
+
+      - alert: PjeAuditSyncBatchesFailing
+        expr: increase(pje_audit_sync_batches_total{status="failed"}[10m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+          app: pje-download
+        annotations:
+          summary: "Railway audit sync failing ({{ $value }} batches / 10min)"
+          description: "Railway Postgres indisponível ou credenciais inválidas. JSON-L local continua sendo source of truth."
+          runbook: "check Railway status; revisar logs audit_sync; verificar DATABASE_URL"
+
+  - name: pje-download.worker
+    interval: 30s
+    rules:
+      - alert: PjeWorkerDeadLetters
+        expr: increase(pje_worker_dead_letters_total[5m]) > 0
+        for: 0s
+        labels:
+          severity: warning
+          app: pje-download
+        annotations:
+          summary: "Worker dead-lettered {{ $value }} payloads (reason: {{ $labels.reason }})"
+          description: "Redis queue recebeu payload malformado. Investigar produtor."
+          runbook: "redis-cli LRANGE pje:dead_letter 0 -1"
+
+  - name: pje-download.health
+    interval: 30s
+    rules:
+      - alert: PjeDashboardDown
+        expr: up{job="pje-dashboard"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          app: pje-download
+        annotations:
+          summary: "pje-dashboard :8007 não responde ao scrape Prometheus"
+          description: "Container down, Tailscale offline, ou aiohttp travado. /metrics e /healthz fora."
+          runbook: "ssh pje-vps; docker ps; docker logs pje-dashboard --tail 100"
+
+      - alert: PjeWorkerCircuitBreakerOpen
+        expr: probe_http_status_code{job="pje-worker-probe"} == 503
+        for: 1m
+        labels:
+          severity: critical
+          app: pje-download
+        annotations:
+          summary: "pje-worker :8006/health retorna 503 (circuit breaker aberto)"
+          description: "Sprint 11 blpop circuit breaker: 20 falhas consecutivas de BLPOP marcaram _health_status=redis_unreachable. Worker não processa jobs."
+          runbook: "docker logs pje-redis; docker restart pje-redis; docker logs pje-worker --tail 100"

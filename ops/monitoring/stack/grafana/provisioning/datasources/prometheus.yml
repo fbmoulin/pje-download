@@ -1,0 +1,13 @@
+# Grafana 11 datasource provider — single Prometheus instance from the stack.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus-default
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: "30s"
+      httpMethod: POST

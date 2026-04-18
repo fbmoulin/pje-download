@@ -181,24 +181,24 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 Tudo acionável-via-código das auditorias técnicas de 2026-04-17 e 2026-04-18 está em branches/PRs ativos. Restante:
 
-1. **Deploy prod (audit_sync)** — SSH na VPS, setar `AUDIT_SYNC_ENABLED=true` + `DATABASE_URL=<audit_writer URL>`, restart do container `pje-dashboard`. Validado localmente via docker-compose + Playwright.
-2. **Grafana dashboard (P0.4)** — PR #11 (`feature/grafana-dashboard-p04`) implementa o stack Prometheus+Grafana+Alertmanager+blackbox no openclaw VPS. Pendente: merge + deploy openclaw via `ops/monitoring/stack/DEPLOY.md` + criar `@kaiOpsBot` no BotFather.
+1. **Deploy prod** — SSH na VPS, setar `AUDIT_SYNC_ENABLED=true` + `DATABASE_URL=<audit_writer URL>`, restart do container `pje-dashboard`. Validado localmente via docker-compose + Playwright.
+2. ~~**Grafana dashboard** (fecha P0.4)~~ — DONE 2026-04-18. Stack (Prometheus 2.55 + Grafana 11.3 + Alertmanager 0.27 + blackbox_exporter 0.25) provisionada no openclaw VPS via `ops/monitoring/stack/` (docker-compose). Scrape cross-host via Tailscale. 4 scrape jobs + 5 alert rules + 8 panels. Telegram `@kaiOpsBot` dedicado. Spec: `docs/superpowers/specs/2026-04-18-grafana-dashboard-design.md`.
 3. **Sprint 3B (R1)** — Split `worker.download_process` (438-line mega-method) em phase-methods + `DownloadContext` dataclass. +8 phase-isolation tests. Plan: `docs/superpowers/plans/2026-04-18-audit-remediation.md#sprint-3b`. ~3-4h focused work.
 4. **Sprint 4 (A1/A2)** — Arquitetural (deferido por design):
    - A1: Typed Redis queue protocol (`JobMessage`, `ResultMessage` dataclasses em novo `protocol.py`). Schedule quando um novo campo precisar ser adicionado.
    - A2: `dashboard_api` state globals → request-scoped `AppContext`. Schedule quando test-isolation for um problema real.
 
-## PR Stack (2026-04-18)
+## Observability
 
-```
-master
-  ├── PR #11 (feature/grafana-dashboard-p04) — Grafana monitoring stack
-  ├── PR #12 (fix/audit-batch-bugs) — Sprint 12 (5 bugs)
-  ├── PR #13 (refactor/sprint2-polish, stacked on #12) — Sprint 13 (helpers + config)
-  └── PR #14 (refactor/sprint3-runbatch-retry, stacked on #13) — Sprint 14 (_run_batch + AsyncRetry)
-```
-
-Merge order: #12 → #13 → #14 → #11 (orthogonal). Test count trajectory: 377 → 388 → 388 → 398 → 399 (PR #11 adds worker `/metrics` test).
+- **Stack:** Prometheus + Grafana + Alertmanager + blackbox_exporter on openclaw VPS.
+- **Scrape transport:** Tailscale overlay; no public `/metrics` exposure.
+- **Dashboard access:** SSH tunnel — `ssh -L 3000:localhost:3000 openclaw-vps`, then `http://localhost:3000`.
+- **Alert channel:** Telegram `@kaiOpsBot` (separate from `@clawvirtualagentbot`).
+- **Worker `/metrics` endpoint:** exposed at `:8006/metrics` via `worker.py` `_metrics_handler`. The bind-host override `HEALTH_BIND_HOST=0.0.0.0` in `docker-compose.yml:112` é load-bearing — do NOT revert to the `config.py` default of `127.0.0.1`, or all `:8006/*` scrapes break.
+- **Adding another app:** see `ops/monitoring/README.md` "Adding another app".
+- **Deploy:** `ops/monitoring/stack/DEPLOY.md`.
+- **Static validator:** `./ops/monitoring/verify.sh` before every config commit.
+- **Known cosmetic issue:** Grafana 11.3 lands the dashboard in "General" folder rather than `pje-download` folder. Harmless; fix post-deploy via UI or pre-create folder via `POST /api/folders`.
 
 ## Paths
 - WSL: `/mnt/c/projetos-2026/pje-download`

@@ -8,3 +8,6 @@ downloads/
 *.session.json
 .ruff_cache/
 .worktrees/
+
+# Local-dev override for ops/monitoring/stack (never committed)
+ops/monitoring/stack/docker-compose.override.yml
