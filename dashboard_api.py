@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
-import random
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -37,6 +36,7 @@ from aiohttp import web
 import redis.asyncio as redis
 import structlog
 import metrics
+from async_retry import AsyncRetry
 from file_utils import total_bytes
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.dashboard-api")
@@ -95,12 +95,33 @@ class BatchJob:
     error: str | None = None
 
 
+@dataclass
+class BatchPollState:
+    """Mutable state for the result-polling phase of ``DashboardState._run_batch``.
+
+    Introduced in Sprint 3 R2 when _run_batch was split into enqueue+poll+finalize
+    phases. Encapsulates the loop-scoped state that used to be local variables
+    scattered inside the 170-line method body.
+    """
+
+    pending: set[str]
+    last_result_at: float  # time.monotonic()
+    serialized_payloads: dict[str, str]
+    reply_queue: str
+    timed_out: bool = False
+    fatal_error: str | None = None
+
+
 MAX_BATCH_SIZE = 500  # máximo de processos por batch
 MAX_BATCH_HISTORY = 100  # max completed batches kept in memory
 # RESULT_WAIT_TIMEOUT_SECS moved to config.py (Sprint 2 Q4 — env-configurable)
 _RPUSH_MAX_ATTEMPTS = 3  # audit P1: transient Redis failure should not kill a batch
 
 TERMINAL_PROCESS_STATUSES = {"done", "failed", "partial"}
+
+# Worker-reported statuses that require aborting the rest of the batch; other
+# in-flight processos are LREM-ed from the work queue and marked failed.
+_FATAL_WORKER_STATUSES = frozenset({"session_expired", "captcha_required"})
 
 
 def _safe_load_json(path: Path) -> dict | None:
@@ -139,31 +160,18 @@ async def _rpush_with_retry(client, key: str, *values: str):
 
     Mirrors ``worker.py:_publish_result``'s pattern. Only retries on Redis
     connection/timeout errors — other exceptions propagate immediately.
-    """
-    last_exc: Exception | None = None
-    for attempt in range(_RPUSH_MAX_ATTEMPTS):
-        try:
-            return await client.rpush(key, *values)
-        except Exception as exc:  # noqa: BLE001 — narrowed below
-            import redis.asyncio as redis_asyncio
 
-            if not isinstance(
-                exc, (redis_asyncio.ConnectionError, redis_asyncio.TimeoutError)
-            ):
-                raise
-            last_exc = exc
-            if attempt == _RPUSH_MAX_ATTEMPTS - 1:
-                break
-            delay = min(2**attempt + random.uniform(0, 1), 10)
-            log.warning(
-                "dashboard.rpush.retry",
-                key=key,
-                attempt=attempt + 1,
-                delay_s=delay,
-            )
-            await asyncio.sleep(delay)
-    assert last_exc is not None
-    raise last_exc
+    Sprint 3 R3: delegates to :class:`async_retry.AsyncRetry`. Historical
+    semantics preserved: 3 attempts, 10s backoff cap, re-raise on exhaustion.
+    """
+    retry = AsyncRetry(
+        attempts=_RPUSH_MAX_ATTEMPTS,
+        backoff_cap_secs=10,
+        retry_on=(redis.ConnectionError, redis.TimeoutError),
+        log_event="dashboard.rpush.retry",
+        logger=log,
+    )
+    return await retry.run(lambda: client.rpush(key, *values), key=key)
 
 
 class DashboardState:
@@ -604,157 +612,239 @@ class DashboardState:
             "pending": max(total - done - failed - partial, 0),
         }
 
-    async def _run_batch(self, job: BatchJob, *, enqueue_jobs: bool = True):
-        """Executa um batch publicando jobs Redis e agregando resultados do worker."""
-        reply_queue = self._result_queue(job.id)
-        payloads_by_processo = {
-            numero: self._batch_job_payload(job, numero) for numero in job.processos
+    async def _enqueue_batch(
+        self,
+        job: BatchJob,
+        redis_client,
+        *,
+        serialized_payloads: dict[str, str],
+        reply_queue: str,
+        enqueue_jobs: bool,
+    ) -> BatchPollState:
+        """Phase 1 of ``_run_batch``: publish payloads + build initial poll state.
+
+        Side effects (order matters — preserved from pre-split behaviour):
+        1. Flip job.status to "running" and stamp started_at if missing.
+        2. When ``enqueue_jobs`` OR job.progress is empty: rebuild initial
+           progress, persist it, and DELETE the reply queue so we start fresh.
+        3. Persist the active-batch marker (recovery breadcrumb).
+        4. RPUSH serialized payloads to ``kratos:pje:jobs`` (retry-wrapped).
+
+        Returns a fresh :class:`BatchPollState` whose ``pending`` set excludes
+        any processo that already has a terminal status (resume semantics).
+        """
+        job.status = "running"
+        job.started_at = job.started_at or datetime.now(UTC).isoformat()
+
+        if enqueue_jobs or not job.progress:
+            job.progress = self._build_initial_progress(job)
+            self._persist_progress(job)
+            await redis_client.delete(reply_queue)
+        self._persist_active_batch(job)
+        if enqueue_jobs and serialized_payloads:
+            await _rpush_with_retry(
+                redis_client,
+                "kratos:pje:jobs",
+                *serialized_payloads.values(),
+            )
+
+        progress_processos = job.progress.get("processos", {})
+        pending = {
+            numero
+            for numero in job.processos
+            if progress_processos.get(numero, {}).get("status")
+            not in TERMINAL_PROCESS_STATUSES
         }
+        return BatchPollState(
+            pending=pending,
+            last_result_at=time.monotonic(),
+            serialized_payloads=serialized_payloads,
+            reply_queue=reply_queue,
+        )
+
+    async def _poll_results_loop(
+        self,
+        job: BatchJob,
+        redis_client,
+        state: BatchPollState,
+    ) -> None:
+        """Phase 2 of ``_run_batch``: drain reply queue until terminal or timeout.
+
+        The loop handles three message shapes:
+        - ``eventType == "progress"``: an in-flight status update. Merge into
+          job.progress, reset the idle timeout, persist, continue.
+        - ``numeroProcesso`` in pending: terminal result for that processo.
+          Apply, persist, and if the worker reported a fatal status (session
+          expired / captcha required) abort the batch — LREM remaining payloads
+          from the work queue so another worker doesn't pick them up, and mark
+          each as failed with the fatal reason.
+        - ``numeroProcesso`` NOT in pending: stale/unsolicited, ignore.
+
+        Idle-timeout path: if no message arrives for RESULT_WAIT_TIMEOUT_SECS,
+        mark remaining processos as failed with a timeout message and return.
+
+        Mutates ``state`` in place: pending, last_result_at, timed_out, fatal_error.
+        """
+        while state.pending:
+            item = await redis_client.blpop(
+                state.reply_queue, timeout=RESULT_POLL_BLPOP_TIMEOUT_SECS
+            )
+            if not item:
+                if time.monotonic() - state.last_result_at > RESULT_WAIT_TIMEOUT_SECS:
+                    timeout_error = (
+                        f"Worker timeout: batch sem resultados por "
+                        f"{RESULT_WAIT_TIMEOUT_SECS}s"
+                    )
+                    self._fail_remaining_processes(job, state.pending, timeout_error)
+                    job.error = timeout_error
+                    state.timed_out = True
+                    metrics.dashboard_batch_timeouts_total.inc()
+                    log.error(
+                        "dashboard.batch.result_timeout",
+                        batch_id=job.id,
+                        pending=len(state.pending),
+                    )
+                    return
+                continue
+
+            _, result_json = item
+            try:
+                result = json.loads(result_json)
+            except json.JSONDecodeError as exc:
+                log.warning(
+                    "dashboard.batch.malformed_result",
+                    batch_id=job.id,
+                    error=str(exc),
+                )
+                continue
+            if result.get("eventType") == "progress":
+                self._apply_progress_event(job, result)
+                state.last_result_at = time.monotonic()
+                self._persist_progress(job)
+                self._persist_active_batch(job)
+                continue
+
+            numero = result.get("numeroProcesso")
+            if numero not in state.pending:
+                continue
+
+            state.pending.remove(numero)
+            state.last_result_at = time.monotonic()
+            worker_status = self._apply_result(job, result)
+            self._persist_progress(job)
+            self._persist_active_batch(job)
+
+            if worker_status in _FATAL_WORKER_STATUSES and state.pending:
+                fatal_error = result.get("errorMessage") or worker_status
+                for pending_numero in state.pending:
+                    payload = state.serialized_payloads.get(pending_numero)
+                    if payload:
+                        await redis_client.lrem("kratos:pje:jobs", 0, payload)
+                self._fail_remaining_processes(job, state.pending, fatal_error)
+                job.error = fatal_error
+                state.fatal_error = fatal_error
+                state.pending.clear()
+                self._persist_progress(job)
+                self._persist_active_batch(job)
+                return
+
+    def _finalize_batch(self, job: BatchJob) -> None:
+        """Phase 3 of ``_run_batch``: compute status, persist report, emit metrics.
+
+        Status ladder (preserved exactly from pre-split):
+        - ``failed``: some failed, zero done AND zero partial (total washout).
+        - ``partial``: some failed OR some partial (mixed outcomes).
+        - ``done``: everyone succeeded.
+
+        Always runs after the poll loop, regardless of how that loop exited
+        (all-terminal / timeout / fatal). Job-level error is only auto-filled
+        if the caller didn't already set one (timeout/fatal paths do).
+        """
+        job.finished_at = datetime.now(UTC).isoformat()
+        summary = job.progress.get("summary", {})
+        done = int(summary.get("done", 0) or 0)
+        failed = int(summary.get("failed", 0) or 0)
+        partial = int(summary.get("partial", 0) or 0)
+
+        if failed > 0 and done == 0 and partial == 0:
+            job.status = "failed"
+            if not job.error:
+                first_err = next(
+                    (
+                        proc.get("erro")
+                        for proc in job.progress.get("processos", {}).values()
+                        if proc.get("erro")
+                    ),
+                    "All processes failed",
+                )
+                job.error = first_err
+        elif failed > 0 or partial > 0:
+            job.status = "partial"
+            if not job.error:
+                parts = []
+                if failed > 0:
+                    parts.append(f"{failed} falharam")
+                if partial > 0:
+                    parts.append(f"{partial} incompletos")
+                job.error = ", ".join(parts)
+        else:
+            job.status = "done"
+
+        self._persist_progress(job)
+        self._persist_report(job)
+        self._clear_active_batch(job.id)
+        metrics.dashboard_batches_total.labels(status=job.status).inc()
+        procs = job.progress.get("processos", {}).values()
+        total_docs = sum(int(proc.get("docs_baixados", 0) or 0) for proc in procs)
+        tot_bytes = sum(int(proc.get("tamanho_bytes", 0) or 0) for proc in procs)
+        if total_docs:
+            metrics.batch_docs_total.inc(total_docs)
+        if tot_bytes:
+            metrics.batch_bytes_total.inc(tot_bytes)
+        metrics.batch_processos_total.labels(status=job.status).inc(len(job.processos))
+        metrics.dashboard_active_batches.set(0)
+
+        log.info(
+            "dashboard.batch.complete",
+            batch_id=job.id,
+            status=job.status,
+            done=done,
+            failed=failed,
+        )
+        self._evict_old_batches()
+
+    async def _run_batch(self, job: BatchJob, *, enqueue_jobs: bool = True):
+        """Executa um batch publicando jobs Redis e agregando resultados do worker.
+
+        Three-phase orchestrator (Sprint 3 R2 — was a 170-line god-method):
+
+        1. :meth:`_enqueue_batch` — publish payloads, reset progress, compute
+           initial ``BatchPollState`` with the pending-processo set.
+        2. :meth:`_poll_results_loop` — drain Redis reply queue, dispatch
+           progress events vs terminal results, handle fatal worker statuses.
+        3. :meth:`_finalize_batch` — aggregate counts, set final job.status,
+           persist report, emit Prometheus metrics.
+
+        The outer ``try/except`` stays here so any exception from any phase
+        lands the batch in a consistent ``failed`` state with persisted progress.
+        """
+        reply_queue = self._result_queue(job.id)
         serialized_payloads = {
-            numero: json.dumps(payload, ensure_ascii=False)
-            for numero, payload in payloads_by_processo.items()
+            numero: json.dumps(self._batch_job_payload(job, numero), ensure_ascii=False)
+            for numero in job.processos
         }
 
         try:
             redis_client = await self.get_redis()
-            job.status = "running"
-            job.started_at = job.started_at or datetime.now(UTC).isoformat()
-
-            if enqueue_jobs or not job.progress:
-                job.progress = self._build_initial_progress(job)
-                self._persist_progress(job)
-                await redis_client.delete(reply_queue)
-            self._persist_active_batch(job)
-            if enqueue_jobs and serialized_payloads:
-                await _rpush_with_retry(
-                    redis_client,
-                    "kratos:pje:jobs",
-                    *serialized_payloads.values(),
-                )
-
-            progress_processos = job.progress.get("processos", {})
-            pending = {
-                numero
-                for numero in job.processos
-                if progress_processos.get(numero, {}).get("status")
-                not in TERMINAL_PROCESS_STATUSES
-            }
-            last_result_at = time.monotonic()
-
-            while pending:
-                item = await redis_client.blpop(
-                    reply_queue, timeout=RESULT_POLL_BLPOP_TIMEOUT_SECS
-                )
-                if not item:
-                    if time.monotonic() - last_result_at > RESULT_WAIT_TIMEOUT_SECS:
-                        timeout_error = (
-                            f"Worker timeout: batch sem resultados por "
-                            f"{RESULT_WAIT_TIMEOUT_SECS}s"
-                        )
-                        self._fail_remaining_processes(job, pending, timeout_error)
-                        job.error = timeout_error
-                        metrics.dashboard_batch_timeouts_total.inc()
-                        log.error(
-                            "dashboard.batch.result_timeout",
-                            batch_id=job.id,
-                            pending=len(pending),
-                        )
-                        break
-                    continue
-
-                _, result_json = item
-                result = json.loads(result_json)
-                if result.get("eventType") == "progress":
-                    self._apply_progress_event(job, result)
-                    last_result_at = time.monotonic()
-                    self._persist_progress(job)
-                    self._persist_active_batch(job)
-                    continue
-
-                numero = result.get("numeroProcesso")
-                if numero not in pending:
-                    continue
-
-                pending.remove(numero)
-                last_result_at = time.monotonic()
-                worker_status = self._apply_result(job, result)
-                self._persist_progress(job)
-                self._persist_active_batch(job)
-
-                if worker_status in {"session_expired", "captcha_required"} and pending:
-                    fatal_error = result.get("errorMessage") or worker_status
-                    for pending_numero in pending:
-                        await redis_client.lrem(
-                            "kratos:pje:jobs",
-                            0,
-                            serialized_payloads[pending_numero],
-                        )
-                    self._fail_remaining_processes(job, pending, fatal_error)
-                    job.error = fatal_error
-                    pending.clear()
-                    self._persist_progress(job)
-                    self._persist_active_batch(job)
-                    break
-
-            job.finished_at = datetime.now(UTC).isoformat()
-            summary = job.progress.get("summary", {})
-            done = int(summary.get("done", 0) or 0)
-            failed = int(summary.get("failed", 0) or 0)
-            partial = int(summary.get("partial", 0) or 0)
-
-            if failed > 0 and done == 0 and partial == 0:
-                job.status = "failed"
-                if not job.error:
-                    first_err = next(
-                        (
-                            proc.get("erro")
-                            for proc in job.progress.get("processos", {}).values()
-                            if proc.get("erro")
-                        ),
-                        "All processes failed",
-                    )
-                    job.error = first_err
-            elif failed > 0 or partial > 0:
-                job.status = "partial"
-                if not job.error:
-                    parts = []
-                    if failed > 0:
-                        parts.append(f"{failed} falharam")
-                    if partial > 0:
-                        parts.append(f"{partial} incompletos")
-                    job.error = ", ".join(parts)
-            else:
-                job.status = "done"
-
-            self._persist_progress(job)
-            self._persist_report(job)
-            self._clear_active_batch(job.id)
-            metrics.dashboard_batches_total.labels(status=job.status).inc()
-            total_docs = sum(
-                int(proc.get("docs_baixados", 0) or 0)
-                for proc in job.progress.get("processos", {}).values()
+            state = await self._enqueue_batch(
+                job,
+                redis_client,
+                serialized_payloads=serialized_payloads,
+                reply_queue=reply_queue,
+                enqueue_jobs=enqueue_jobs,
             )
-            total_bytes = sum(
-                int(proc.get("tamanho_bytes", 0) or 0)
-                for proc in job.progress.get("processos", {}).values()
-            )
-            if total_docs:
-                metrics.batch_docs_total.inc(total_docs)
-            if total_bytes:
-                metrics.batch_bytes_total.inc(total_bytes)
-            metrics.batch_processos_total.labels(status=job.status).inc(
-                len(job.processos)
-            )
-            metrics.dashboard_active_batches.set(0)
-
-            log.info(
-                "dashboard.batch.complete",
-                batch_id=job.id,
-                status=job.status,
-                done=done,
-                failed=failed,
-            )
-            self._evict_old_batches()
+            await self._poll_results_loop(job, redis_client, state)
+            self._finalize_batch(job)
 
         except Exception as exc:
             job.status = "failed"

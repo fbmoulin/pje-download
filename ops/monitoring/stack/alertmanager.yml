@@ -1,0 +1,43 @@
+# Alertmanager 0.27 config — routes alerts to Telegram @kaiOpsBot.
+# Spec: docs/superpowers/specs/2026-04-18-grafana-dashboard-design.md §3
+#
+# ${BOT_TOKEN} and ${CHAT_ID} filled by envsubst at deploy time
+# (values live in openclaw's .env, never committed).
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: telegram-kaiops
+  group_by: [app]
+  group_wait: 10s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - severity="critical"
+      receiver: telegram-kaiops
+      group_wait: 0s    # critical pages fire immediately without grouping delay
+
+receivers:
+  - name: telegram-kaiops
+    telegram_configs:
+      - bot_token: "${BOT_TOKEN}"
+        chat_id: ${CHAT_ID}              # integer, NO quotes
+        parse_mode: HTML
+        send_resolved: true
+        message: |
+          <b>[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}</b>
+          <i>app:</i> {{ .CommonLabels.app }}
+          <i>severity:</i> {{ .CommonLabels.severity }}
+          {{ range .Alerts -}}
+          • {{ .Annotations.summary }}
+            <code>{{ .Annotations.runbook }}</code>
+          {{ end }}
+
+inhibit_rules:
+  # When the dashboard is fully down, suppress lag/batch alerts
+  # (they are noisy symptoms of the same root cause).
+  - source_matchers: [alertname="PjeDashboardDown"]
+    target_matchers: [app="pje-download"]
+    equal: [app]

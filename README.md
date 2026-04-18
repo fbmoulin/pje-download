@@ -45,20 +45,22 @@ CLI offline:
 
 | Arquivo | Linhas | Funcao |
 |---------|--------|--------|
-| `worker.py` | ~1861 | Worker PJe com 3 estrategias em cascata (MNI > API > browser), reply queues por batch, downloads paralelos, dead-letter, circuit breaker no blpop, health detalhado |
-| `dashboard_api.py` | ~1494 | Control plane aiohttp — valida batches, publica jobs Redis com retry, agrega resultados, recupera batch ativo, `api_key` em todo `/api/*`, spawn do audit syncer, expõe status/readiness/metrics |
-| `batch_downloader.py` | ~914 | Download em lote via CLI com progresso atomico, retomada e relatorio |
+| `worker.py` | ~1860 | Worker PJe com 3 estrategias em cascata (MNI > API > browser), reply queues por batch, downloads paralelos, dead-letter, circuit breaker no blpop, health detalhado |
+| `dashboard_api.py` | ~1560 | Control plane aiohttp — valida batches, publica jobs Redis com retry, agrega resultados (3-phase `_run_batch` split: enqueue/poll/finalize), recupera batch ativo, `api_key` em todo `/api/*`, spawn do audit syncer |
+| `batch_downloader.py` | ~915 | Download em lote via CLI com progresso atomico, retomada e relatorio |
 | `mni_client.py` | ~876 | Cliente SOAP para MNI — download em 2 fases com dedup por checksum |
 | `gdrive_downloader.py` | ~696 | Download de pastas Google Drive (processos antigos escaneados) + `extract_gdrive_link_from_pje` |
-| `audit_sync.py` | ~474 | Background syncer: tails `/data/audit/*.jsonl` → Railway Postgres (CNJ 615/2025 Phase 2), partial-line invariant, cursor atomico com fsync, ON CONFLICT dedupe, TLS sslmode-aware |
+| `audit_sync.py` | ~490 | Background syncer: tails `/data/audit/*.jsonl` → Railway Postgres (CNJ 615/2025 Phase 2). Correctness: `_coerce_utc` normaliza ts naive/aware, `_verify_pg_version` exige PG 15+, `rows_total{success}` só incrementa post-cursor-save. ON CONFLICT dedupe, TLS sslmode-aware |
 | `pje_session.py` | ~440 | Login interativo PJe (Playwright), persistencia de sessao Keycloak, API REST + browser fallback |
 | `metrics.py` | ~216 | Registry Prometheus dedicado — MNI, GDrive, worker, control plane, audit sync (6 series) |
-| `config.py` | ~129 | Configuracao centralizada — todas as variaveis env-configuraveis (incl. audit sync) |
+| `config.py` | ~165 | Configuracao centralizada — todas as variaveis env-configuraveis (incl. audit sync + 7 runtime timeouts extraidos em Sprint 13) |
+| `async_retry.py` | ~109 | `AsyncRetry` class — exponential backoff + jitter genérico, usado por worker Redis init e dashboard `_rpush_with_retry`. Re-raises on exhaustion, no-ops on CancelledError. 10 tests dedicados |
+| `file_utils.py` | ~77 | Helpers compartilhados — `total_bytes(files)` tolerante a missing/None/string values, `merge_file_lists(*groups)` com dedup por checksum. Usados em 17+ sites antes duplicados |
 | `audit.py` | ~100 | CNJ 615/2025 audit trail append-only (JSON-L) + `rotate_logs` com cleanup de sidecars `.cursor` |
 | `dashboard.html` | ~193 | Frontend HTML com Google Fonts, data-animate attrs e card de sessao PJe |
 | `static/css/style.css` | ~685 | Design system — glassmorphism, Oswald KPIs, dot-grid bg, staggered animations |
 | `static/js/app.js` | ~618 | Dashboard — adaptive polling, pipeline renderer (SVG), toasts, file upload, sessao PJe |
-| `migrations/` | 2 files | Schema SQL idempotente para `audit_entries` (Railway Postgres) |
+| `migrations/` | 2 files | Schema SQL idempotente para `audit_entries` (Railway Postgres, requer PG 15+ para `UNIQUE NULLS NOT DISTINCT`) |
 
 ## Estrategias de Download
 
@@ -145,6 +147,13 @@ Todas as variaveis sao configuradas via ambiente (centralizadas em `config.py`):
 | `APP_ENV` | `development` | Quando `production`, exige `DASHBOARD_API_KEY` |
 | `DASHBOARD_API_KEY` | *(vazio)* | Chave obrigatoria para endpoints POST em producao |
 | `TRUST_X_FORWARDED_FOR` | `false` | So habilitar atras de proxy confiavel |
+| `PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS` | `300000` | Timeout do "full download" ZIP button (5 min) |
+| `PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS` | `30000` | Timeout per-doc download (30s) |
+| `REDIS_BLPOP_TIMEOUT_SECS` | `5` | BLPOP timeout no queue consumer do worker |
+| `REDIS_CIRCUIT_THRESHOLD` | `20` | Falhas consecutivas BLPOP antes do circuit-breaker (worker marca `/health` 503) |
+| `MNI_HEALTH_CACHE_TTL_SECS` | `30` | Cache do MNI health check no worker `/health` |
+| `RESULT_WAIT_TIMEOUT_SECS` | `360` | Max wait por resultado de batch no dashboard (antes de abortar) |
+| `RESULT_POLL_BLPOP_TIMEOUT_SECS` | `5` | BLPOP timeout per-iteration no dashboard result-poll |
 
 ## Uso
 
@@ -460,7 +469,7 @@ curl http://localhost:8007/metrics      # metricas Prometheus
 
 | Workflow | Trigger | Etapas |
 |----------|---------|--------|
-| `ci.yml` | push / PR | ruff lint → pytest (73 testes) — badge acima |
+| `ci.yml` | push / PR | ruff lint → pytest (408 testes em master) — badge acima |
 | `deploy.yml` | CI concluido com sucesso em `master` | rsync → `docker compose up --build` no VPS → healthcheck worker/dashboard → smoke test da fila |
 | `dependabot.yml` | semanal | atualiza actions + pip deps |
 

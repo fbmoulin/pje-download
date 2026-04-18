@@ -1535,3 +1535,93 @@ class TestTryFullDownloadButton:
             "5000001-00.2024.8.08.0001", tmp_path
         )
         assert result is None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# /metrics endpoint (Prometheus scrape) — added for Grafana dashboard (P0.4)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestWorkerMetricsEndpoint:
+    """The worker must expose its Prometheus registry at /metrics on the
+    same aiohttp health server that serves /health, so that Prometheus can
+    scrape worker-side counters (dead_letters, publish_failures, results,
+    progress_events) that are unreachable via the dashboard's /metrics.
+    """
+
+    @pytest.mark.asyncio
+    async def test_metrics_endpoint_returns_prometheus_text(self, monkeypatch):
+        """GET /metrics returns Prometheus text with worker-counter names."""
+        w = _load_worker_module()
+
+        # Rebind module-level constants: worker.py does `from config import
+        # HEALTH_PORT, HEALTH_BIND_HOST` at load time, so env-var monkeypatching
+        # has no effect after import. We rebind directly on the worker module.
+        monkeypatch.setattr(w, "HEALTH_PORT", 18006)  # off-band from prod :8006
+        monkeypatch.setattr(w, "HEALTH_BIND_HOST", "127.0.0.1")
+
+        import metrics as m
+
+        # Pre-populate a known counter so the scrape output is non-trivial.
+        # NOTE: metrics.REGISTRY is process-wide; this leaves a stale sample
+        # in the counter for the rest of the test session.
+        m.worker_dead_letters_total.labels(reason="__pje_metrics_smoke__").inc()
+
+        pje_worker = w.PJeSessionWorker()
+        await pje_worker.start_health_server()
+        try:
+            import aiohttp
+
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get("http://127.0.0.1:18006/metrics") as resp:
+                    assert resp.status == 200
+                    assert resp.headers["Content-Type"].startswith("text/plain")
+                    body = await resp.text()
+                    assert "pje_worker_dead_letters_total" in body
+                    assert 'reason="__pje_metrics_smoke__"' in body
+        finally:
+            await pje_worker.stop_health_server()
+
+
+# ─────────────────────────────────────────────
+# Sprint 5A regression — C1: circuit breaker health recovery
+# ─────────────────────────────────────────────
+
+
+class TestCircuitBreakerHealthRecovery:
+    @pytest.mark.asyncio
+    async def test_health_status_resets_to_consuming_after_redis_reconnects(self):
+        """BEFORE FIX: consecutive_errors reset to 0 on blpop success but
+        _health_status stayed "redis_unreachable" indefinitely.
+
+        Worker returned 503 on /health forever even after Redis reconnected,
+        triggering spurious orchestrator restarts.
+
+        The fix: when consecutive_errors resets, also reset _health_status
+        to "consuming" if it was "redis_unreachable".
+        """
+        import asyncio as _asyncio
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.mni_client = None
+        worker._health_status = "redis_unreachable"
+
+        shutdown = _asyncio.Event()
+
+        async def fake_blpop(queue, timeout):
+            shutdown.set()  # stop after this one successful blpop
+            return None  # timeout (no job ready), but the call itself succeeded
+
+        worker.redis = AsyncMock()
+        worker.redis.blpop = fake_blpop
+
+        worker.is_session_expired = MagicMock(return_value=False)
+
+        await worker.consume_queue(shutdown)
+
+        assert worker._health_status == "consuming", (
+            "BEFORE FIX: status stayed 'redis_unreachable' after Redis reconnected; "
+            f"got '{worker._health_status}'. "
+            "After fix: successful blpop resets status to 'consuming'."
+        )

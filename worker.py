@@ -23,6 +23,7 @@ import hashlib
 import json
 import random
 import signal
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ import structlog
 from playwright.async_api import BrowserContext, Page, async_playwright
 
 import metrics
+from async_retry import AsyncRetry
 from file_utils import merge_file_lists, total_bytes
 from mni_client import MNIClient, MNIResult
 
@@ -75,6 +77,22 @@ def _unique_filename(directory: Path, filename: str) -> str:
 # _merge_downloaded_files moved to file_utils.merge_file_lists (Sprint 2 Q2).
 # Kept this alias so existing call sites (and any external imports) keep working.
 _merge_downloaded_files = merge_file_lists
+
+
+@dataclass
+class DownloadContext:
+    """Transient state shared across download_process phase methods."""
+
+    job: dict
+    job_id: str
+    numero_processo: str
+    tipos_documento: list | None
+    incluir_anexos: bool
+    gdrive_url: str | None
+    output_dir: Path
+    downloaded_files: list[dict] = field(default_factory=list)
+    anexos_pendentes: int = 0
+    expected_total_docs: int = 0
 
 
 # Padrões conhecidos de CAPTCHA no PJe
@@ -153,22 +171,22 @@ class PJeSessionWorker:
             self._session_lock_fh = None
 
     async def init(self, max_redis_retries: int = 5) -> None:
-        for attempt in range(max_redis_retries):
-            try:
-                self.redis = redis.from_url(REDIS_URL, decode_responses=True)
-                await self.redis.ping()
-                break
-            except (redis.ConnectionError, redis.TimeoutError, OSError) as exc:
-                if attempt == max_redis_retries - 1:
-                    raise
-                delay = min(2**attempt + random.uniform(0, 1), 30)
-                log.warning(
-                    "pje.redis.init_retry",
-                    attempt=attempt + 1,
-                    delay=round(delay, 1),
-                    error=str(exc),
-                )
-                await asyncio.sleep(delay)
+        # Sprint 3 R3: delegates Redis-init retry to AsyncRetry. Historical
+        # semantics preserved: 5 attempts, 30s backoff cap, re-raise on
+        # exhaustion so the orchestrator (or systemd) sees a hard failure
+        # rather than a silently-stuck worker.
+        async def _ping() -> None:
+            self.redis = redis.from_url(REDIS_URL, decode_responses=True)
+            await self.redis.ping()
+
+        retry = AsyncRetry(
+            attempts=max_redis_retries,
+            backoff_cap_secs=30,
+            retry_on=(redis.ConnectionError, redis.TimeoutError, OSError),
+            log_event="pje.redis.init_retry",
+            logger=log,
+        )
+        await retry.run(_ping)
 
         # Inicializar cliente MNI se habilitado e credenciais configuradas
         if MNI_ENABLED:
@@ -345,24 +363,8 @@ class PJeSessionWorker:
     # DOWNLOAD ORQUESTRADO
     # ──────────────────────
 
-    async def download_process(self, job: dict) -> dict:
-        """
-        Baixa documentos de um processo judicial no PJe.
-
-        Fluxo com 3 estratégias em cascata:
-        1. MNI SOAP (se disponível) — mais rápido, sem browser
-        2. API REST do PJe (via browser autenticado)
-        3. Browser automation com Playwright (fallback)
-        """
-        job_id: str = job["jobId"]
-        numero_processo: str = job["numeroProcesso"]
-        tipos_documento: list | None = job.get("tiposDocumento")
-        incluir_anexos: bool = job.get("includeAnexos", job.get("include_anexos", True))
-        gdrive_url: str | None = job.get("gdriveUrl")
-
-        self._health_status = "processing"
-
-        safe_name = sanitize_filename(numero_processo)
+    def _resolve_output_dir(self, job: dict) -> Path:
+        safe_name = sanitize_filename(job["numeroProcesso"])
         output_subdir = job.get("outputSubdir")
         output_dir = (
             DOWNLOAD_BASE_DIR / Path(output_subdir)
@@ -371,161 +373,311 @@ class PJeSessionWorker:
         )
         if not output_dir.resolve().is_relative_to(DOWNLOAD_BASE_DIR.resolve()):
             raise ValueError(
-                f"Path traversal detected: {output_subdir or numero_processo}"
+                f"Path traversal detected: {output_subdir or job['numeroProcesso']}"
             )
         output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir
 
-        downloaded_files: list[dict] = []
-        anexos_pendentes = 0
-        expected_total_docs = 0
+    def _make_progress_cb(self, ctx: DownloadContext, detail_prefix: str):
+        base_docs = len(ctx.downloaded_files)
+        base_bytes = total_bytes(ctx.downloaded_files)
 
-        def _make_incremental_download_progress_cb(detail_prefix: str):
-            base_docs = len(downloaded_files)
-            base_bytes = total_bytes(downloaded_files)
+        async def _callback(
+            *, file_info: dict, completed: int, total: int, local_bytes: int
+        ) -> None:
+            del file_info
+            await self._publish_progress(
+                ctx.job,
+                "mni_download",
+                f"{detail_prefix}: {completed}/{max(total, completed)} docs",
+                total_docs=base_docs + max(total, completed),
+                docs_baixados=base_docs + completed,
+                tamanho_bytes=base_bytes + local_bytes,
+            )
 
-            async def _callback(
-                *,
-                file_info: dict,
-                completed: int,
-                total: int,
-                local_bytes: int,
-            ) -> None:
-                del file_info
-                await self._publish_progress(
-                    job,
-                    "mni_download",
-                    f"{detail_prefix}: {completed}/{max(total, completed)} docs",
-                    total_docs=base_docs + max(total, completed),
-                    docs_baixados=base_docs + completed,
-                    tamanho_bytes=base_bytes + local_bytes,
+        return _callback
+
+    async def _phase_gdrive(self, ctx: DownloadContext) -> dict | None:
+        """Phase 0: GDrive pre-download. Returns final result dict on early exit, None to continue."""
+        from gdrive_downloader import download_gdrive_folder
+
+        await self._publish_progress(
+            ctx.job,
+            "gdrive",
+            "Baixando pasta Google Drive",
+            docs_baixados=len(ctx.downloaded_files),
+            tamanho_bytes=total_bytes(ctx.downloaded_files),
+        )
+        gdrive_dir = ctx.output_dir / "escaneados_gdrive"
+        gdrive_files = await download_gdrive_folder(ctx.gdrive_url, gdrive_dir)
+        ctx.downloaded_files = _merge_downloaded_files(
+            ctx.downloaded_files, gdrive_files or []
+        )
+        if gdrive_files:
+            await self._publish_progress(
+                ctx.job,
+                "gdrive",
+                f"GDrive: {len(gdrive_files)} docs",
+                docs_baixados=len(ctx.downloaded_files),
+                tamanho_bytes=total_bytes(ctx.downloaded_files),
+            )
+        if (
+            ctx.downloaded_files
+            and self.mni_client is None
+            and (self.page is None or self.context is None)
+        ):
+            warning = (
+                "Google Drive retornou arquivos, mas nao ha MNI nem sessao PJe "
+                "para complementar o processo"
+            )
+            await self._publish_progress(
+                ctx.job,
+                "partial",
+                warning,
+                status="partial",
+                docs_baixados=len(ctx.downloaded_files),
+                tamanho_bytes=total_bytes(ctx.downloaded_files),
+            )
+            await self._log_job_result(
+                ctx.job_id, ctx.numero_processo, ctx.downloaded_files
+            )
+            self._health_status = "ready"
+            return self._result(
+                ctx.job_id,
+                ctx.numero_processo,
+                "partial_success",
+                ctx.downloaded_files,
+                error=warning,
+            )
+        return None
+
+    async def _phase_mni(self, ctx: DownloadContext) -> dict | None:
+        """Phase 1: MNI SOAP download. Returns final result dict on early exit, None to continue."""
+        await self._publish_progress(
+            ctx.job,
+            "mni_metadata",
+            "Consultando metadados via MNI SOAP",
+            docs_baixados=len(ctx.downloaded_files),
+            tamanho_bytes=total_bytes(ctx.downloaded_files),
+        )
+        mni_result = await self._try_mni_download(
+            ctx.numero_processo,
+            ctx.output_dir,
+            ctx.tipos_documento,
+            incluir_anexos=ctx.incluir_anexos,
+            progress_cb=self._make_progress_cb(ctx, "MNI SOAP"),
+        )
+        if len(mni_result) == 3:
+            mni_files, ctx.anexos_pendentes, ctx.expected_total_docs = mni_result
+        else:
+            mni_files, ctx.anexos_pendentes = mni_result
+            ctx.expected_total_docs = len(mni_files or [])
+        await self._publish_progress(
+            ctx.job,
+            "mni_metadata",
+            f"Metadados MNI: {ctx.expected_total_docs} docs esperados",
+            total_docs=max(ctx.expected_total_docs, len(ctx.downloaded_files)),
+            docs_baixados=len(ctx.downloaded_files),
+            tamanho_bytes=total_bytes(ctx.downloaded_files),
+        )
+        if mni_files:
+            ctx.downloaded_files = _merge_downloaded_files(
+                ctx.downloaded_files, mni_files
+            )
+            await self._publish_progress(
+                ctx.job,
+                "mni_download",
+                f"Documentos baixados: {len(ctx.downloaded_files)}",
+                total_docs=max(ctx.expected_total_docs, len(ctx.downloaded_files)),
+                docs_baixados=len(ctx.downloaded_files),
+                tamanho_bytes=total_bytes(ctx.downloaded_files),
+            )
+            log.info(
+                "pje.download.mni_success",
+                count=len(ctx.downloaded_files),
+                processo=ctx.numero_processo,
+                anexos_pendentes=ctx.anexos_pendentes,
+            )
+            if not ctx.anexos_pendentes:
+                await self._log_job_result(
+                    ctx.job_id, ctx.numero_processo, ctx.downloaded_files
                 )
+                self._health_status = "ready"
+                await self._publish_progress(
+                    ctx.job,
+                    "done",
+                    f"Concluído: {len(ctx.downloaded_files)} docs",
+                    total_docs=max(ctx.expected_total_docs, len(ctx.downloaded_files)),
+                    docs_baixados=len(ctx.downloaded_files),
+                    tamanho_bytes=total_bytes(ctx.downloaded_files),
+                )
+                return self._result(
+                    ctx.job_id, ctx.numero_processo, "success", ctx.downloaded_files
+                )
+        return None
 
-            return _callback
+    async def _phase_api_fallback(self, ctx: DownloadContext) -> bool:
+        """Phase 2: API REST download. Returns True if files found, False to trigger browser fallback."""
+        await self._publish_progress(
+            ctx.job,
+            "mni_download",
+            "Tentando API REST autenticada",
+            docs_baixados=len(ctx.downloaded_files),
+            tamanho_bytes=total_bytes(ctx.downloaded_files),
+        )
+        api_result = await self._try_official_api(
+            ctx.numero_processo,
+            ctx.output_dir,
+            tipos_documento=ctx.tipos_documento,
+            incluir_anexos=ctx.incluir_anexos,
+            incluir_principais=not (ctx.downloaded_files and ctx.anexos_pendentes > 0),
+            progress_cb=self._make_progress_cb(ctx, "API REST"),
+        )
+        if api_result:
+            ctx.downloaded_files = _merge_downloaded_files(
+                ctx.downloaded_files, api_result
+            )
+            await self._publish_progress(
+                ctx.job,
+                "mni_download",
+                f"Documentos baixados: {len(ctx.downloaded_files)}",
+                total_docs=max(ctx.expected_total_docs, len(ctx.downloaded_files)),
+                docs_baixados=len(ctx.downloaded_files),
+                tamanho_bytes=total_bytes(ctx.downloaded_files),
+            )
+            log.info("pje.download.api_success", count=len(ctx.downloaded_files))
+            return True
+        return False
+
+    async def _phase_browser_fallback(self, ctx: DownloadContext) -> dict | None:
+        """Phase 3: Browser automation fallback. Returns final result dict on early exit, None to continue."""
+        if await self._detect_captcha():
+            self._health_status = "captcha_required"
+            await self._publish_progress(
+                ctx.job,
+                "failed",
+                "CAPTCHA detectado — intervenção manual necessária",
+                docs_baixados=len(ctx.downloaded_files),
+                tamanho_bytes=total_bytes(ctx.downloaded_files),
+            )
+            return self._result(
+                ctx.job_id,
+                ctx.numero_processo,
+                "captcha_required",
+                error="CAPTCHA detectado — intervenção manual necessária",
+            )
+
+        await self._publish_progress(
+            ctx.job,
+            "mni_download",
+            "Fallback no browser",
+            docs_baixados=len(ctx.downloaded_files),
+            tamanho_bytes=total_bytes(ctx.downloaded_files),
+        )
+        browser_files = await self._download_via_browser(
+            ctx.numero_processo,
+            ctx.output_dir,
+            ctx.tipos_documento,
+            allow_full_download=not (ctx.downloaded_files and ctx.anexos_pendentes > 0),
+            progress_cb=self._make_progress_cb(ctx, "Browser"),
+        )
+        if not browser_files:
+            if ctx.downloaded_files:
+                warning = (
+                    "Google Drive retornou arquivos, mas PJe/MNI nao "
+                    "retornou documentos complementares"
+                )
+                await self._log_job_result(
+                    ctx.job_id, ctx.numero_processo, ctx.downloaded_files
+                )
+                self._health_status = "ready"
+                await self._publish_progress(
+                    ctx.job,
+                    "partial",
+                    warning,
+                    status="partial",
+                    total_docs=max(ctx.expected_total_docs, len(ctx.downloaded_files)),
+                    docs_baixados=len(ctx.downloaded_files),
+                    tamanho_bytes=total_bytes(ctx.downloaded_files),
+                )
+                return self._result(
+                    ctx.job_id,
+                    ctx.numero_processo,
+                    "partial_success",
+                    ctx.downloaded_files,
+                    error=warning,
+                )
+            self._health_status = "ready"
+            await self._publish_progress(
+                ctx.job,
+                "failed",
+                "Browser fallback indisponível ou sem arquivos",
+                total_docs=max(ctx.expected_total_docs, len(ctx.downloaded_files)),
+                docs_baixados=len(ctx.downloaded_files),
+                tamanho_bytes=total_bytes(ctx.downloaded_files),
+            )
+            return self._result(
+                ctx.job_id,
+                ctx.numero_processo,
+                "failed",
+                error="Browser fallback indisponível ou sem arquivos",
+            )
+        ctx.downloaded_files = _merge_downloaded_files(
+            ctx.downloaded_files, browser_files
+        )
+        await self._publish_progress(
+            ctx.job,
+            "mni_download",
+            f"Documentos baixados: {len(ctx.downloaded_files)}",
+            total_docs=max(ctx.expected_total_docs, len(ctx.downloaded_files)),
+            docs_baixados=len(ctx.downloaded_files),
+            tamanho_bytes=total_bytes(ctx.downloaded_files),
+        )
+        log.info("pje.download.browser_success", count=len(ctx.downloaded_files))
+        # falls through to shared success path in orchestrator
+        return None  # sentinel: caller checks for None
+
+    async def download_process(self, job: dict) -> dict:
+        """
+        Baixa documentos de um processo judicial no PJe.
+
+        Fluxo com 4 estratégias em cascata:
+        0. GDrive (se gdriveUrl fornecida)
+        1. MNI SOAP (se disponível) — mais rápido, sem browser
+        2. API REST do PJe (via browser autenticado)
+        3. Browser automation com Playwright (fallback)
+        """
+        ctx = DownloadContext(
+            job=job,
+            job_id=job["jobId"],
+            numero_processo=job["numeroProcesso"],
+            tipos_documento=job.get("tiposDocumento"),
+            incluir_anexos=job.get("includeAnexos", job.get("include_anexos", True)),
+            gdrive_url=job.get("gdriveUrl"),
+            output_dir=self._resolve_output_dir(job),
+        )
+        self._health_status = "processing"
 
         try:
-            log.info("pje.download.start", processo=numero_processo, job_id=job_id)
+            log.info(
+                "pje.download.start",
+                processo=ctx.numero_processo,
+                job_id=ctx.job_id,
+            )
             await self._publish_progress(job, "starting", "Job recebido pelo worker")
 
-            if gdrive_url:
-                from gdrive_downloader import download_gdrive_folder
+            if ctx.gdrive_url:
+                if (result := await self._phase_gdrive(ctx)) is not None:
+                    return result
 
-                await self._publish_progress(
-                    job,
-                    "gdrive",
-                    "Baixando pasta Google Drive",
-                    docs_baixados=len(downloaded_files),
-                    tamanho_bytes=total_bytes(downloaded_files),
-                )
-                gdrive_dir = output_dir / "escaneados_gdrive"
-                gdrive_files = await download_gdrive_folder(gdrive_url, gdrive_dir)
-                downloaded_files = _merge_downloaded_files(
-                    downloaded_files, gdrive_files or []
-                )
-                if gdrive_files:
-                    await self._publish_progress(
-                        job,
-                        "gdrive",
-                        f"GDrive: {len(gdrive_files)} docs",
-                        docs_baixados=len(downloaded_files),
-                        tamanho_bytes=total_bytes(downloaded_files),
-                    )
-                if (
-                    downloaded_files
-                    and self.mni_client is None
-                    and (self.page is None or self.context is None)
-                ):
-                    warning = (
-                        "Google Drive retornou arquivos, mas nao ha MNI nem sessao PJe "
-                        "para complementar o processo"
-                    )
-                    await self._publish_progress(
-                        job,
-                        "partial",
-                        warning,
-                        status="partial",
-                        docs_baixados=len(downloaded_files),
-                        tamanho_bytes=total_bytes(downloaded_files),
-                    )
-                    await self._log_job_result(
-                        job_id, numero_processo, downloaded_files
-                    )
-                    self._health_status = "ready"
-                    return self._result(
-                        job_id,
-                        numero_processo,
-                        "partial_success",
-                        downloaded_files,
-                        error=warning,
-                    )
-
-            # ── ESTRATÉGIA 1: MNI SOAP ──
             if self.mni_client is not None:
-                await self._publish_progress(
-                    job,
-                    "mni_metadata",
-                    "Consultando metadados via MNI SOAP",
-                    docs_baixados=len(downloaded_files),
-                    tamanho_bytes=total_bytes(downloaded_files),
-                )
-                mni_result = await self._try_mni_download(
-                    numero_processo,
-                    output_dir,
-                    tipos_documento,
-                    incluir_anexos=incluir_anexos,
-                    progress_cb=_make_incremental_download_progress_cb("MNI SOAP"),
-                )
-                if len(mni_result) == 3:
-                    mni_files, anexos_pendentes, expected_total_docs = mni_result
-                else:
-                    mni_files, anexos_pendentes = mni_result
-                    expected_total_docs = len(mni_files or [])
-                await self._publish_progress(
-                    job,
-                    "mni_metadata",
-                    f"Metadados MNI: {expected_total_docs} docs esperados",
-                    total_docs=max(expected_total_docs, len(downloaded_files)),
-                    docs_baixados=len(downloaded_files),
-                    tamanho_bytes=total_bytes(downloaded_files),
-                )
-                if mni_files:
-                    downloaded_files = _merge_downloaded_files(
-                        downloaded_files, mni_files
-                    )
-                    await self._publish_progress(
-                        job,
-                        "mni_download",
-                        f"Documentos baixados: {len(downloaded_files)}",
-                        total_docs=max(expected_total_docs, len(downloaded_files)),
-                        docs_baixados=len(downloaded_files),
-                        tamanho_bytes=total_bytes(downloaded_files),
-                    )
-                    log.info(
-                        "pje.download.mni_success",
-                        count=len(downloaded_files),
-                        processo=numero_processo,
-                        anexos_pendentes=anexos_pendentes,
-                    )
-                    if not anexos_pendentes:
-                        await self._log_job_result(
-                            job_id, numero_processo, downloaded_files
-                        )
-                        self._health_status = "ready"
-                        await self._publish_progress(
-                            job,
-                            "done",
-                            f"Concluído: {len(downloaded_files)} docs",
-                            total_docs=max(expected_total_docs, len(downloaded_files)),
-                            docs_baixados=len(downloaded_files),
-                            tamanho_bytes=total_bytes(downloaded_files),
-                        )
-                        return self._result(
-                            job_id, numero_processo, "success", downloaded_files
-                        )
+                if (result := await self._phase_mni(ctx)) is not None:
+                    return result
 
             # ── Estratégias 2 e 3 precisam de sessão Playwright ──
-            if anexos_pendentes and (self.page is None or self.context is None):
+            if ctx.anexos_pendentes and (self.page is None or self.context is None):
                 warning = (
-                    f"MNI baixou documentos principais, mas {anexos_pendentes} anexo(s) "
+                    f"MNI baixou documentos principais, mas {ctx.anexos_pendentes} anexo(s) "
                     "permanecem pendentes sem sessão PJe disponível"
                 )
                 await self._publish_progress(
@@ -533,174 +685,69 @@ class PJeSessionWorker:
                     "partial",
                     warning,
                     status="partial",
-                    total_docs=max(expected_total_docs, len(downloaded_files)),
-                    docs_baixados=len(downloaded_files),
-                    tamanho_bytes=total_bytes(downloaded_files),
+                    total_docs=max(ctx.expected_total_docs, len(ctx.downloaded_files)),
+                    docs_baixados=len(ctx.downloaded_files),
+                    tamanho_bytes=total_bytes(ctx.downloaded_files),
                 )
                 log.warning(
                     "pje.download.anexos_pending",
-                    processo=numero_processo,
-                    anexos_pendentes=anexos_pendentes,
+                    processo=ctx.numero_processo,
+                    anexos_pendentes=ctx.anexos_pendentes,
                 )
-                await self._log_job_result(job_id, numero_processo, downloaded_files)
+                await self._log_job_result(
+                    ctx.job_id, ctx.numero_processo, ctx.downloaded_files
+                )
                 self._health_status = "ready"
                 return self._result(
-                    job_id,
-                    numero_processo,
+                    ctx.job_id,
+                    ctx.numero_processo,
                     "partial_success",
-                    downloaded_files,
+                    ctx.downloaded_files,
                     error=warning,
                 )
 
             if self.is_session_expired():
-                log.warning("pje.download.session_expired", job_id=job_id)
+                log.warning("pje.download.session_expired", job_id=ctx.job_id)
                 self._health_status = "session_expired"
-                return self._result(job_id, numero_processo, "session_expired")
+                return self._result(ctx.job_id, ctx.numero_processo, "session_expired")
 
-            # ── ESTRATÉGIA 2: API REST ──
-            await self._publish_progress(
-                job,
-                "mni_download",
-                "Tentando API REST autenticada",
-                docs_baixados=len(downloaded_files),
-                tamanho_bytes=total_bytes(downloaded_files),
+            api_found = await self._phase_api_fallback(ctx)
+            if not api_found:
+                result = await self._phase_browser_fallback(ctx)
+                if result is not None:
+                    return result
+
+            # ── Shared success path ──
+            await self._log_job_result(
+                ctx.job_id, ctx.numero_processo, ctx.downloaded_files
             )
-
-            api_result = await self._try_official_api(
-                numero_processo,
-                output_dir,
-                tipos_documento=tipos_documento,
-                incluir_anexos=incluir_anexos,
-                incluir_principais=not (downloaded_files and anexos_pendentes > 0),
-                progress_cb=_make_incremental_download_progress_cb("API REST"),
-            )
-            if api_result:
-                downloaded_files = _merge_downloaded_files(downloaded_files, api_result)
-                await self._publish_progress(
-                    job,
-                    "mni_download",
-                    f"Documentos baixados: {len(downloaded_files)}",
-                    total_docs=max(expected_total_docs, len(downloaded_files)),
-                    docs_baixados=len(downloaded_files),
-                    tamanho_bytes=total_bytes(downloaded_files),
-                )
-                log.info("pje.download.api_success", count=len(downloaded_files))
-            else:
-                # ── ESTRATÉGIA 3: Browser automation ──
-                # Verificar CAPTCHA antes de navegar
-                if await self._detect_captcha():
-                    self._health_status = "captcha_required"
-                    await self._publish_progress(
-                        job,
-                        "failed",
-                        "CAPTCHA detectado — intervenção manual necessária",
-                        docs_baixados=len(downloaded_files),
-                        tamanho_bytes=total_bytes(downloaded_files),
-                    )
-                    return self._result(
-                        job_id,
-                        numero_processo,
-                        "captcha_required",
-                        error="CAPTCHA detectado — intervenção manual necessária",
-                    )
-
-                await self._publish_progress(
-                    job,
-                    "mni_download",
-                    "Fallback no browser",
-                    docs_baixados=len(downloaded_files),
-                    tamanho_bytes=total_bytes(downloaded_files),
-                )
-                browser_files = await self._download_via_browser(
-                    numero_processo,
-                    output_dir,
-                    tipos_documento,
-                    allow_full_download=not (downloaded_files and anexos_pendentes > 0),
-                    progress_cb=_make_incremental_download_progress_cb("Browser"),
-                )
-                if not browser_files:
-                    if downloaded_files:
-                        warning = (
-                            "Google Drive retornou arquivos, mas PJe/MNI nao "
-                            "retornou documentos complementares"
-                        )
-                        await self._log_job_result(
-                            job_id, numero_processo, downloaded_files
-                        )
-                        self._health_status = "ready"
-                        await self._publish_progress(
-                            job,
-                            "partial",
-                            warning,
-                            status="partial",
-                            total_docs=max(expected_total_docs, len(downloaded_files)),
-                            docs_baixados=len(downloaded_files),
-                            tamanho_bytes=total_bytes(downloaded_files),
-                        )
-                        return self._result(
-                            job_id,
-                            numero_processo,
-                            "partial_success",
-                            downloaded_files,
-                            error=warning,
-                        )
-                    self._health_status = "ready"
-                    await self._publish_progress(
-                        job,
-                        "failed",
-                        "Browser fallback indisponível ou sem arquivos",
-                        total_docs=max(expected_total_docs, len(downloaded_files)),
-                        docs_baixados=len(downloaded_files),
-                        tamanho_bytes=total_bytes(downloaded_files),
-                    )
-                    return self._result(
-                        job_id,
-                        numero_processo,
-                        "failed",
-                        error="Browser fallback indisponível ou sem arquivos",
-                    )
-                downloaded_files = _merge_downloaded_files(
-                    downloaded_files, browser_files
-                )
-                await self._publish_progress(
-                    job,
-                    "mni_download",
-                    f"Documentos baixados: {len(downloaded_files)}",
-                    total_docs=max(expected_total_docs, len(downloaded_files)),
-                    docs_baixados=len(downloaded_files),
-                    tamanho_bytes=total_bytes(downloaded_files),
-                )
-                log.info("pje.download.browser_success", count=len(downloaded_files))
-
-            await self._log_job_result(job_id, numero_processo, downloaded_files)
             self._health_status = "ready"
             warning = None
-            if anexos_pendentes and incluir_anexos:
+            if ctx.anexos_pendentes and ctx.incluir_anexos:
                 warning = (
-                    f"MNI indicou {anexos_pendentes} anexo(s) vinculados; "
+                    f"MNI indicou {ctx.anexos_pendentes} anexo(s) vinculados; "
                     "resultado complementar via API/browser pode conter duplicatas filtradas"
                 )
             await self._publish_progress(
                 job,
                 "done",
-                warning or f"Concluído: {len(downloaded_files)} docs",
-                total_docs=max(expected_total_docs, len(downloaded_files)),
-                docs_baixados=len(downloaded_files),
-                tamanho_bytes=total_bytes(downloaded_files),
+                warning or f"Concluído: {len(ctx.downloaded_files)} docs",
+                total_docs=max(ctx.expected_total_docs, len(ctx.downloaded_files)),
+                docs_baixados=len(ctx.downloaded_files),
+                tamanho_bytes=total_bytes(ctx.downloaded_files),
             )
             return self._result(
-                job_id,
-                numero_processo,
+                ctx.job_id,
+                ctx.numero_processo,
                 "success",
-                downloaded_files,
+                ctx.downloaded_files,
                 error=warning,
             )
 
         except Exception as e:
-            log.error("pje.download.failed", job_id=job_id, error=str(e))
+            log.error("pje.download.failed", job_id=ctx.job_id, error=str(e))
             self._last_error = str(e)
 
-            # Checar se sessão expirou durante a operação
             try:
                 session_lost = (
                     self.page is not None and "login" in self.page.url.lower()
@@ -714,22 +761,22 @@ class PJeSessionWorker:
                     job,
                     "failed",
                     "Sessão expirada",
-                    total_docs=max(expected_total_docs, len(downloaded_files)),
-                    docs_baixados=len(downloaded_files),
-                    tamanho_bytes=total_bytes(downloaded_files),
+                    total_docs=max(ctx.expected_total_docs, len(ctx.downloaded_files)),
+                    docs_baixados=len(ctx.downloaded_files),
+                    tamanho_bytes=total_bytes(ctx.downloaded_files),
                 )
-                return self._result(job_id, numero_processo, "session_expired")
+                return self._result(ctx.job_id, ctx.numero_processo, "session_expired")
 
             self._health_status = "ready"
             await self._publish_progress(
                 job,
                 "failed",
                 str(e),
-                total_docs=max(expected_total_docs, len(downloaded_files)),
-                docs_baixados=len(downloaded_files),
-                tamanho_bytes=total_bytes(downloaded_files),
+                total_docs=max(ctx.expected_total_docs, len(ctx.downloaded_files)),
+                docs_baixados=len(ctx.downloaded_files),
+                tamanho_bytes=total_bytes(ctx.downloaded_files),
             )
-            return self._result(job_id, numero_processo, "failed", error=str(e))
+            return self._result(ctx.job_id, ctx.numero_processo, "failed", error=str(e))
 
     # ──────────────────────
     # ESTRATÉGIA 1: MNI SOAP
@@ -1530,7 +1577,9 @@ class PJeSessionWorker:
                 result = await self.redis.blpop(
                     "kratos:pje:jobs", timeout=REDIS_BLPOP_TIMEOUT_SECS
                 )
-                consecutive_errors = 0  # reset on success
+                consecutive_errors = 0
+                if self._health_status == "redis_unreachable":
+                    self._health_status = "consuming"
             except (redis.ConnectionError, redis.TimeoutError) as exc:
                 consecutive_errors += 1
                 delay = min(2**consecutive_errors + random.uniform(0, 1), 60)
@@ -1607,7 +1656,7 @@ class PJeSessionWorker:
     # ──────────────────────
 
     async def start_health_server(self) -> None:
-        """Inicia servidor HTTP minimalista para health checks."""
+        """Inicia servidor HTTP minimalista para health checks + /metrics."""
         from aiohttp import web
 
         if self._health_runner is not None:
@@ -1615,6 +1664,7 @@ class PJeSessionWorker:
 
         app = web.Application()
         app.router.add_get("/health", self._health_handler)
+        app.router.add_get("/metrics", self._metrics_handler)
 
         runner = web.AppRunner(app)
         await runner.setup()
@@ -1622,6 +1672,23 @@ class PJeSessionWorker:
         await site.start()
         self._health_runner = runner
         log.info("pje.health.started", host=HEALTH_BIND_HOST, port=HEALTH_PORT)
+
+    async def _metrics_handler(self, request):
+        """GET /metrics — Prometheus scrape of worker-process registry.
+
+        Worker-process counters (dead_letters, publish_failures, results,
+        progress_events) live in their own CollectorRegistry; the dashboard's
+        /metrics cannot see them. This endpoint exposes them to Prometheus.
+        """
+        from aiohttp import web
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+        import metrics as m
+
+        return web.Response(
+            body=generate_latest(m.REGISTRY),
+            headers={"Content-Type": CONTENT_TYPE_LATEST},
+        )
 
     async def stop_health_server(self) -> None:
         """Encerra o servidor de health checks e libera a porta."""

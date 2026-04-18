@@ -1,0 +1,14 @@
+# Grafana 11 dashboard provider — reads all *.json from the mounted apps/ tree.
+apiVersion: 1
+providers:
+  - name: pje-download
+    orgId: 1
+    folder: pje-download
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      # Bind-mount source is ops/monitoring/pje/ in the repo → /var/lib/grafana/dashboards/pje/ in container
+      path: /var/lib/grafana/dashboards/pje
+      foldersFromFilesStructure: true
