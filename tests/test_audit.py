@@ -131,6 +131,40 @@ class TestRotateLogs:
         assert deleted == 1
         assert not old_file.exists()
 
+    def test_removes_orphan_cursor_sidecar(self, tmp_path, monkeypatch):
+        """Audit P2: rotate_logs deletava apenas o .jsonl, deixando o
+        .cursor orfao em /data/audit. Ao longo de anos isso acumula
+        lixo; o cleanup do sidecar e necessario quando o arquivo
+        original foi removido.
+        """
+        monkeypatch.setenv("AUDIT_LOG_DIR", str(tmp_path))
+        old_date = date.today() - timedelta(days=100)
+        old_file = tmp_path / f"audit-{old_date}.jsonl"
+        old_cursor = tmp_path / f"audit-{old_date}.jsonl.cursor"
+        old_file.write_text("{}\n")
+        old_cursor.write_text('{"offset": 3}')
+
+        rotate_logs(max_days=90)
+
+        assert not old_file.exists()
+        assert not old_cursor.exists(), (
+            "cursor sidecar orfao nao foi removido junto com o .jsonl"
+        )
+
+    def test_preserves_cursor_for_recent_file(self, tmp_path, monkeypatch):
+        """Regression: cursor de arquivo recente NAO pode ser removido."""
+        monkeypatch.setenv("AUDIT_LOG_DIR", str(tmp_path))
+        recent_date = date.today() - timedelta(days=10)
+        recent_file = tmp_path / f"audit-{recent_date}.jsonl"
+        recent_cursor = tmp_path / f"audit-{recent_date}.jsonl.cursor"
+        recent_file.write_text("{}\n")
+        recent_cursor.write_text('{"offset": 3}')
+
+        rotate_logs(max_days=90)
+
+        assert recent_file.exists()
+        assert recent_cursor.exists()
+
     def test_keeps_recent_files(self, tmp_path, monkeypatch):
         monkeypatch.setenv("AUDIT_LOG_DIR", str(tmp_path))
         recent_date = date.today() - timedelta(days=10)

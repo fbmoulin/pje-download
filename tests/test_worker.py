@@ -476,6 +476,52 @@ class TestConsumeQueueShutdown:
         assert logged_errors[1]["retry_in"] > logged_errors[0]["retry_in"]
 
     @pytest.mark.asyncio
+    async def test_circuit_breaker_flips_health_after_many_redis_failures(
+        self, monkeypatch
+    ):
+        """Audit P2: sem ceiling, um Redis permanentemente morto deixa
+        ``/health`` retornando ``consuming`` para sempre. Após N falhas
+        consecutivas de blpop, o health state flips para
+        ``redis_unreachable`` (health check retorna 503 e o orquestrador
+        pode reiniciar o container).
+        """
+        import asyncio
+        from redis import ConnectionError as RedisConnectionError
+
+        w = _load_worker_module()
+        _patch_redis_exceptions(w)
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        mock_r.blpop = AsyncMock(side_effect=RedisConnectionError("dead"))
+        worker.redis = mock_r
+        worker.mni_client = MagicMock()
+
+        # Replace backoff with a tiny real sleep so the loop actually yields
+        # back to the test between iterations.
+        real_sleep = asyncio.sleep
+
+        async def short_sleep(_delay):
+            await real_sleep(0)
+
+        monkeypatch.setattr(w.asyncio, "sleep", short_sleep)
+
+        shutdown = asyncio.Event()
+
+        with patch.object(w, "log", MagicMock()):
+            task = asyncio.create_task(worker.consume_queue(shutdown))
+            # Wait for circuit to open (up to ~200ms with real yields)
+            for _ in range(200):
+                if worker._health_status == "redis_unreachable":
+                    break
+                await real_sleep(0.001)
+            shutdown.set()
+            await asyncio.wait_for(task, timeout=2.0)
+
+        assert worker._health_status == "redis_unreachable", (
+            f"circuit breaker never flipped — got {worker._health_status!r}"
+        )
+
+    @pytest.mark.asyncio
     async def test_invalid_json_is_sent_to_dead_letter_queue(self):
         import asyncio
 
@@ -1168,6 +1214,74 @@ class TestMniOptimization:
             incluir_anexos=True,
             progress_cb=progress_cb,
         )
+
+
+class TestOfficialApiRetry:
+    """Audit P2: page.request.get não tinha timeout explicito nem retry;
+    um 503 transitorio do PJe matava o fallback sem tentar de novo.
+    """
+
+    @pytest.mark.asyncio
+    async def test_retries_on_5xx_and_succeeds(self, tmp_path, monkeypatch):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+
+        # Primeira resposta: 503. Segunda: 200 com lista vazia.
+        r_fail = AsyncMock()
+        r_fail.status = 503
+        r_ok = AsyncMock()
+        r_ok.status = 200
+        r_ok.json = AsyncMock(return_value=[])
+
+        worker.page = AsyncMock()
+        worker.page.request.get = AsyncMock(side_effect=[r_fail, r_ok])
+        monkeypatch.setattr(w.asyncio, "sleep", AsyncMock())
+
+        result = await worker._try_official_api("5000003-00.2024.8.08.0001", tmp_path)
+
+        assert result is None  # 200 com lista vazia -> None (nada baixado)
+        assert worker.page.request.get.await_count == 2, (
+            "primeiro 503 deveria disparar retry"
+        )
+
+    @pytest.mark.asyncio
+    async def test_gives_up_after_max_attempts(self, tmp_path, monkeypatch):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        r_fail = AsyncMock()
+        r_fail.status = 500
+        worker.page = AsyncMock()
+        worker.page.request.get = AsyncMock(return_value=r_fail)
+        monkeypatch.setattr(w.asyncio, "sleep", AsyncMock())
+
+        result = await worker._try_official_api("5000003-00.2024.8.08.0001", tmp_path)
+
+        assert result is None
+        # 3 attempts max (1 initial + 2 retries)
+        assert worker.page.request.get.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_timeout_kwarg_passed_to_playwright(self, tmp_path, monkeypatch):
+        """Sem timeout explicito o Playwright usa o default (~30s); em
+        producao isso amplia o tempo de falha do strategy cascade. Pin
+        um valor mais curto.
+        """
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        r_ok = AsyncMock()
+        r_ok.status = 200
+        r_ok.json = AsyncMock(return_value=[])
+        worker.page = AsyncMock()
+        worker.page.request.get = AsyncMock(return_value=r_ok)
+        monkeypatch.setattr(w.asyncio, "sleep", AsyncMock())
+
+        await worker._try_official_api("5000003-00.2024.8.08.0001", tmp_path)
+
+        call = worker.page.request.get.await_args
+        assert "timeout" in call.kwargs, (
+            "timeout explicito nao foi passado ao request.get"
+        )
+        assert call.kwargs["timeout"] > 0
 
 
 class TestOfficialApiNoCookieLeak:

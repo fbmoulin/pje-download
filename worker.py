@@ -904,10 +904,34 @@ class PJeSessionWorker:
                 return None
             processo_id = numero_processo.replace(".", "").replace("-", "")
 
-            response = await self.page.request.get(
-                f"{PJE_BASE_URL}/api/processos/{processo_id}/documentos",
-                headers={"Accept": "application/json"},
-            )
+            # Audit P2: timeout explicito (Playwright default e ~30s;
+            # 10s da tempo suficiente num fallback, sem prolongar
+            # demais o tempo total do strategy cascade) + 2 retries em
+            # 5xx ou timeout (transitorios do PJe sao frequentes).
+            response = None
+            for attempt in range(3):
+                try:
+                    response = await self.page.request.get(
+                        f"{PJE_BASE_URL}/api/processos/{processo_id}/documentos",
+                        headers={"Accept": "application/json"},
+                        timeout=10_000,  # ms
+                    )
+                    if response.status < 500:
+                        break  # 2xx / 4xx — definitivo
+                except Exception as req_exc:
+                    log.warning(
+                        "pje.api.request_error",
+                        processo=numero_processo,
+                        attempt=attempt + 1,
+                        error_type=type(req_exc).__name__,
+                    )
+                    if attempt == 2:
+                        return None
+                if attempt < 2:
+                    await asyncio.sleep(min(2**attempt + random.uniform(0, 1), 5))
+
+            if response is None:
+                return None
 
             if response.status == 200:
                 try:
@@ -1545,6 +1569,10 @@ class PJeSessionWorker:
         log.info("pje.queue.waiting")
         self._health_status = "consuming"
         consecutive_errors = 0
+        # Circuit breaker: acima desse threshold marcamos o worker como
+        # unreachable para que /health retorne 503 e o orquestrador possa
+        # decidir restartar o container.
+        REDIS_CIRCUIT_THRESHOLD = 20
 
         while not (shutdown_event and shutdown_event.is_set()):
             # Verificar expiração de sessão (MNI não depende de sessão)
@@ -1568,6 +1596,8 @@ class PJeSessionWorker:
                     consecutive=consecutive_errors,
                 )
                 self._last_error = f"redis:{exc}"
+                if consecutive_errors >= REDIS_CIRCUIT_THRESHOLD:
+                    self._health_status = "redis_unreachable"
                 await asyncio.sleep(delay)
                 continue
 

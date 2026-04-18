@@ -87,6 +87,13 @@ def rotate_logs(max_days: int = 90) -> int:
                 file_date = date.fromisoformat(p.stem.removeprefix("audit-"))
                 if file_date < cutoff:
                     p.unlink()
+                    # Remove cursor sidecar too (audit P2 — sem isso os
+                    # .cursor orfaos acumulam em /data/audit sem uso).
+                    cursor = p.with_suffix(p.suffix + ".cursor")
+                    try:
+                        cursor.unlink()
+                    except FileNotFoundError:
+                        pass
                     deleted += 1
             except (ValueError, OSError):
                 continue
