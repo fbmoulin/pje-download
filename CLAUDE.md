@@ -13,8 +13,8 @@ docker compose --profile worker up -d  # + pje worker
 
 # Testes e lint
 pytest tests/ -q
-ruff check dashboard_api.py batch_downloader.py mni_client.py worker.py gdrive_downloader.py pje_session.py config.py metrics.py
-ruff format dashboard_api.py batch_downloader.py mni_client.py worker.py gdrive_downloader.py pje_session.py config.py metrics.py
+ruff check dashboard_api.py batch_downloader.py mni_client.py worker.py gdrive_downloader.py pje_session.py config.py metrics.py audit_sync.py file_utils.py async_retry.py
+ruff format dashboard_api.py batch_downloader.py mni_client.py worker.py gdrive_downloader.py pje_session.py config.py metrics.py audit_sync.py file_utils.py async_retry.py
 ```
 
 ## Environment (mínimo)
@@ -30,8 +30,9 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest (377 tests) — run with `pytest tests/ -q` before any commit
-- Audit sink: asyncpg → Railway Postgres (optional, opt-in via `AUDIT_SYNC_ENABLED`)
+- Test suite: pytest (398 tests) — run with `pytest tests/ -q` before any commit
+- Audit sink: asyncpg → Railway Postgres (optional, opt-in via `AUDIT_SYNC_ENABLED`). **Requires PG 15+** — syncer self-disables on older versions (see Sprint 12 B5)
+- Shared helpers: `file_utils.py` (`total_bytes`, `merge_file_lists`), `async_retry.py` (`AsyncRetry` class for exponential backoff)
 
 ## Env Loading (critical gotcha)
 - `config.py` constants are module-level — they may be empty strings if `.env` not yet loaded
@@ -106,6 +107,33 @@ Sprint 11 — P2 Audit: circuit breaker + PJe retry + cursor cleanup (2026-04-17
 - Status: DONE — 371→377 tests
 - Falsos-positivos descartados: indexes em audit_entries (migration 001 já cria), pipelining hset (zero chamadas no código).
 
+Sprint 12 — 5 Production Bugs (2026-04-18, PR #12):
+- Plan: `docs/superpowers/plans/2026-04-18-audit-remediation.md#sprint-1`
+- Scope: 5 bugs surfaced by 3-lens audit (code-quality + adversarial + architecture agents).
+  - **B1** `batch_downloader.py:518` — Playwright success path missing `progress.save(force=True)` before early return (crash-resume re-downloaded completed processos)
+  - **B2** `audit_sync.py:149, 423` — datetime mix naive/aware silently froze lag gauge (now `_coerce_utc` helper)
+  - **B3** `batch_downloader.py:459,511,557,659` — `sum(f["tamanhoBytes"] ...)` KeyError marked successful downloads as failed (now `.get()` with defensive defaults)
+  - **B4** `audit_sync.py:347` — `audit_sync_rows_total{success}` incremented inside `_insert_batch` before `_save_cursor`, overcounting on crash-recovery (moved to `_sync_file` post-cursor-save)
+  - **B5** `audit_sync.py _verify_pg_version` — PG<15 silently ignored `UNIQUE NULLS NOT DISTINCT`, producing duplicate NULL-keyed audit rows. Syncer now self-disables with ERROR log on old PG.
+- Status: DONE — 377→388 tests (+11 targeted regression tests)
+
+Sprint 13 — DRY Helpers + Config Constants (2026-04-18, PR #13, stacked on #12):
+- Plan: `docs/superpowers/plans/2026-04-18-audit-remediation.md#sprint-2`
+- Scope (zero behavior change, pure refactor):
+  - **Q1** Extract `file_utils.total_bytes` helper — replaces 17 copies of `sum(int(item.get("tamanhoBytes", 0) or 0) for item in X)` across worker/dashboard/batch_downloader
+  - **Q2** Dedupe `_merge_downloaded_files` — was verbatim copy in worker.py and batch_downloader.py; now `file_utils.merge_file_lists` with compat aliases
+  - **Q3** Extract `dashboard_api._safe_load_json` helper — consolidates 3 repeated JSON-load-with-except patterns in `_load_history` / `_load_active_batch`
+  - **Q4** Move 7 magic numbers to `config.py` constants: `PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS` (300_000), `PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS` (30_000), `REDIS_BLPOP_TIMEOUT_SECS` (5), `REDIS_CIRCUIT_THRESHOLD` (20), `MNI_HEALTH_CACHE_TTL_SECS` (30), `RESULT_WAIT_TIMEOUT_SECS` (360), `RESULT_POLL_BLPOP_TIMEOUT_SECS` (5) — all env-configurable
+- Gotcha: Python function-scope shadow bug surfaced in `batch_downloader.download_batch` (local `total_bytes` shadowed imported helper); renamed local to `batch_total_bytes` with defensive comment
+- Status: DONE — test count unchanged (388)
+
+Sprint 14 — _run_batch split + AsyncRetry helper (2026-04-18, PR #14, stacked on #13):
+- Plan: `docs/superpowers/plans/2026-04-18-audit-remediation.md#sprint-3a`
+- Scope:
+  - **R3** `async_retry.AsyncRetry` class — consolidates 2 of 3 hand-rolled exponential-backoff loops (worker Redis init + `dashboard._rpush_with_retry`). Third site (`worker._try_official_api`) intentionally kept (retries on HTTP 5xx, not exceptions; returns None on exhaustion). +10 unit tests.
+  - **R2** Split `dashboard_api.DashboardState._run_batch` (170L → 30L orchestrator + 3 phase methods): `_enqueue_batch` (publish + build state), `_poll_results_loop` (drain reply queue), `_finalize_batch` (status ladder + metrics). New `BatchPollState` dataclass. New `_FATAL_WORKER_STATUSES = frozenset({"session_expired", "captcha_required"})`. Preserved order of all side effects + metric increments.
+- Status: DONE — 388→398 tests
+
 ## Security
 
 - `DASHBOARD_API_KEY` env var required for POST endpoints in production (empty = dev mode, no auth)
@@ -151,14 +179,26 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 ## Backlog (não-código)
 
-Tudo acionável-via-código da auditoria técnica de 2026-04-17 está em master. Falta:
+Tudo acionável-via-código das auditorias técnicas de 2026-04-17 e 2026-04-18 está em branches/PRs ativos. Restante:
 
-1. **Deploy prod** — SSH na VPS, setar `AUDIT_SYNC_ENABLED=true` + `DATABASE_URL=<audit_writer URL>`, restart do container `pje-dashboard`. Validado localmente via docker-compose + Playwright.
-2. **Grafana dashboard** (fecha P0.4) — provisionar Grafana (reusar VPS openclaw se possível), consumir `/metrics` do `:8007`. Alertas:
-   - `pje_audit_sync_lag_seconds_event_time > 60` → atraso de sync
-   - `pje_audit_sync_batches_total{status="failed"}` → Railway caiu
-   - `pje_worker_dead_letters_total > 0` → jobs malformados
-   - Liveness probe via `/health` detecta circuit breaker (`_health_status=redis_unreachable`)
+1. **Deploy prod (audit_sync)** — SSH na VPS, setar `AUDIT_SYNC_ENABLED=true` + `DATABASE_URL=<audit_writer URL>`, restart do container `pje-dashboard`. Validado localmente via docker-compose + Playwright.
+2. **Grafana dashboard (P0.4)** — PR #11 (`feature/grafana-dashboard-p04`) implementa o stack Prometheus+Grafana+Alertmanager+blackbox no openclaw VPS. Pendente: merge + deploy openclaw via `ops/monitoring/stack/DEPLOY.md` + criar `@kaiOpsBot` no BotFather.
+3. **Sprint 3B (R1)** — Split `worker.download_process` (438-line mega-method) em phase-methods + `DownloadContext` dataclass. +8 phase-isolation tests. Plan: `docs/superpowers/plans/2026-04-18-audit-remediation.md#sprint-3b`. ~3-4h focused work.
+4. **Sprint 4 (A1/A2)** — Arquitetural (deferido por design):
+   - A1: Typed Redis queue protocol (`JobMessage`, `ResultMessage` dataclasses em novo `protocol.py`). Schedule quando um novo campo precisar ser adicionado.
+   - A2: `dashboard_api` state globals → request-scoped `AppContext`. Schedule quando test-isolation for um problema real.
+
+## PR Stack (2026-04-18)
+
+```
+master
+  ├── PR #11 (feature/grafana-dashboard-p04) — Grafana monitoring stack
+  ├── PR #12 (fix/audit-batch-bugs) — Sprint 12 (5 bugs)
+  ├── PR #13 (refactor/sprint2-polish, stacked on #12) — Sprint 13 (helpers + config)
+  └── PR #14 (refactor/sprint3-runbatch-retry, stacked on #13) — Sprint 14 (_run_batch + AsyncRetry)
+```
+
+Merge order: #12 → #13 → #14 → #11 (orthogonal). Test count trajectory: 377 → 388 → 388 → 398 → 399 (PR #11 adds worker `/metrics` test).
 
 ## Paths
 - WSL: `/mnt/c/projetos-2026/pje-download`
