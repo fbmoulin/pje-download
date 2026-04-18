@@ -30,7 +30,7 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest (398 tests) — run with `pytest tests/ -q` before any commit
+- Test suite: pytest (408 tests) — run with `pytest tests/ -q` before any commit
 - Audit sink: asyncpg → Railway Postgres (optional, opt-in via `AUDIT_SYNC_ENABLED`). **Requires PG 15+** — syncer self-disables on older versions (see Sprint 12 B5)
 - Shared helpers: `file_utils.py` (`total_bytes`, `merge_file_lists`), `async_retry.py` (`AsyncRetry` class for exponential backoff)
 
@@ -183,7 +183,7 @@ Tudo acionável-via-código das auditorias técnicas de 2026-04-17 e 2026-04-18 
 
 1. **Deploy prod** — SSH na VPS, setar `AUDIT_SYNC_ENABLED=true` + `DATABASE_URL=<audit_writer URL>`, restart do container `pje-dashboard`. Validado localmente via docker-compose + Playwright.
 2. ~~**Grafana dashboard** (fecha P0.4)~~ — DONE 2026-04-18. Stack (Prometheus 2.55 + Grafana 11.3 + Alertmanager 0.27 + blackbox_exporter 0.25) provisionada no openclaw VPS via `ops/monitoring/stack/` (docker-compose). Scrape cross-host via Tailscale. 4 scrape jobs + 5 alert rules + 8 panels. Telegram `@kaiOpsBot` dedicado. Spec: `docs/superpowers/specs/2026-04-18-grafana-dashboard-design.md`.
-3. **Sprint 3B (R1)** — Split `worker.download_process` (438-line mega-method) em phase-methods + `DownloadContext` dataclass. +8 phase-isolation tests. Plan: `docs/superpowers/plans/2026-04-18-audit-remediation.md#sprint-3b`. ~3-4h focused work.
+3. ~~**Sprint 3B (R1)**~~ — DONE 2026-04-18. PR #15 (`refactor/sprint3b-download-process-split`): `download_process` 438L→80L orchestrator + `DownloadContext` dataclass + 4 `_phase_*` methods + 9 isolation tests (399→408).
 4. **Sprint 4 (A1/A2)** — Arquitetural (deferido por design):
    - A1: Typed Redis queue protocol (`JobMessage`, `ResultMessage` dataclasses em novo `protocol.py`). Schedule quando um novo campo precisar ser adicionado.
    - A2: `dashboard_api` state globals → request-scoped `AppContext`. Schedule quando test-isolation for um problema real.

@@ -469,7 +469,7 @@ curl http://localhost:8007/metrics      # metricas Prometheus
 
 | Workflow | Trigger | Etapas |
 |----------|---------|--------|
-| `ci.yml` | push / PR | ruff lint → pytest (398 testes em master) — badge acima |
+| `ci.yml` | push / PR | ruff lint → pytest (408 testes em master) — badge acima |
 | `deploy.yml` | CI concluido com sucesso em `master` | rsync → `docker compose up --build` no VPS → healthcheck worker/dashboard → smoke test da fila |
 | `dependabot.yml` | semanal | atualiza actions + pip deps |
 

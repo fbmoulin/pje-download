@@ -95,21 +95,21 @@ Plus:
 
 All 63 dashboard integration tests pass unchanged — behavior parity verified.
 
-## Sprint 3B — R1: Split `download_process` (DEFERRED)
+## Sprint 3B — R1: Split `download_process` (DONE)
 
-**Status:** Planned, not yet executed.
-**Target branch:** `refactor/sprint3b-download-process-split`
-**Estimate:** ~3–4 hours focused work, +8 phase-isolation tests
+**Status:** SHIPPED 2026-04-18. PR #15 (`refactor/sprint3b-download-process-split`), commit `41626b5`.
+**Actual:** ~2h focused work, +9 phase-isolation tests (399→408)
 
-The 438-line `worker.py::download_process` method orchestrates 8 download phases (GDrive link → MNI → API fallback → Playwright fallback) with nested state mutation across `downloaded_files`, `expected_total_docs`, and `anexos_pendentes`. Splitting it without breaking behaviour requires careful attention to phase-state ordering because the 4 fallback strategies run in cascade.
-
-Plan:
-- Extract phase methods: `_phase_gdrive_link`, `_phase_mni`, `_phase_api_fallback`, `_phase_browser_fallback`.
-- Introduce `DownloadContext` dataclass holding transient state shared across phases.
-- Main method becomes a phase orchestrator (~100 lines), iterating the strategies and merging results.
-- Unit-test each phase in isolation (currently impossible — the main method requires full Playwright+MNI+GDrive fixture stacks).
-
-Deferred because R1 carries the highest risk in the remediation cycle and benefits from a fresh focused session rather than being stacked on an already-long session with 3 shipped PRs.
+Shipped:
+- `DownloadContext` dataclass — transient state carrier across phases.
+- `_resolve_output_dir` — path validation + mkdir extracted from orchestrator setup.
+- `_make_progress_cb` — snapshot-based incremental progress closure.
+- `_phase_gdrive` (Phase 0) — returns `dict|None`.
+- `_phase_mni` (Phase 1) — returns `dict|None`.
+- `_phase_api_fallback` (Phase 2) — returns `bool`.
+- `_phase_browser_fallback` (Phase 3) — returns `dict|None`.
+- Orchestrator reduced from 438L to ~80L.
+- 9 tests in `tests/test_download_phases.py` — each phase testable without Playwright/MNI/GDrive stacks.
 
 ## Sprint 4 — Architectural (DEFERRED, schedule-when-touched)
 
