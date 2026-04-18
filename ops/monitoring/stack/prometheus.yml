@@ -1,0 +1,80 @@
+# Prometheus 2.55 config — monitoring stack for pje-download (and future apps).
+# Spec: docs/superpowers/specs/2026-04-18-grafana-dashboard-design.md §3
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels:
+    monitor: openclaw-ops
+
+# Alert rule files mounted from per-app directories (bind-mount in compose).
+rule_files:
+  - /etc/prometheus/rules/pje/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+scrape_configs:
+  # ── pje-download DASHBOARD process (port 8007) ─────────────────────────
+  - job_name: pje-dashboard
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets: ["${PJE_TAILNET_IP}:8007"]
+        labels:
+          app: pje-download
+          process: dashboard
+
+  # ── pje-download WORKER process (port 8006) ───────────────────────────
+  - job_name: pje-worker
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets: ["${PJE_TAILNET_IP}:8006"]
+        labels:
+          app: pje-download
+          process: worker
+
+  # ── Blackbox probe: dashboard /healthz ────────────────────────────────
+  - job_name: pje-dashboard-probe
+    metrics_path: /probe
+    params:
+      module: [http_2xx_or_503]
+    static_configs:
+      - targets: ["http://${PJE_TAILNET_IP}:8007/healthz"]
+        labels:
+          app: pje-download
+          process: dashboard
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+
+  # ── Blackbox probe: worker /health (circuit breaker visibility) ───────
+  - job_name: pje-worker-probe
+    metrics_path: /probe
+    params:
+      module: [http_2xx_or_503]
+    static_configs:
+      - targets: ["http://${PJE_TAILNET_IP}:8006/health"]
+        labels:
+          app: pje-download
+          process: worker
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+
+  # ── Self-scrape (Prometheus monitoring itself) ────────────────────────
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
