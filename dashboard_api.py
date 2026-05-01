@@ -23,6 +23,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hmac
 import json
 import time
@@ -72,6 +73,7 @@ import audit_sync
 
 AUDIT_SYNCER_KEY: web.AppKey = web.AppKey("audit_syncer", audit_sync.AuditSyncer)
 AUDIT_SYNC_TASK_KEY: web.AppKey = web.AppKey("audit_sync_task", asyncio.Task)
+APP_CTX_KEY: web.AppKey = web.AppKey("_ctx", "AppContext")
 
 _MAX_DOWNLOAD_PAYLOAD_BYTES = 10 * 1024 * 1024  # hard cap for POST /api/download (H5)
 
@@ -472,16 +474,18 @@ class DashboardState:
         )
 
     def _batch_job_payload(self, job: BatchJob, numero_processo: str) -> dict:
+        from protocol import JobMessage
+
         safe_name = sanitize_filename(numero_processo)
-        return {
-            "jobId": f"{job.id}:{uuid.uuid4().hex[:8]}",
-            "batchId": job.id,
-            "numeroProcesso": numero_processo,
-            "includeAnexos": job.include_anexos,
-            "replyQueue": self._result_queue(job.id),
-            "outputSubdir": f"{job.id}/{safe_name}",
-            "gdriveUrl": job.gdrive_map.get(numero_processo),
-        }
+        return JobMessage(
+            jobId=f"{job.id}:{uuid.uuid4().hex[:8]}",
+            batchId=job.id,
+            numeroProcesso=numero_processo,
+            includeAnexos=job.include_anexos,
+            replyQueue=self._result_queue(job.id),
+            outputSubdir=f"{job.id}/{safe_name}",
+            gdriveUrl=job.gdrive_map.get(numero_processo),
+        )
 
     def _apply_result(self, job: BatchJob, result: dict) -> str:
         numero = result.get("numeroProcesso", "")
@@ -724,8 +728,10 @@ class DashboardState:
                 continue
 
             _, result_json = item
+            from protocol import ProgressMessage, ResultMessage
+
             try:
-                result = json.loads(result_json)
+                result: ResultMessage | ProgressMessage = json.loads(result_json)
             except json.JSONDecodeError as exc:
                 log.warning(
                     "dashboard.batch.malformed_result",
@@ -927,25 +933,40 @@ class DashboardState:
 
 
 # ─────────────────────────────────────────────
-# HANDLERS HTTP
+# APP CONTEXT (request-scoped, replaces module globals)
 # ─────────────────────────────────────────────
 
-state: DashboardState | None = None
-_batch_lock = asyncio.Lock()
 
-# ── Session login state ──
-_login_running: bool = False
-_login_task: asyncio.Task | None = None
-_login_last_ok: bool | None = None  # resultado do último login
+@dataclasses.dataclass
+class AppContext:
+    """Request-scoped container for all mutable dashboard state.
+
+    Stored in ``app["_ctx"]`` at ``create_app()`` time and accessed via
+    ``request.app[APP_CTX_KEY]`` in handlers and middlewares. Replaces the
+    seven module-level mutable globals that persisted between test invocations.
+    """
+
+    state: DashboardState
+    batch_lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock)
+    login_running: bool = False
+    login_task: asyncio.Task | None = None
+    login_last_ok: bool | None = None
+    rate_buckets: dict[str, list[float]] = dataclasses.field(default_factory=dict)
+    rate_bucket_last_seen: dict[str, float] = dataclasses.field(default_factory=dict)
+
+
+# ─────────────────────────────────────────────
+# HANDLERS HTTP
+# ─────────────────────────────────────────────
 
 
 async def handle_status(request: web.Request) -> web.Response:
     """GET /api/status — Status geral incluindo health do worker."""
-    if state is None:
-        return web.json_response({"error": "Service not initialized"}, status=503)
+    ctx: AppContext = request.app[APP_CTX_KEY]
+    state = ctx.state
     current = state.get_current_progress()
 
-    worker_data = await _fetch_worker_health()
+    worker_data = await _fetch_worker_health(state)
     worker_status = worker_data.get("status", "unknown")
 
     return web.json_response(
@@ -965,11 +986,8 @@ async def handle_status(request: web.Request) -> web.Response:
 
 async def handle_healthz(request: web.Request) -> web.Response:
     """GET /healthz — Dashboard readiness for orchestrators."""
-    if state is None:
-        return web.json_response(
-            {"service": "pje-dashboard", "ready": False, "reason": "uninitialized"},
-            status=503,
-        )
+    ctx: AppContext = request.app[APP_CTX_KEY]
+    state = ctx.state
 
     checks: dict[str, str | bool | None] = {}
     ready = True
@@ -1004,11 +1022,8 @@ async def handle_healthz(request: web.Request) -> web.Response:
     )
 
 
-async def _fetch_worker_health() -> dict:
+async def _fetch_worker_health(state: DashboardState) -> dict:
     """Fetch worker health, returning a normalized payload for dashboard endpoints."""
-    if state is None:
-        return {"status": "unknown", "healthy": False}
-
     try:
         sess = state.get_worker_http()
         async with sess.get(
@@ -1025,8 +1040,8 @@ async def _fetch_worker_health() -> dict:
 
 async def handle_download(request: web.Request) -> web.Response:
     """POST /api/download — Submeter processos para download."""
-    if state is None:
-        return web.json_response({"error": "Service not initialized"}, status=503)
+    ctx: AppContext = request.app[APP_CTX_KEY]
+    state = ctx.state
     cl = request.content_length
     if cl is not None and cl > _MAX_DOWNLOAD_PAYLOAD_BYTES:
         return web.json_response(
@@ -1103,7 +1118,7 @@ async def handle_download(request: web.Request) -> web.Response:
     include_anexos = body.get("include_anexos", True)
 
     # ── Check + submit under lock (BUG-3) ──
-    async with _batch_lock:
+    async with ctx.batch_lock:
         if state.current_batch_id:
             current = state.batches.get(state.current_batch_id)
             if current and current.status in ("queued", "running"):
@@ -1129,8 +1144,8 @@ async def handle_download(request: web.Request) -> web.Response:
 
 async def handle_progress(request: web.Request) -> web.Response:
     """GET /api/progress — Progresso do batch atual."""
-    if state is None:
-        return web.json_response({"error": "Service not initialized"}, status=503)
+    ctx: AppContext = request.app[APP_CTX_KEY]
+    state = ctx.state
     current = state.get_current_progress()
     if not current:
         return web.json_response(
@@ -1141,8 +1156,8 @@ async def handle_progress(request: web.Request) -> web.Response:
 
 async def handle_history(request: web.Request) -> web.Response:
     """GET /api/history — Histórico de todos os batches."""
-    if state is None:
-        return web.json_response({"error": "Service not initialized"}, status=503)
+    ctx: AppContext = request.app[APP_CTX_KEY]
+    state = ctx.state
     history = []
     for batch_id, job in sorted(state.batches.items(), reverse=True):
         total_docs = 0
@@ -1173,8 +1188,8 @@ async def handle_history(request: web.Request) -> web.Response:
 
 async def handle_batch_detail(request: web.Request) -> web.Response:
     """GET /api/batch/{id} — Detalhes de um batch específico."""
-    if state is None:
-        return web.json_response({"error": "Service not initialized"}, status=503)
+    ctx: AppContext = request.app[APP_CTX_KEY]
+    state = ctx.state
     batch_id = request.match_info["id"]
     job = state.batches.get(batch_id)
     if not job:
@@ -1216,6 +1231,7 @@ async def handle_batch_detail(request: web.Request) -> web.Response:
 
 async def handle_session_status(request: web.Request) -> web.Response:
     """GET /api/session/status — Estado da sessão PJe salva em disco."""
+    ctx: AppContext = request.app[APP_CTX_KEY]
     from pje_session import SESSION_FILE
 
     exists = SESSION_FILE.exists()
@@ -1230,8 +1246,8 @@ async def handle_session_status(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "file_exists": exists,
-            "login_running": _login_running,
-            "last_login_ok": _login_last_ok,
+            "login_running": ctx.login_running,
+            "last_login_ok": ctx.login_last_ok,
             "modified_at": modified_at,
         }
     )
@@ -1258,21 +1274,20 @@ async def handle_session_verify(request: web.Request) -> web.Response:
 
 async def handle_session_login(request: web.Request) -> web.Response:
     """POST /api/session/login — Dispara login interativo no browser local."""
-    global _login_running, _login_task, _login_last_ok
+    ctx: AppContext = request.app[APP_CTX_KEY]
 
-    if _login_running:
+    if ctx.login_running:
         return web.json_response({"error": "Login já em andamento"}, status=409)
 
     # Set flag BEFORE create_task to prevent TOCTOU race
-    _login_running = True
+    ctx.login_running = True
 
     async def _do_login() -> None:
-        global _login_running, _login_last_ok
         try:
             from pje_session import interactive_login
 
             ok = await interactive_login()
-            _login_last_ok = ok
+            ctx.login_last_ok = ok
             log.info("dashboard.session.login_done", ok=ok)
             import audit
             import config
@@ -1287,12 +1302,12 @@ async def handle_session_login(request: web.Request) -> web.Response:
                 )
             )
         except Exception as exc:
-            _login_last_ok = False
+            ctx.login_last_ok = False
             log.error("dashboard.session.login_error", error=str(exc))
         finally:
-            _login_running = False
+            ctx.login_running = False
 
-    _login_task = asyncio.create_task(_do_login())
+    ctx.login_task = asyncio.create_task(_do_login())
     return web.json_response(
         {"message": "Login iniciado — complete no browser que será aberto"}, status=202
     )
@@ -1348,6 +1363,9 @@ async def _on_cleanup(app: web.Application) -> None:
         except Exception as exc:
             log.warning("dashboard.audit_sync.close_failed", error=str(exc))
 
+    ctx: AppContext | None = app.get(APP_CTX_KEY) if hasattr(app, "get") else None
+    state = ctx.state if ctx is not None else None
+
     if state and state.current_batch_id:
         job = state.batches.get(state.current_batch_id)
         if job and job.progress:
@@ -1381,8 +1399,9 @@ async def _on_cleanup(app: web.Application) -> None:
 
 
 async def _on_startup(app: web.Application) -> None:
-    if state is not None:
-        await state.resume_active_batch()
+    ctx: AppContext | None = app.get(APP_CTX_KEY) if hasattr(app, "get") else None
+    if ctx is not None:
+        await ctx.state.resume_active_batch()
 
     syncer = app.get(AUDIT_SYNCER_KEY) if hasattr(app, "get") else None
     if not isinstance(syncer, audit_sync.AuditSyncer):
@@ -1428,12 +1447,13 @@ def _rotate_audit_logs_on_startup() -> None:
 
 def create_app(output_dir: Path) -> web.Application:
     """Cria a aplicação aiohttp."""
-    global state
     _validate_runtime_config()
     _rotate_audit_logs_on_startup()
-    state = DashboardState(output_dir)
+
+    ctx = AppContext(state=DashboardState(output_dir))
 
     app = web.Application()
+    app[APP_CTX_KEY] = ctx
     app[AUDIT_SYNCER_KEY] = audit_sync.create_syncer(
         enabled=AUDIT_SYNC_ENABLED,
         database_url=DATABASE_URL,
@@ -1478,8 +1498,6 @@ def create_app(output_dir: Path) -> web.Application:
 # RATE LIMITING (in-memory, per-IP)
 # ─────────────────────────────────────────────
 
-_rate_buckets: dict[str, list[float]] = {}
-_rate_bucket_last_seen: dict[str, float] = {}
 RATE_LIMIT_MAX = 10  # max requests
 RATE_LIMIT_WINDOW = 60.0  # per N seconds
 _BUCKET_EXPIRE = 300.0  # purge IPs inactive for 5 minutes
@@ -1493,14 +1511,18 @@ _ALLOWED_ORIGINS = {
 }
 
 
-def _purge_stale_buckets(now: float) -> None:
+def _purge_stale_buckets(
+    now: float,
+    rate_buckets: dict[str, list[float]],
+    rate_bucket_last_seen: dict[str, float],
+) -> None:
     """Remove buckets for IPs that haven't been seen in _BUCKET_EXPIRE seconds."""
     stale = [
-        ip for ip, last in _rate_bucket_last_seen.items() if now - last > _BUCKET_EXPIRE
+        ip for ip, last in rate_bucket_last_seen.items() if now - last > _BUCKET_EXPIRE
     ]
     for ip in stale:
-        _rate_buckets.pop(ip, None)
-        _rate_bucket_last_seen.pop(ip, None)
+        rate_buckets.pop(ip, None)
+        rate_bucket_last_seen.pop(ip, None)
 
 
 def _get_rate_limit_ip(request: web.Request) -> str:
@@ -1524,15 +1546,19 @@ async def rate_limit_middleware(request: web.Request, handler):
     if request.method != "POST":
         return await handler(request)
 
+    ctx: AppContext = request.app[APP_CTX_KEY]
+    rate_buckets = ctx.rate_buckets
+    rate_bucket_last_seen = ctx.rate_bucket_last_seen
+
     ip = _get_rate_limit_ip(request)
     now = time.monotonic()
 
     # Periodic cleanup of stale buckets (every ~100 requests on average)
-    if len(_rate_buckets) > 50:
-        _purge_stale_buckets(now)
+    if len(rate_buckets) > 50:
+        _purge_stale_buckets(now, rate_buckets, rate_bucket_last_seen)
 
-    bucket = _rate_buckets.setdefault(ip, [])
-    _rate_bucket_last_seen[ip] = now
+    bucket = rate_buckets.setdefault(ip, [])
+    rate_bucket_last_seen[ip] = now
     # Prune old entries
     bucket[:] = [t for t in bucket if now - t < RATE_LIMIT_WINDOW]
     if len(bucket) >= RATE_LIMIT_MAX:

@@ -1435,7 +1435,9 @@ class PJeSessionWorker:
         queue_name: str = "kratos:pje:results",
     ) -> None:
         """Publish job result to Redis with retry. Falls back to local log on failure."""
-        result_json = json.dumps(result_data)
+        from protocol import result_to_json
+
+        result_json = result_to_json(result_data)
         for attempt in range(max_retries):
             try:
                 await self.redis.rpush(queue_name, result_json)
@@ -1490,7 +1492,9 @@ class PJeSessionWorker:
             phase if phase in {"done", "failed"} else "running"
         )
 
-        payload = {
+        from protocol import ProgressMessage, progress_to_json
+
+        payload: ProgressMessage = {
             "eventType": "progress",
             "jobId": job.get("jobId", ""),
             "batchId": job.get("batchId"),
@@ -1505,7 +1509,7 @@ class PJeSessionWorker:
             "updatedAt": datetime.now(UTC).isoformat(),
         }
         try:
-            await self.redis.rpush(queue_name, json.dumps(payload, ensure_ascii=False))
+            await self.redis.rpush(queue_name, progress_to_json(payload))
             metrics.worker_progress_events_total.labels(
                 phase=phase,
                 status=resolved_status,
@@ -1530,16 +1534,16 @@ class PJeSessionWorker:
             log.warning("pje.queue.dead_letter_skipped", reason=reason)
             return
 
-        entry = {
+        from protocol import DeadLetterEntry, dead_letter_to_json
+
+        entry: DeadLetterEntry = {
             "reason": reason,
             "payload": payload,
             "details": details or {},
             "timestamp": datetime.now(UTC).isoformat(),
         }
         try:
-            await self.redis.lpush(
-                DEAD_LETTER_QUEUE, json.dumps(entry, ensure_ascii=False)
-            )
+            await self.redis.lpush(DEAD_LETTER_QUEUE, dead_letter_to_json(entry))
             metrics.worker_dead_letters_total.labels(reason=reason).inc()
         except (redis.ConnectionError, redis.TimeoutError, OSError) as exc:
             metrics.worker_publish_failures_total.labels(kind="dead_letter").inc()
@@ -1600,8 +1604,10 @@ class PJeSessionWorker:
                 continue
 
             _, job_json = result
+            from protocol import JobMessage, job_from_json
+
             try:
-                job = json.loads(job_json)
+                job: JobMessage = job_from_json(job_json)
             except json.JSONDecodeError as exc:
                 log.error("pje.queue.invalid_json", error=str(exc))
                 await self._publish_dead_letter(
@@ -1610,16 +1616,12 @@ class PJeSessionWorker:
                     details={"error": str(exc)},
                 )
                 continue
-
-            missing_fields = [
-                key for key in ("jobId", "numeroProcesso") if key not in job
-            ]
-            if missing_fields:
-                log.error("pje.queue.missing_fields", keys=list(job.keys()))
+            except ValueError as exc:
+                log.error("pje.queue.missing_fields", error=str(exc))
                 await self._publish_dead_letter(
-                    json.dumps(job, ensure_ascii=False),
+                    job_json,
                     "missing_fields",
-                    details={"missing": missing_fields, "keys": list(job.keys())},
+                    details={"error": str(exc)},
                 )
                 continue
 
@@ -1786,14 +1788,16 @@ class PJeSessionWorker:
         files: list | None = None,
         error: str | None = None,
     ) -> dict:
-        return {
-            "jobId": job_id,
-            "numeroProcesso": numero_processo,
-            "status": status,
-            "arquivosDownloaded": files or [],
-            "errorMessage": error,
-            "downloadedAt": datetime.now(UTC).isoformat(),
-        }
+        from protocol import ResultMessage
+
+        return ResultMessage(
+            jobId=job_id,
+            numeroProcesso=numero_processo,
+            status=status,
+            arquivosDownloaded=files or [],
+            errorMessage=error,
+            downloadedAt=datetime.now(UTC).isoformat(),
+        )
 
     async def _log_job_result(
         self, job_id: str, numero_processo: str, files: list
