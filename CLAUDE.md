@@ -184,9 +184,9 @@ Tudo acionável-via-código das auditorias técnicas de 2026-04-17 e 2026-04-18 
 1. **Deploy prod** — SSH na VPS, setar `AUDIT_SYNC_ENABLED=true` + `DATABASE_URL=<audit_writer URL>`, restart do container `pje-dashboard`. Validado localmente via docker-compose + Playwright.
 2. ~~**Grafana dashboard** (fecha P0.4)~~ — DONE 2026-04-18. Stack (Prometheus 2.55 + Grafana 11.3 + Alertmanager 0.27 + blackbox_exporter 0.25) provisionada no openclaw VPS via `ops/monitoring/stack/` (docker-compose). Scrape cross-host via Tailscale. 4 scrape jobs + 5 alert rules + 8 panels. Telegram `@kaiOpsBot` dedicado. Spec: `docs/superpowers/specs/2026-04-18-grafana-dashboard-design.md`.
 3. ~~**Sprint 3B (R1)**~~ — DONE 2026-04-18. PR #15 (`refactor/sprint3b-download-process-split`): `download_process` 438L→80L orchestrator + `DownloadContext` dataclass + 4 `_phase_*` methods + 9 isolation tests (399→408).
-4. **Sprint 4 (A1/A2)** — Arquitetural (deferido por design):
-   - A1: Typed Redis queue protocol (`JobMessage`, `ResultMessage` dataclasses em novo `protocol.py`). Schedule quando um novo campo precisar ser adicionado.
-   - A2: `dashboard_api` state globals → request-scoped `AppContext`. Schedule quando test-isolation for um problema real.
+4. ~~**Sprint 4 (A1/A2)**~~ — DONE 2026-05-01. PR #20 squash-merged (`4be29fe`): A1 `protocol.py` (`JobMessage`/`ResultMessage`/`ProgressMessage`/`DeadLetterEntry` typed dataclasses, 122L) + worker `_publish_result` migration + `job_from_json` input validation; A2 `dashboard_api` 7 module globals collapsed into `AppContext` dataclass at `app[APP_CTX_KEY]`. +8 tests (416→424), wire format byte-identical, ruff clean.
+   - Follow-up (5-line): migrate `worker._try_official_api` to construct `ResultMessage` via typed helper instead of inline dict — left out of PR #20 to keep scope tight.
+   - Follow-up (typing): add `batchId: NotRequired[str | None]` to `ProgressMessage` (worker.py:1494 sets it but type doesn't declare; surfaced by code-reviewer agent).
 
 ## Observability
 
