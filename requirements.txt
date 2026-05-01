@@ -1,9 +1,9 @@
-playwright==1.58.0
-prometheus_client>=0.21.0
+playwright==1.59.0
+prometheus_client>=0.25.0
 redis[hiredis]==7.4.0
 structlog==25.5.0
 zeep==4.3.2
 aiohttp==3.13.5
-gdown>=5.1.0
-requests>=2.31.0
-asyncpg==0.30.0
+gdown>=6.0.0
+requests>=2.33.1
+asyncpg==0.31.0
