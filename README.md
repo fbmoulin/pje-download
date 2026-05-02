@@ -55,6 +55,7 @@ CLI offline:
 | `metrics.py` | ~216 | Registry Prometheus dedicado — MNI, GDrive, worker, control plane, audit sync (6 series) |
 | `config.py` | ~165 | Configuracao centralizada — todas as variaveis env-configuraveis (incl. audit sync + 7 runtime timeouts extraidos em Sprint 13) |
 | `async_retry.py` | ~109 | `AsyncRetry` class — exponential backoff + jitter genérico, usado por worker Redis init e dashboard `_rpush_with_retry`. Re-raises on exhaustion, no-ops on CancelledError. 10 tests dedicados |
+| `protocol.py` | ~122 | Typed Redis queue protocol (Sprint 15 / v2.5.0) — `JobMessage`, `ResultMessage`, `ProgressMessage`, `DeadLetterEntry` TypedDicts + lossless `from_json`/`to_json` helpers. `job_from_json` rejects non-dict / missing required keys. Wire format byte-identical to pre-v2.5.0 — TypedDict é dict em runtime. 5 unit tests |
 | `file_utils.py` | ~77 | Helpers compartilhados — `total_bytes(files)` tolerante a missing/None/string values, `merge_file_lists(*groups)` com dedup por checksum. Usados em 17+ sites antes duplicados |
 | `audit.py` | ~100 | CNJ 615/2025 audit trail append-only (JSON-L) + `rotate_logs` com cleanup de sidecars `.cursor` |
 | `dashboard.html` | ~193 | Frontend HTML com Google Fonts, data-animate attrs e card de sessao PJe |
@@ -469,7 +470,7 @@ curl http://localhost:8007/metrics      # metricas Prometheus
 
 | Workflow | Trigger | Etapas |
 |----------|---------|--------|
-| `ci.yml` | push / PR | ruff lint → pytest (408 testes em master) — badge acima |
+| `ci.yml` | push / PR | ruff lint → pytest (424 testes em master, v2.5.0) — badge acima |
 | `deploy.yml` | CI concluido com sucesso em `master` | rsync → `docker compose up --build` no VPS → healthcheck worker/dashboard → smoke test da fila |
 | `dependabot.yml` | semanal | atualiza actions + pip deps |
 

@@ -138,19 +138,19 @@ Surfaced by 4-lens parallel audit (architecture, reliability, test-coverage, API
 | M7 | Disk threshold hardcoded at 100 MB — far too low for production | `worker.py`, `config.py` | `DISK_LOW_THRESHOLD_MB` env-var (default 2000 MB) replaces literal `100` |
 | M8 | Alert fatigue — `PjeAuditSyncBatchesFailing` fires on any single failure | `ops/monitoring/pje/alert-rules.yml` | `> 0` → `> 3` (3 failures in 10 min window before paging) |
 
-## Sprint 4 — Architectural (DEFERRED, schedule-when-touched)
+## Sprint 4 — Architectural (A1+A2 DONE 2026-05-01 / v2.5.0; worker split still deferred)
 
-Low urgency. Schedule only when the affected code is being modified for another reason:
+Originally deferred as low-urgency. A1+A2 lifted on 2026-05-01 when a broken WIP intermediate state surfaced during a health-check session (deleted `APP_CTX_KEY` in working tree → 13 broken refs + test ImportError) — recovered via `git checkout`, then completed cleanly.
 
-- **A1** — Typed Redis queue protocol. Create `protocol.py` with `JobMessage` / `ResultMessage` / `DeadLetterEntry` typed dicts. Dashboard and worker use them for serialise/deserialise. Enables schema versioning and earlier detection of protocol drift. Defer until a new field needs to be added to the message shape.
-- **A2** — `dashboard_api.py` module-level globals (`state`, `_rate_buckets`, `_login_task`, etc.) → request-scoped `AppContext` dataclass stored in `app["_context"]`. Enables parallel test execution and cleaner isolation. Defer until parallel-test-execution is a pain point.
-- **Worker.py splitting** — Break `worker.py` (1860 lines) into `worker_consumer.py` (queue loop), `worker_session.py` (Playwright lifecycle), `worker_health.py` (`/health`+`/metrics` server). Big rewrite, low ROI at current 1-user scale. Revisit if worker grows >2500 lines.
+- **A1 — DONE** in PR [#20](https://github.com/fbmoulin/pje-download/pull/20) commit `14a5cd5` (typed dataclasses) + `23a04b1` (worker fix). Created `protocol.py` (122L) with `JobMessage` / `ResultMessage` / `ProgressMessage` / `DeadLetterEntry` TypedDicts + lossless `from_json` / `to_json` helpers. `worker._publish_result` and `_publish_dead_letter` migrated. `job_from_json` validates required fields (rejects non-dict, missing `jobId`/`numeroProcesso`). Wire-format byte-identical to v2.4 — old workers/dashboards interop. **Remaining producer site** `worker._try_official_api` deferred to follow-up PR (~5 lines, scheduled remote agent on 2026-05-08 per routine `trig_01RDCVjNrboQkRtZqhmqJyWs`).
+- **A2 — DONE** in PR #20 commit `72b0325`. 7 module-level mutable globals in `dashboard_api.py` (`state`, `_batch_lock`, `_login_running`, `_login_task`, `_login_last_ok`, `_rate_buckets`, `_rate_bucket_last_seen`) collapsed into `AppContext` dataclass at `app[APP_CTX_KEY]`. Handlers + middlewares read via `request.app[APP_CTX_KEY]`. Eliminates test-isolation drift between invocations.
+- **Worker.py splitting — STILL DEFERRED**. Break `worker.py` (1860 lines) into `worker_consumer.py` (queue loop), `worker_session.py` (Playwright lifecycle), `worker_health.py` (`/health`+`/metrics` server). Big rewrite, low ROI at current 1-user scale. Revisit if worker grows >2500 lines.
 
 ## Cumulative Outcome
 
-| Metric | Before audit (2026-04-18) | After Sprint 5B | Delta |
-|--------|---------------------------|-----------------|-------|
-| Test count | 377 | 416 | +39 |
+| Metric | Before audit (2026-04-18) | After v2.5.0 (2026-05-01) | Delta |
+|--------|---------------------------|---------------------------|-------|
+| Test count | 377 | 424 | +47 |
 | Duplicated helpers | 2 copies of `_merge_downloaded_files`, 17 copies of `sum(tamanhoBytes)`, 2 retry loops | 0 duplicates | Consolidated |
 | Inline magic numbers | 9 timeouts/thresholds | 0 | Now env-configurable in `config.py` |
 | 438-line mega-method | `download_process` | Split + orchestrator | Closed (Sprint 3B) |

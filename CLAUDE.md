@@ -134,6 +134,15 @@ Sprint 14 — _run_batch split + AsyncRetry helper (2026-04-18, PR #14, stacked 
   - **R2** Split `dashboard_api.DashboardState._run_batch` (170L → 30L orchestrator + 3 phase methods): `_enqueue_batch` (publish + build state), `_poll_results_loop` (drain reply queue), `_finalize_batch` (status ladder + metrics). New `BatchPollState` dataclass. New `_FATAL_WORKER_STATUSES = frozenset({"session_expired", "captcha_required"})`. Preserved order of all side effects + metric increments.
 - Status: DONE — 388→398 tests
 
+Sprint 15 — A1 typed protocol + A2 AppContext (2026-05-01, PR #20, tagged v2.5.0):
+- Plan: `docs/superpowers/plans/2026-04-18-audit-remediation.md#sprint-4` (originally deferred — lifted when test-isolation drift surfaced via broken WIP)
+- Scope:
+  - **A1** New `protocol.py` (122L) with `JobMessage` / `ResultMessage` / `ProgressMessage` / `DeadLetterEntry` TypedDicts + `from_json`/`to_json` helpers + `job_from_json` validation (rejects non-dict, missing `jobId`/`numeroProcesso`). `worker._publish_result` and `_publish_dead_letter` migrated. Wire format byte-identical to v2.4 — old workers/dashboards interop. Remaining producer site `worker._try_official_api` deferred to follow-up PR.
+  - **A2** 7 module-level mutable globals in `dashboard_api.py` (`state`, `_batch_lock`, `_login_running`, `_login_task`, `_login_last_ok`, `_rate_buckets`, `_rate_bucket_last_seen`) collapsed into `AppContext` dataclass at `app[APP_CTX_KEY]`. Handlers + middlewares read via `request.app[APP_CTX_KEY]`. Eliminates test-isolation drift between invocations.
+  - **chore** Untracked accidental `.coverage` 53KB blob, gitignored `.coverage` + `.pytest_cache/`.
+- Closure commit: `d90fb26` (CLAUDE.md backlog #4 marked DONE, this Sprint 15 entry, README test count + protocol.py row).
+- Status: DONE — 416→424 tests, ruff clean, 4/4 CI checks green. Approved by `coderabbit:code-reviewer` agent (zero blocking, 5 non-blocking suggestions tracked as backlog item 4 follow-ups). Tag `v2.5.0` annotated.
+
 ## Security
 
 - `DASHBOARD_API_KEY` env var required for POST endpoints in production (empty = dev mode, no auth)
