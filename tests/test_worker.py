@@ -661,7 +661,7 @@ class TestConsumeQueueShutdown:
         worker._publish_result = AsyncMock()
 
         with patch.object(w, "log", MagicMock()):
-            await worker.consume_queue(shutdown)
+            await asyncio.wait_for(worker.consume_queue(shutdown), timeout=2)
 
         # Must have processed exactly one job then exited (not looped forever).
         assert called_count == 1, (
