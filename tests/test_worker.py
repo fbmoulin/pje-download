@@ -617,11 +617,10 @@ class TestConsumeQueueShutdown:
 
     @pytest.mark.asyncio
     async def test_session_expired_mid_job_exits_loop(self):
-        """consume_queue must stop after a job returns status='session_expired' when MNI unavailable.
-
-        Without this guard the worker would block indefinitely retrying jobs
-        with an invalidated PJe session, producing cascading failures.
-        Line ~1643 in worker.py: `if result_data["status"] == "session_expired" and self.mni_client is None`.
+        """
+        Verify that the consume_queue loop exits after processing a job whose result status is "session_expired" when no MNI fallback is available.
+        
+        This ensures the worker does not repeatedly retry jobs that fail due to an invalidated PJe session and instead stops consuming further jobs in that condition.
         """
         import asyncio
 
@@ -633,6 +632,16 @@ class TestConsumeQueueShutdown:
         called_count = 0
 
         async def blpop_one_job(*args, **kwargs):
+            """
+            Simulate a single Redis BLPOP call that returns one job payload and increments a call counter.
+            
+            This helper increments the enclosing `called_count` variable and returns a two-tuple:
+            - queue name: "kratos:pje:jobs"
+            - message: a JSON string containing `"jobId": "J-expire"` and `"numeroProcesso": "1234567-00.2024.8.08.0001"`
+            
+            Returns:
+                tuple: (queue_name, message_json)
+            """
             nonlocal called_count
             called_count += 1
             return (

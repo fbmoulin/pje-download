@@ -698,6 +698,12 @@ class TestRateLimitMiddleware:
         dashboard_api._rate_bucket_last_seen.pop(ip, None)
 
         async def one_request():
+            """
+            Send a single POST request through the rate limit middleware using DummyRequest with the test IP.
+            
+            Returns:
+                The response object returned by the middleware.
+            """
             return await dashboard_api.rate_limit_middleware(
                 DummyRequest(method="POST", remote=ip),
                 _ok_handler,
