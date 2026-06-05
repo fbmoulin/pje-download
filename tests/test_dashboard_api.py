@@ -13,10 +13,8 @@ from prometheus_client import generate_latest
 
 import dashboard_api
 from dashboard_api import (
-    APP_CTX_KEY,
     MAX_BATCH_SIZE,
     MAX_BATCH_HISTORY,
-    AppContext,
     BatchJob,
     DashboardState,
 )
@@ -261,7 +259,6 @@ class DummyRequest:
         match_info: dict[str, str] | None = None,
         path: str = "/",
         content_length: int | None = None,
-        ctx: AppContext | None = None,
     ):
         self.method = method
         self._json_data = json_data
@@ -269,26 +266,13 @@ class DummyRequest:
         self.remote = remote
         self.match_info = match_info or {}
         self.path = path
-        self.app: dict = {}
-        if ctx is not None:
-            self.app[APP_CTX_KEY] = ctx
+        self.app = {}
         self.content_length = content_length
 
     async def json(self):
         if isinstance(self._json_data, Exception):
             raise self._json_data
         return self._json_data
-
-
-def _make_ctx(state=None, tmp_path=None) -> AppContext:
-    """Build a minimal AppContext for tests.
-
-    If *state* is None and *tmp_path* is given, creates a real DashboardState.
-    If *state* is None and no *tmp_path*, uses a MagicMock for the state field.
-    """
-    if state is None:
-        state = MagicMock() if tmp_path is None else DashboardState(tmp_path)
-    return AppContext(state=state)
 
 
 class FakeHealthResponse:
@@ -417,16 +401,15 @@ async def _ok_handler(request):
 async def test_handle_download_rejects_above_max():
     """POST /api/download with >500 valid processos must return 422."""
     processos = [f"{i:07d}-01.2024.8.08.0001" for i in range(501)]
-    mock_state = MagicMock()
-    mock_state.current_batch_id = None
-    mock_state.batches = {}
-    ctx = _make_ctx(state=mock_state)
-    resp = await dashboard_api.handle_download(
-        DummyRequest(method="POST", json_data={"processos": processos}, ctx=ctx)
-    )
-    assert resp.status == 422
-    body = json.loads(resp.body.decode())
-    assert "500" in body["error"]
+    with patch("dashboard_api.state") as mock_state:
+        mock_state.current_batch_id = None
+        mock_state.batches = {}
+        resp = await dashboard_api.handle_download(
+            DummyRequest(method="POST", json_data={"processos": processos})
+        )
+        assert resp.status == 422
+        body = json.loads(resp.body.decode())
+        assert "500" in body["error"]
 
 
 @pytest.mark.asyncio
@@ -445,64 +428,57 @@ async def test_handle_download_accepts_at_max():
             created_at=datetime.datetime.now().isoformat(),
         )
 
-    mock_state = MagicMock()
-    mock_state.current_batch_id = None
-    mock_state.batches = {}
-    mock_state.submit_batch = fake_submit
-    ctx = _make_ctx(state=mock_state)
-    resp = await dashboard_api.handle_download(
-        DummyRequest(method="POST", json_data={"processos": processos}, ctx=ctx)
-    )
-    assert resp.status == 201
+    with patch("dashboard_api.state") as mock_state:
+        mock_state.current_batch_id = None
+        mock_state.batches = {}
+        mock_state.submit_batch = fake_submit
+        resp = await dashboard_api.handle_download(
+            DummyRequest(method="POST", json_data={"processos": processos})
+        )
+        assert resp.status == 201
 
 
 @pytest.mark.asyncio
 async def test_handle_download_rejects_invalid_format():
     """POST /api/download with invalid CNJ format returns 400."""
-    mock_state = MagicMock()
-    mock_state.current_batch_id = None
-    mock_state.batches = {}
-    ctx = _make_ctx(state=mock_state)
-    resp = await dashboard_api.handle_download(
-        DummyRequest(
-            method="POST", json_data={"processos": ["not-a-processo"]}, ctx=ctx
+    with patch("dashboard_api.state") as mock_state:
+        mock_state.current_batch_id = None
+        mock_state.batches = {}
+        resp = await dashboard_api.handle_download(
+            DummyRequest(method="POST", json_data={"processos": ["not-a-processo"]})
         )
-    )
-    assert resp.status == 400
+        assert resp.status == 400
 
 
 @pytest.mark.asyncio
 async def test_handle_download_rejects_empty():
-    mock_state = MagicMock()
-    mock_state.current_batch_id = None
-    mock_state.batches = {}
-    ctx = _make_ctx(state=mock_state)
-    resp = await dashboard_api.handle_download(
-        DummyRequest(method="POST", json_data={"processos": []}, ctx=ctx)
-    )
-    assert resp.status == 400
+    with patch("dashboard_api.state") as mock_state:
+        mock_state.current_batch_id = None
+        mock_state.batches = {}
+        resp = await dashboard_api.handle_download(
+            DummyRequest(method="POST", json_data={"processos": []})
+        )
+        assert resp.status == 400
 
 
 @pytest.mark.asyncio
 async def test_handle_progress_when_idle():
-    mock_state = MagicMock()
-    mock_state.get_current_progress.return_value = None
-    ctx = _make_ctx(state=mock_state)
-    resp = await dashboard_api.handle_progress(DummyRequest(ctx=ctx))
-    assert resp.status == 200
-    body = json.loads(resp.body.decode())
-    assert body["status"] == "idle"
+    with patch("dashboard_api.state") as mock_state:
+        mock_state.get_current_progress.return_value = None
+        resp = await dashboard_api.handle_progress(DummyRequest())
+        assert resp.status == 200
+        body = json.loads(resp.body.decode())
+        assert body["status"] == "idle"
 
 
 @pytest.mark.asyncio
 async def test_handle_history_returns_list():
-    mock_state = MagicMock()
-    mock_state.batches = {}
-    ctx = _make_ctx(state=mock_state)
-    resp = await dashboard_api.handle_history(DummyRequest(ctx=ctx))
-    assert resp.status == 200
-    body = json.loads(resp.body.decode())
-    assert isinstance(body, list)
+    with patch("dashboard_api.state") as mock_state:
+        mock_state.batches = {}
+        resp = await dashboard_api.handle_history(DummyRequest())
+        assert resp.status == 200
+        body = json.loads(resp.body.decode())
+        assert isinstance(body, list)
 
 
 @pytest.mark.asyncio
@@ -519,19 +495,20 @@ async def test_handle_status_returns_worker_status():
             },
         )
     )
-    mock_state = MagicMock()
-    mock_state.batches = {}
-    mock_state.current_batch_id = None
-    mock_state.recovered_active_batch_id = None
-    mock_state.output_dir.name = "downloads"
-    mock_state.get_current_progress.return_value = None
-    mock_state.get_worker_http.return_value = fake_session
-    ctx = _make_ctx(state=mock_state)
-    with patch(
-        "dashboard_api.aiohttp.ClientSession",
-        return_value=fake_session,
+    with (
+        patch("dashboard_api.state") as mock_state,
+        patch(
+            "dashboard_api.aiohttp.ClientSession",
+            return_value=fake_session,
+        ),
     ):
-        resp = await dashboard_api.handle_status(DummyRequest(ctx=ctx))
+        mock_state.batches = {}
+        mock_state.current_batch_id = None
+        mock_state.recovered_active_batch_id = None
+        mock_state.output_dir.name = "downloads"
+        mock_state.get_current_progress.return_value = None
+        mock_state.get_worker_http.return_value = fake_session
+        resp = await dashboard_api.handle_status(DummyRequest())
         assert resp.status == 200
         body = json.loads(resp.body.decode())
         assert body["worker_status"] == "healthy"
@@ -543,9 +520,10 @@ async def test_handle_status_returns_worker_status():
 @pytest.mark.asyncio
 async def test_handle_healthz_reports_ready(tmp_path):
     ds = DashboardState(tmp_path)
+    dashboard_api.state = ds
     ds.get_redis = AsyncMock(return_value=AsyncMock(ping=AsyncMock(return_value=True)))
-    ctx = _make_ctx(state=ds)
-    resp = await dashboard_api.handle_healthz(DummyRequest(ctx=ctx))
+
+    resp = await dashboard_api.handle_healthz(DummyRequest())
 
     assert resp.status == 200
     body = json.loads(resp.body.decode())
@@ -591,9 +569,10 @@ async def test_handle_healthz_reports_resume_pending(tmp_path):
     )
 
     ds = DashboardState(tmp_path)
+    dashboard_api.state = ds
     ds.get_redis = AsyncMock(return_value=AsyncMock(ping=AsyncMock(return_value=True)))
-    ctx = _make_ctx(state=ds)
-    resp = await dashboard_api.handle_healthz(DummyRequest(ctx=ctx))
+
+    resp = await dashboard_api.handle_healthz(DummyRequest())
 
     assert resp.status == 503
     body = json.loads(resp.body.decode())
@@ -625,6 +604,7 @@ async def test_dashboard_state_reuses_worker_http_session(tmp_path):
 async def test_graceful_shutdown_cancels_task(tmp_path):
     """`_on_cleanup` must cancel a running batch task."""
     from dashboard_api import _on_cleanup, DashboardState
+    import dashboard_api
 
     ds = DashboardState(tmp_path)
     cancelled = []
@@ -638,12 +618,9 @@ async def test_graceful_shutdown_cancels_task(tmp_path):
 
     task = asyncio.create_task(long_running())
     ds._task = task
-    app = MagicMock()
-    app.get = lambda key, default=None: (
-        _make_ctx(state=ds) if key == APP_CTX_KEY else default
-    )
+    dashboard_api.state = ds
 
-    await _on_cleanup(app)
+    await _on_cleanup(MagicMock())
     assert task.cancelled() or cancelled
 
 
@@ -656,9 +633,8 @@ class TestRateLimitMiddleware:
     @pytest.mark.asyncio
     async def test_get_not_rate_limited(self):
         """GET requests bypass the rate limiter."""
-        ctx = _make_ctx()
         resp = await dashboard_api.rate_limit_middleware(
-            DummyRequest(method="GET", ctx=ctx),
+            DummyRequest(method="GET"),
             _ok_handler,
         )
         assert resp.status == 200
@@ -668,10 +644,11 @@ class TestRateLimitMiddleware:
         """X-Forwarded-For is ignored unless trust is enabled."""
         remote_ip = "10.88.88.8"
         spoofed_ip = "10.99.99.1"
+        dashboard_api._rate_buckets.pop(remote_ip, None)
+        dashboard_api._rate_bucket_last_seen.pop(remote_ip, None)
+        dashboard_api._rate_buckets.pop(spoofed_ip, None)
+        dashboard_api._rate_bucket_last_seen.pop(spoofed_ip, None)
         monkeypatch.setattr(dashboard_api, "TRUST_X_FORWARDED_FOR", False)
-
-        # Use a shared ctx so all iterations share the same rate-limit buckets
-        ctx = _make_ctx()
 
         statuses = []
         for _ in range(12):
@@ -680,24 +657,25 @@ class TestRateLimitMiddleware:
                     method="POST",
                     headers={"X-Forwarded-For": spoofed_ip},
                     remote=remote_ip,
-                    ctx=ctx,
                 ),
                 _ok_handler,
             )
             statuses.append(resp.status)
 
         assert 429 in statuses
-        assert spoofed_ip not in ctx.rate_buckets
-        assert remote_ip in ctx.rate_buckets
+        assert spoofed_ip not in dashboard_api._rate_buckets
+        assert remote_ip in dashboard_api._rate_buckets
 
     @pytest.mark.asyncio
     async def test_post_rate_limit_can_trust_forwarded_for_when_enabled(
         self, monkeypatch
     ):
         """Forwarded IPs can be trusted only when explicitly enabled."""
+        spoofed_ip = "10.99.99.2"
+        dashboard_api._rate_buckets.pop(spoofed_ip, None)
+        dashboard_api._rate_bucket_last_seen.pop(spoofed_ip, None)
         monkeypatch.setattr(dashboard_api, "TRUST_X_FORWARDED_FOR", True)
 
-        spoofed_ip = "10.99.99.2"
         ip = dashboard_api._get_rate_limit_ip(
             DummyRequest(
                 method="POST",
@@ -706,6 +684,38 @@ class TestRateLimitMiddleware:
             )
         )
         assert ip == spoofed_ip
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_from_same_ip_rate_limited(self):
+        """Concurrent asyncio.gather requests from one IP must trigger 429.
+
+        Sequential-loop tests (above) can't catch bucket-update ordering bugs
+        because coroutines only interleave at await points. gather() exercises
+        the sliding-window update under realistic concurrent scheduling.
+        """
+        ip = "10.77.77.77"
+        dashboard_api._rate_buckets.pop(ip, None)
+        dashboard_api._rate_bucket_last_seen.pop(ip, None)
+
+        async def one_request():
+            """
+            Send a single POST request through the rate limit middleware using DummyRequest with the test IP.
+            
+            Returns:
+                The response object returned by the middleware.
+            """
+            return await dashboard_api.rate_limit_middleware(
+                DummyRequest(method="POST", remote=ip),
+                _ok_handler,
+            )
+
+        # Fire 15 concurrent POST requests — RATE_LIMIT_MAX is 10, so ≥5 must be 429.
+        responses = await asyncio.gather(*[one_request() for _ in range(15)])
+        statuses = [r.status for r in responses]
+        assert statuses.count(429) >= 5, f"Expected ≥5 rate-limited, got: {statuses}"
+
+        dashboard_api._rate_buckets.pop(ip, None)
+        dashboard_api._rate_bucket_last_seen.pop(ip, None)
 
 
 # ─────────────────────────────────────────────
@@ -918,13 +928,12 @@ class TestProgressTornRead:
 
         monkeypatch.setattr(pathlib.Path, "read_text", flaky_read)
 
-        mock_state = MagicMock()
-        mock_state.batches = {"td_batch": job}
-        ctx = _make_ctx(state=mock_state)
-        with structlog.testing.capture_logs() as logs:
-            resp = await dashboard_api.handle_batch_detail(
-                DummyRequest(match_info={"id": "td_batch"}, ctx=ctx)
-            )
+        with patch("dashboard_api.state") as mock_state:
+            mock_state.batches = {"td_batch": job}
+            with structlog.testing.capture_logs() as logs:
+                resp = await dashboard_api.handle_batch_detail(
+                    DummyRequest(match_info={"id": "td_batch"})
+                )
         assert resp.status == 200
         assert any(r.get("event") == "dashboard.progress.read_failed" for r in logs), (
             f"torn-read was silent; got logs: {logs!r}"
@@ -940,13 +949,12 @@ class TestHandleBatchDetail:
     @pytest.mark.asyncio
     async def test_unknown_batch_returns_404(self):
         """GET /api/batch/<nonexistent> returns 404."""
-        mock_state = MagicMock()
-        mock_state.batches = {}
-        ctx = _make_ctx(state=mock_state)
-        resp = await dashboard_api.handle_batch_detail(
-            DummyRequest(match_info={"id": "nonexistent-batch-id"}, ctx=ctx)
-        )
-        assert resp.status == 404
+        with patch("dashboard_api.state") as mock_state:
+            mock_state.batches = {}
+            resp = await dashboard_api.handle_batch_detail(
+                DummyRequest(match_info={"id": "nonexistent-batch-id"})
+            )
+            assert resp.status == 404
 
     @pytest.mark.asyncio
     async def test_known_batch_returns_200_with_data(self, tmp_path):
@@ -959,17 +967,16 @@ class TestHandleBatchDetail:
             output_dir=str(tmp_path),
             progress={"total": 1, "done": 1},
         )
-        mock_state = MagicMock()
-        mock_state.batches = {"test123": job}
-        ctx = _make_ctx(state=mock_state)
-        resp = await dashboard_api.handle_batch_detail(
-            DummyRequest(match_info={"id": "test123"}, ctx=ctx)
-        )
-        assert resp.status == 200
-        body = json.loads(resp.body.decode())
-        assert body["batch_id"] == "test123"
-        assert body["status"] == "done"
-        assert body["processos"] == ["5000001-00.2024.8.08.0001"]
+        with patch("dashboard_api.state") as mock_state:
+            mock_state.batches = {"test123": job}
+            resp = await dashboard_api.handle_batch_detail(
+                DummyRequest(match_info={"id": "test123"})
+            )
+            assert resp.status == 200
+            body = json.loads(resp.body.decode())
+            assert body["batch_id"] == "test123"
+            assert body["status"] == "done"
+            assert body["processos"] == ["5000001-00.2024.8.08.0001"]
 
 
 # ─────────────────────────────────────────────
@@ -981,8 +988,7 @@ class TestHandleSessionStatus:
     @pytest.mark.asyncio
     async def test_returns_expected_fields(self):
         """GET /api/session/status returns file_exists, login_running, last_login_ok."""
-        ctx = _make_ctx()
-        resp = await dashboard_api.handle_session_status(DummyRequest(ctx=ctx))
+        resp = await dashboard_api.handle_session_status(DummyRequest())
         assert resp.status == 200
         body = json.loads(resp.body.decode())
         assert "file_exists" in body
@@ -1193,26 +1199,36 @@ class TestPurgeStaleBuckets:
         stale_ip = "10.0.0.1"
         active_ip = "10.0.0.2"
 
-        rate_buckets: dict = {stale_ip: [now - 400], active_ip: [now]}
-        rate_bucket_last_seen: dict = {stale_ip: now - 400, active_ip: now}
+        dashboard_api._rate_buckets[stale_ip] = [now - 400]
+        dashboard_api._rate_bucket_last_seen[stale_ip] = now - 400
+        dashboard_api._rate_buckets[active_ip] = [now]
+        dashboard_api._rate_bucket_last_seen[active_ip] = now
 
-        dashboard_api._purge_stale_buckets(now, rate_buckets, rate_bucket_last_seen)
+        dashboard_api._purge_stale_buckets(now)
 
-        assert stale_ip not in rate_buckets
-        assert stale_ip not in rate_bucket_last_seen
-        assert active_ip in rate_buckets
+        assert stale_ip not in dashboard_api._rate_buckets
+        assert stale_ip not in dashboard_api._rate_bucket_last_seen
+        assert active_ip in dashboard_api._rate_buckets
+
+        # Cleanup
+        dashboard_api._rate_buckets.pop(active_ip, None)
+        dashboard_api._rate_bucket_last_seen.pop(active_ip, None)
 
     def test_keeps_recently_seen_ips(self):
         """IPs seen within the expiry window are retained."""
         now = time.monotonic()
         ip = "10.0.0.3"
 
-        rate_buckets: dict = {ip: [now - 10]}
-        rate_bucket_last_seen: dict = {ip: now - 10}
+        dashboard_api._rate_buckets[ip] = [now - 10]
+        dashboard_api._rate_bucket_last_seen[ip] = now - 10
 
-        dashboard_api._purge_stale_buckets(now, rate_buckets, rate_bucket_last_seen)
+        dashboard_api._purge_stale_buckets(now)
 
-        assert ip in rate_buckets
+        assert ip in dashboard_api._rate_buckets
+
+        # Cleanup
+        dashboard_api._rate_buckets.pop(ip, None)
+        dashboard_api._rate_bucket_last_seen.pop(ip, None)
 
 
 # ─────────────────────────────────────────────
@@ -1452,7 +1468,7 @@ class TestAuditSyncLifecycle:
 
         app = web.Application()
         app[dashboard_api.AUDIT_SYNCER_KEY] = syncer
-        # No "_ctx" in app — _on_startup will skip the resume path
+        dashboard_api.state = None  # skip resume path
 
         await dashboard_api._on_startup(app)
 
@@ -1488,7 +1504,7 @@ class TestAuditSyncLifecycle:
         app[dashboard_api.AUDIT_SYNCER_KEY] = syncer
         task = asyncio.create_task(syncer.run_forever())
         app[dashboard_api.AUDIT_SYNC_TASK_KEY] = task
-        # No "_ctx" in app — _on_cleanup will skip batch-cancel path
+        dashboard_api.state = None
 
         await dashboard_api._on_cleanup(app)
 
@@ -1522,7 +1538,7 @@ class TestAuditSyncLifecycle:
         app[dashboard_api.AUDIT_SYNCER_KEY] = syncer
         task = asyncio.create_task(hang())
         app[dashboard_api.AUDIT_SYNC_TASK_KEY] = task
-        # No "_ctx" in app — _on_cleanup will skip batch-cancel path
+        dashboard_api.state = None
         syncer.close = AsyncMock()
 
         # Override drain timeout module constant
@@ -1536,16 +1552,12 @@ class TestAuditSyncLifecycle:
 
     @pytest.mark.asyncio
     async def test_on_startup_resumes_active_batch(self, monkeypatch, tmp_path):
-        ds = DashboardState(tmp_path)
-        ds.resume_active_batch = AsyncMock()
-        ctx = _make_ctx(state=ds)
+        dashboard_api.state = DashboardState(tmp_path)
+        dashboard_api.state.resume_active_batch = AsyncMock()
 
-        app = MagicMock()
-        app.get = lambda key, default=None: ctx if key == APP_CTX_KEY else default
+        await dashboard_api._on_startup(MagicMock())
 
-        await dashboard_api._on_startup(app)
-
-        ds.resume_active_batch.assert_awaited_once()
+        dashboard_api.state.resume_active_batch.assert_awaited_once()
 
 
 # ─────────────────────────────────────────────
@@ -1571,11 +1583,9 @@ class TestOnCleanup:
 
         task = asyncio.create_task(long_running())
         ds._task = task
-        ctx = _make_ctx(state=ds)
-        app = MagicMock()
-        app.get = lambda key, default=None: (ctx if key == APP_CTX_KEY else default)
+        dashboard_api.state = ds
 
-        await _on_cleanup(app)
+        await _on_cleanup(MagicMock())
         assert task.cancelled() or cancelled
 
 
@@ -1590,22 +1600,19 @@ class TestSessionLoginAudit:
         """handle_session_login triggers audit with session_login event."""
         # We test the _do_login inner function by patching interactive_login
         # and audit, then triggering the task and waiting for it.
-        ctx = _make_ctx()
-        ctx.login_running = False
-        ctx.login_task = None
-        ctx.login_last_ok = None
+        dashboard_api._login_running = False
+        dashboard_api._login_task = None
+        dashboard_api._login_last_ok = None
 
         with (
             patch("pje_session.interactive_login", return_value=True),
             patch("audit.log_access") as mock_log_access,
         ):
-            resp = await dashboard_api.handle_session_login(
-                DummyRequest(method="POST", ctx=ctx)
-            )
+            resp = await dashboard_api.handle_session_login(DummyRequest(method="POST"))
             assert resp.status == 202
 
             # Wait for the background task to complete
-            task = ctx.login_task
+            task = dashboard_api._login_task
             if task:
                 await asyncio.wait_for(task, timeout=5.0)
 
@@ -1614,6 +1621,9 @@ class TestSessionLoginAudit:
             assert entry.event_type == "session_login"
             assert entry.fonte == "dashboard"
             assert entry.status == "success"
+
+        # Cleanup
+        dashboard_api._login_running = False
 
 
 # ─────────────────────────────────────────────
@@ -1773,11 +1783,9 @@ class TestCleanupSavesProgress:
             progress={"total": 5, "done": 3},
         )
         ds._task = None  # no running task
-        ctx = _make_ctx(state=ds)
-        app = MagicMock()
-        app.get = lambda key, default=None: (ctx if key == APP_CTX_KEY else default)
+        dashboard_api.state = ds
 
-        await _on_cleanup(app)
+        await _on_cleanup(MagicMock())
 
         progress_file = batch_dir / "_progress.json"
         assert progress_file.exists()
@@ -1841,21 +1849,206 @@ class TestSprintFiveBFixes:
 
         Regression: Content-Length > 10 MB → 413 before JSON parsing.
         """
-        mock_state = MagicMock()
-        mock_state.current_batch_id = None
-        mock_state.batches = {}
-        ctx = _make_ctx(state=mock_state)
-        resp = await dashboard_api.handle_download(
-            DummyRequest(
-                method="POST",
-                json_data={"processos": []},
-                content_length=11 * 1024 * 1024,  # 11 MB — over 10 MB cap
-                ctx=ctx,
+        with patch("dashboard_api.state") as mock_state:
+            mock_state.current_batch_id = None
+            mock_state.batches = {}
+            resp = await dashboard_api.handle_download(
+                DummyRequest(
+                    method="POST",
+                    json_data={"processos": []},
+                    content_length=11 * 1024 * 1024,  # 11 MB — over 10 MB cap
+                )
             )
-        )
         assert resp.status == 413, (
             "BEFORE FIX: no Content-Length guard. "
             f"After fix: 11 MB payload → 413. Got status: {resp.status}"
         )
         body = json.loads(resp.body.decode())
         assert "grande" in body["error"].lower() or "10" in body["error"]
+
+
+# ─────────────────────────────────────────────
+# PR revert: module-level globals (state=None → 503 guards)
+# ─────────────────────────────────────────────
+
+
+class TestStateNoneGuards:
+    """All HTTP handlers must return 503 when the module-level `state` is None.
+
+    This behaviour was introduced when AppContext was removed and handlers
+    switched to reading the module global directly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_handle_status_returns_503_when_uninitialized(self):
+        """handle_status → 503 with error key when state is None."""
+        dashboard_api.state = None
+        resp = await dashboard_api.handle_status(DummyRequest())
+        assert resp.status == 503
+        body = json.loads(resp.body.decode())
+        assert "error" in body
+
+    @pytest.mark.asyncio
+    async def test_handle_healthz_returns_503_when_uninitialized(self):
+        """handle_healthz → 503 with ready=False when state is None."""
+        dashboard_api.state = None
+        resp = await dashboard_api.handle_healthz(DummyRequest())
+        assert resp.status == 503
+        body = json.loads(resp.body.decode())
+        assert body["ready"] is False
+        assert "reason" in body
+
+    @pytest.mark.asyncio
+    async def test_handle_progress_returns_503_when_uninitialized(self):
+        """handle_progress → 503 when state is None."""
+        dashboard_api.state = None
+        resp = await dashboard_api.handle_progress(DummyRequest())
+        assert resp.status == 503
+        body = json.loads(resp.body.decode())
+        assert "error" in body
+
+    @pytest.mark.asyncio
+    async def test_handle_history_returns_503_when_uninitialized(self):
+        """handle_history → 503 when state is None."""
+        dashboard_api.state = None
+        resp = await dashboard_api.handle_history(DummyRequest())
+        assert resp.status == 503
+        body = json.loads(resp.body.decode())
+        assert "error" in body
+
+    @pytest.mark.asyncio
+    async def test_handle_batch_detail_returns_503_when_uninitialized(self):
+        """handle_batch_detail → 503 when state is None."""
+        dashboard_api.state = None
+        resp = await dashboard_api.handle_batch_detail(
+            DummyRequest(match_info={"id": "any-batch-id"})
+        )
+        assert resp.status == 503
+        body = json.loads(resp.body.decode())
+        assert "error" in body
+
+    @pytest.mark.asyncio
+    async def test_handle_download_returns_503_when_uninitialized(self):
+        """handle_download → 503 when state is None (before any body parsing)."""
+        dashboard_api.state = None
+        resp = await dashboard_api.handle_download(
+            DummyRequest(method="POST", json_data={"processos": ["5000001-00.2024.8.08.0001"]})
+        )
+        assert resp.status == 503
+        body = json.loads(resp.body.decode())
+        assert "error" in body
+
+
+# ─────────────────────────────────────────────
+# PR revert: _fetch_worker_health module-global state
+# ─────────────────────────────────────────────
+
+
+class TestFetchWorkerHealth:
+    """_fetch_worker_health() uses module-level state (not a parameter)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_unknown_when_state_is_none(self):
+        """With state=None, _fetch_worker_health must return unknown/unhealthy."""
+        dashboard_api.state = None
+        result = await dashboard_api._fetch_worker_health()
+        assert result["status"] == "unknown"
+        assert result["healthy"] is False
+
+    @pytest.mark.asyncio
+    async def test_returns_unreachable_on_connection_error(self, tmp_path):
+        """When state is set but the HTTP call fails, status is 'unreachable'."""
+        ds = DashboardState(tmp_path)
+        fake_session = MagicMock()
+        fake_session.get = MagicMock(side_effect=Exception("connection refused"))
+        ds._worker_http = fake_session
+        dashboard_api.state = ds
+        result = await dashboard_api._fetch_worker_health()
+        assert result["status"] == "unreachable"
+        assert result["healthy"] is False
+
+
+# ─────────────────────────────────────────────
+# PR revert: _batch_job_payload returns plain dict (not JobMessage TypedDict)
+# ─────────────────────────────────────────────
+
+
+class TestBatchJobPayload:
+    """_batch_job_payload must return a plain dict with the expected keys."""
+
+    def test_returns_plain_dict_with_required_keys(self, tmp_path):
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="batch-abc",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="queued",
+            created_at="2026-01-01T00:00:00",
+            include_anexos=True,
+        )
+        payload = ds._batch_job_payload(job, "5000001-00.2024.8.08.0001")
+
+        # Must be a plain dict — not a TypedDict subclass with extra runtime behaviour
+        assert type(payload) is dict
+
+        # Required keys
+        assert "jobId" in payload
+        assert "batchId" in payload
+        assert "numeroProcesso" in payload
+        assert "includeAnexos" in payload
+        assert "replyQueue" in payload
+        assert "outputSubdir" in payload
+        assert "gdriveUrl" in payload
+
+    def test_job_id_contains_batch_id_prefix(self, tmp_path):
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="batch-xyz",
+            processos=["5000001-00.2024.8.08.0001"],
+            status="queued",
+            created_at="2026-01-01T00:00:00",
+            include_anexos=False,
+        )
+        payload = ds._batch_job_payload(job, "5000001-00.2024.8.08.0001")
+        assert payload["jobId"].startswith("batch-xyz:")
+
+    def test_batch_id_matches_job_id(self, tmp_path):
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="batch-42",
+            processos=["5000002-00.2024.8.08.0001"],
+            status="queued",
+            created_at="2026-01-01T00:00:00",
+            include_anexos=True,
+        )
+        payload = ds._batch_job_payload(job, "5000002-00.2024.8.08.0001")
+        assert payload["batchId"] == "batch-42"
+
+    def test_gdrive_url_none_when_not_mapped(self, tmp_path):
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="batch-99",
+            processos=["5000003-00.2024.8.08.0001"],
+            status="queued",
+            created_at="2026-01-01T00:00:00",
+            include_anexos=True,
+        )
+        payload = ds._batch_job_payload(job, "5000003-00.2024.8.08.0001")
+        assert payload["gdriveUrl"] is None
+
+    def test_payload_is_json_serializable(self, tmp_path):
+        """Plain dict must survive json.dumps — no TypedDict surprises."""
+        import json as _json
+
+        ds = DashboardState(tmp_path)
+        job = BatchJob(
+            id="batch-ser",
+            processos=["5000004-00.2024.8.08.0001"],
+            status="queued",
+            created_at="2026-01-01T00:00:00",
+            include_anexos=True,
+        )
+        payload = ds._batch_job_payload(job, "5000004-00.2024.8.08.0001")
+        serialized = _json.dumps(payload)
+        recovered = _json.loads(serialized)
+        assert recovered["batchId"] == "batch-ser"
+        assert recovered["numeroProcesso"] == "5000004-00.2024.8.08.0001"

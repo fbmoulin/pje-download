@@ -615,6 +615,69 @@ class TestConsumeQueueShutdown:
             "kratos:pje:results:batch-1"
         )
 
+    @pytest.mark.asyncio
+    async def test_session_expired_mid_job_exits_loop(self):
+        """
+        Verify that the consume_queue loop exits after processing a job whose result status is "session_expired" when no MNI fallback is available.
+        
+        This ensures the worker does not repeatedly retry jobs that fail due to an invalidated PJe session and instead stops consuming further jobs in that condition.
+        """
+        import asyncio
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        shutdown = asyncio.Event()
+
+        called_count = 0
+
+        async def blpop_one_job(*args, **kwargs):
+            """
+            Simulate a single Redis BLPOP call that returns one job payload and increments a call counter.
+            
+            This helper increments the enclosing `called_count` variable and returns a two-tuple:
+            - queue name: "kratos:pje:jobs"
+            - message: a JSON string containing `"jobId": "J-expire"` and `"numeroProcesso": "1234567-00.2024.8.08.0001"`
+            
+            Returns:
+                tuple: (queue_name, message_json)
+            """
+            nonlocal called_count
+            called_count += 1
+            return (
+                "kratos:pje:jobs",
+                json.dumps(
+                    {
+                        "jobId": "J-expire",
+                        "numeroProcesso": "1234567-00.2024.8.08.0001",
+                    }
+                ),
+            )
+
+        mock_r.blpop = blpop_one_job
+        worker.redis = mock_r
+        worker.mni_client = None  # no MNI fallback — session expiry must break loop
+        worker.is_session_expired = MagicMock(return_value=False)
+        worker.download_process = AsyncMock(
+            return_value={
+                "jobId": "J-expire",
+                "numeroProcesso": "1234567-00.2024.8.08.0001",
+                "status": "session_expired",
+                "arquivosDownloaded": [],
+                "errorMessage": "session expired",
+            }
+        )
+        worker._publish_result = AsyncMock()
+
+        with patch.object(w, "log", MagicMock()):
+            await asyncio.wait_for(worker.consume_queue(shutdown), timeout=2)
+
+        # Must have processed exactly one job then exited (not looped forever).
+        assert called_count == 1, (
+            f"Expected loop to exit after session_expired, but blpop was called {called_count} times"
+        )
+        worker._publish_result.assert_awaited_once()
+
 
 class TestPublishResult:
     """_publish_result() retries on Redis failure."""
@@ -731,10 +794,313 @@ class TestPublishResult:
         assert "pje_worker_progress_events_total" in output
         assert 'phase="mni_metadata"' in output
 
+    @pytest.mark.asyncio
+    async def test_publish_result_serializes_with_json_dumps(self):
+        """_publish_result must serialise the result dict using json.dumps.
+
+        The PR removed the ``protocol.result_to_json`` dependency; the wire
+        format must still be valid JSON that round-trips cleanly.
+        """
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        captured = []
+
+        async def capture_rpush(queue, payload):
+            captured.append(payload)
+
+        mock_r = AsyncMock()
+        mock_r.rpush = capture_rpush
+        worker.redis = mock_r
+
+        await worker._publish_result(
+            {
+                "jobId": "J-serial",
+                "numeroProcesso": "5000001-00.2024.8.08.0001",
+                "status": "done",
+                "arquivosDownloaded": [{"nome": "doc.pdf", "tamanhoBytes": 1024}],
+                "errorMessage": None,
+            }
+        )
+
+        assert len(captured) == 1
+        recovered = json.loads(captured[0])
+        assert recovered["jobId"] == "J-serial"
+        assert recovered["status"] == "done"
+        assert recovered["arquivosDownloaded"][0]["nome"] == "doc.pdf"
+        assert recovered["errorMessage"] is None
+
+    @pytest.mark.asyncio
+    async def test_publish_progress_inline_dict_has_event_type(self):
+        """_publish_progress must emit a payload with eventType='progress'.
+
+        The PR removed the ProgressMessage TypedDict import; the inline dict
+        must still carry the eventType sentinel the dashboard uses to
+        distinguish progress events from terminal results.
+        """
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        captured = []
+
+        async def capture_rpush(queue, payload):
+            captured.append(payload)
+
+        mock_r = AsyncMock()
+        mock_r.rpush = capture_rpush
+        worker.redis = mock_r
+
+        job = {
+            "jobId": "J-progress",
+            "batchId": "batch-p",
+            "numeroProcesso": "5000002-00.2024.8.08.0001",
+            "replyQueue": "kratos:pje:results:batch-p",
+        }
+        await worker._publish_progress(job, "downloading", "Baixando doc 1 de 3")
+
+        assert len(captured) == 1
+        recovered = json.loads(captured[0])
+        assert recovered["eventType"] == "progress"
+        assert recovered["jobId"] == "J-progress"
+        assert recovered["phase"] == "downloading"
+
+    @pytest.mark.asyncio
+    async def test_publish_dead_letter_inline_dict_has_required_fields(self):
+        """_publish_dead_letter must send a JSON payload with reason/payload/details/timestamp.
+
+        The PR removed the DeadLetterEntry TypedDict import; the inline dict
+        must still include all four fields the dead-letter consumer expects.
+        """
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        captured = []
+
+        async def capture_lpush(queue, payload):
+            captured.append(payload)
+
+        mock_r = AsyncMock()
+        mock_r.lpush = capture_lpush
+        worker.redis = mock_r
+
+        await worker._publish_dead_letter(
+            '{"bad": true}', "missing_fields", details={"missing": ["jobId"]}
+        )
+
+        assert len(captured) == 1
+        recovered = json.loads(captured[0])
+        assert recovered["reason"] == "missing_fields"
+        assert recovered["payload"] == '{"bad": true}'
+        assert recovered["details"] == {"missing": ["jobId"]}
+        assert "timestamp" in recovered
+
+
+class TestConsumeQueueMissingFields:
+    """consume_queue inline missing-fields validation (PR revert from job_from_json)."""
+
+    @pytest.mark.asyncio
+    async def test_missing_job_id_sends_dead_letter_with_detail(self):
+        """A message missing jobId must be dead-lettered with 'missing' list in details."""
+        import asyncio
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.is_session_expired = MagicMock(return_value=False)
+        shutdown = asyncio.Event()
+
+        dead_letters = []
+
+        async def blpop_missing_job_id(*args, **kwargs):
+            shutdown.set()  # Exit after one iteration
+            return (
+                "kratos:pje:jobs",
+                json.dumps({"numeroProcesso": "5000001-00.2024.8.08.0001"}),
+            )
+
+        async def capture_dead_letter(payload, reason, details=None):
+            dead_letters.append({"payload": payload, "reason": reason, "details": details})
+
+        mock_r = AsyncMock()
+        mock_r.blpop = blpop_missing_job_id
+        worker.redis = mock_r
+        worker.mni_client = None
+        worker._publish_dead_letter = capture_dead_letter
+
+        with patch.object(w, "log", MagicMock()):
+            await worker.consume_queue(shutdown)
+
+        assert len(dead_letters) == 1
+        assert dead_letters[0]["reason"] == "missing_fields"
+        assert "jobId" in dead_letters[0]["details"]["missing"]
+
+    @pytest.mark.asyncio
+    async def test_missing_numero_processo_sends_dead_letter(self):
+        """A message missing numeroProcesso must be dead-lettered."""
+        import asyncio
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.is_session_expired = MagicMock(return_value=False)
+        shutdown = asyncio.Event()
+
+        dead_letters = []
+
+        async def blpop_missing_numero(*args, **kwargs):
+            shutdown.set()
+            return (
+                "kratos:pje:jobs",
+                json.dumps({"jobId": "J-no-numero"}),
+            )
+
+        async def capture_dead_letter(payload, reason, details=None):
+            dead_letters.append({"payload": payload, "reason": reason, "details": details})
+
+        mock_r = AsyncMock()
+        mock_r.blpop = blpop_missing_numero
+        worker.redis = mock_r
+        worker.mni_client = None
+        worker._publish_dead_letter = capture_dead_letter
+
+        with patch.object(w, "log", MagicMock()):
+            await worker.consume_queue(shutdown)
+
+        assert len(dead_letters) == 1
+        assert dead_letters[0]["reason"] == "missing_fields"
+        assert "numeroProcesso" in dead_letters[0]["details"]["missing"]
+
+    @pytest.mark.asyncio
+    async def test_missing_fields_details_include_present_keys(self):
+        """details dict must include 'keys' listing what fields were present."""
+        import asyncio
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.is_session_expired = MagicMock(return_value=False)
+        shutdown = asyncio.Event()
+
+        dead_letters = []
+
+        async def blpop_partial(*args, **kwargs):
+            shutdown.set()
+            return (
+                "kratos:pje:jobs",
+                json.dumps({"jobId": "J-partial", "extra": "data"}),
+            )
+
+        async def capture_dead_letter(payload, reason, details=None):
+            dead_letters.append({"payload": payload, "reason": reason, "details": details})
+
+        mock_r = AsyncMock()
+        mock_r.blpop = blpop_partial
+        worker.redis = mock_r
+        worker.mni_client = None
+        worker._publish_dead_letter = capture_dead_letter
+
+        with patch.object(w, "log", MagicMock()):
+            await worker.consume_queue(shutdown)
+
+        assert len(dead_letters) == 1
+        details = dead_letters[0]["details"]
+        assert "keys" in details
+        assert "jobId" in details["keys"]
+
+
+class TestCaptchaRequiredExitsLoop:
+    """consume_queue must exit the loop when status is captcha_required and MNI is absent."""
+
+    @pytest.mark.asyncio
+    async def test_captcha_required_mid_job_exits_loop(self):
+        """Loop must break after captcha_required when mni_client is None."""
+        import asyncio as _asyncio
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        mock_r = AsyncMock()
+        shutdown = _asyncio.Event()
+
+        called_count = 0
+
+        async def blpop_one_job(*args, **kwargs):
+            nonlocal called_count
+            called_count += 1
+            return (
+                "kratos:pje:jobs",
+                json.dumps(
+                    {
+                        "jobId": "J-captcha",
+                        "numeroProcesso": "9876543-00.2024.8.08.0001",
+                    }
+                ),
+            )
+
+        mock_r.blpop = blpop_one_job
+        worker.redis = mock_r
+        worker.mni_client = None  # no MNI fallback — captcha must break loop
+        worker.is_session_expired = MagicMock(return_value=False)
+        worker.download_process = AsyncMock(
+            return_value={
+                "jobId": "J-captcha",
+                "numeroProcesso": "9876543-00.2024.8.08.0001",
+                "status": "captcha_required",
+                "arquivosDownloaded": [],
+                "errorMessage": "captcha detected",
+            }
+        )
+        worker._publish_result = AsyncMock()
+
+        with patch.object(w, "log", MagicMock()):
+            await _asyncio.wait_for(worker.consume_queue(shutdown), timeout=2)
+
+        assert called_count == 1, (
+            f"Expected loop to exit after captcha_required, but blpop was called {called_count} times"
+        )
+        worker._publish_result.assert_awaited_once()
+
+
+class TestResultHelper:
+    """_result() must return a plain dict (not a TypedDict) with the required keys."""
+
+    def test_returns_plain_dict(self):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        result = worker._result("J1", "5000001-00.2024.8.08.0001", "done")
+        assert type(result) is dict
+
+    def test_required_keys_present(self):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        result = worker._result("J2", "5000002-00.2024.8.08.0001", "failed", error="oops")
+        assert result["jobId"] == "J2"
+        assert result["numeroProcesso"] == "5000002-00.2024.8.08.0001"
+        assert result["status"] == "failed"
+        assert result["arquivosDownloaded"] == []
+        assert result["errorMessage"] == "oops"
+        assert "downloadedAt" in result
+
+    def test_files_defaults_to_empty_list(self):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        result = worker._result("J3", "5000003-00.2024.8.08.0001", "done")
+        assert result["arquivosDownloaded"] == []
+
+    def test_files_passed_through(self):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        files = [{"nome": "doc.pdf", "tamanhoBytes": 512}]
+        result = worker._result("J4", "5000004-00.2024.8.08.0001", "done", files=files)
+        assert result["arquivosDownloaded"] == files
+
+    def test_result_is_json_serializable(self):
+        """Plain dict must survive json.dumps — no TypedDict surprises."""
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        result = worker._result("J5", "5000005-00.2024.8.08.0001", "done")
+        serialized = json.dumps(result)
+        recovered = json.loads(serialized)
+        assert recovered["jobId"] == "J5"
+        assert recovered["status"] == "done"
+
 
 class TestDownloadProcess:
     @pytest.mark.asyncio
-    async def test_output_subdir_is_respected(self, tmp_path):
+
         w = _load_worker_module()
         w.DOWNLOAD_BASE_DIR = tmp_path
         worker = w.PJeSessionWorker()
