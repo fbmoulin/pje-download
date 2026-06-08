@@ -66,6 +66,10 @@ async def test_consume_queue_exits_after_session_expired_without_mni():
     mock_redis.blpop = blpop_one_job
     worker.redis = mock_redis
     worker.mni_client = None
+    # The branch under test is the post-job session_expired result. Prevent the
+    # pre-BLPOP guard from short-circuiting when no persisted PJe session exists
+    # in the test environment.
+    worker.is_session_expired = MagicMock(return_value=False)
     worker.download_process = AsyncMock(
         return_value={
             "jobId": "J-expire",
