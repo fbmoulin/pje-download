@@ -40,5 +40,7 @@ async def test_concurrent_requests_from_same_ip_rate_limited():
     responses = await asyncio.gather(*[one_request() for _ in range(15)])
     statuses = [response.status for response in responses]
 
-    assert statuses.count(429) >= 5, f"Expected at least 5 rate-limited responses: {statuses}"
+    assert statuses.count(429) >= 5, (
+        f"Expected at least 5 rate-limited responses: {statuses}"
+    )
     assert ip in ctx.rate_buckets
