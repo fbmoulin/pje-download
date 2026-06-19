@@ -1,8 +1,8 @@
 playwright==1.60.0
 prometheus_client>=0.25.0
 redis[hiredis]==8.0.0
-structlog==25.5.0
-zeep==4.3.2
+structlog==26.1.0
+zeep==4.3.3
 aiohttp==3.14.1
 gdown>=6.1.0
 requests>=2.34.2
