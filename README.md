@@ -459,12 +459,22 @@ curl http://localhost:8007/metrics      # metricas Prometheus
 
 ### Producao (VPS)
 
+> **Aviso:** O VPS fixo anterior (`191.252.204.250`) está inativo. O deploy agora usa um VPS genérico configurado via secrets.
+
 | Recurso | Valor |
 |---------|-------|
-| Host | `191.252.204.250` |
-| Dashboard | `http://191.252.204.250:8007` |
-| Metrics | `http://191.252.204.250:8007/metrics` |
+| Host | `${{ secrets.VPS_HOST }}` (configurado nos secrets do repositório) |
+| Dashboard | `http://<VPS_HOST>:8007` |
+| Metrics | `http://<VPS_HOST>:8007/metrics` |
 | Path | `/opt/pje-download` |
+
+**Secrets obrigatórios:**
+- `VPS_SSH_KEY`
+- `VPS_HOST`
+- `VPS_USER`
+- `MNI_USERNAME`, `MNI_PASSWORD`
+- `REDIS_PASSWORD` (não pode ser o default)
+- `DASHBOARD_API_KEY`
 
 ### CI/CD (GitHub Actions)
 
