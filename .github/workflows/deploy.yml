@@ -149,3 +149,18 @@ jobs:
             done
             test "${after_dead:-$before_dead}" -gt "$before_dead"
             echo "Deploy OK"
+
+      - name: Validate MNI credentials
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            echo "Validating MNI credentials on VPS..."
+            if docker compose exec -T dashboard python -c "from mni_client import MniClient; MniClient()"; then
+              echo "MNI credentials are valid"
+            else
+              echo "MNI validation failed"
+              exit 1
+            fi
