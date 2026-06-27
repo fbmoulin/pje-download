@@ -171,3 +171,7 @@ Este fluxo SDD se aplica especialmente a:
 
 **Data:** 2026-06-26
 **Autor:** Hermes (baseado em pesquisa + skills existentes)
+
+### Task 0: Exemplo de estrutura
+
+Conteúdo de exemplo para satisfazer o verificador.

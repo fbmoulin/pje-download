@@ -38,6 +38,11 @@ STRUCTURAL_CHECKS = [
     ("Mentions plan-quality-gate skill", lambda c: "plan-quality-gate" in c),
     ("Contains at least one table", lambda c: "|" in c and "---" in c),
     ("Contains References or Referências section", lambda c: "Referências" in c or "References" in c or "references/" in c),
+    # === Novas checagens de qualidade (Task 2.3) ===
+    ("Has Goal section", lambda c: "Goal" in c),
+    ("Mentions TDD", lambda c: "TDD" in c or "test-driven" in c.lower()),
+    ("Contains at least one Task section", lambda c: "### Task" in c),
+    ("Mentions frequent commits", lambda c: "commit" in c.lower() and "frequent" in c.lower()),
 ]
 
 
