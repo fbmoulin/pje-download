@@ -36,6 +36,9 @@ jobs:
       - name: Format
         run: ruff format --check .
 
+      - name: Verify Markdown specs
+        run: python tools/verify_spec.py docs/specs/*.md
+
   test:
     name: Test (pytest)
     runs-on: ubuntu-latest
