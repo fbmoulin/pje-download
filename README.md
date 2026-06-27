@@ -480,8 +480,8 @@ curl http://localhost:8007/metrics      # metricas Prometheus
 
 | Workflow | Trigger | Etapas |
 |----------|---------|--------|
-| `ci.yml` | push / PR | ruff lint → pytest (424 testes em master, v2.5.0) — badge acima |
-| `deploy.yml` | CI concluido com sucesso em `master` | rsync → `docker compose up --build` no VPS → healthcheck worker/dashboard → smoke test da fila |
+| `ci.yml` | push / PR | ruff lint → pytest (441 testes em master, v2.6.0) — badge acima |
+| `deploy.yml` | CI concluido com sucesso em `master` | rsync → `docker compose up --build` no VPS → healthcheck worker/dashboard → smoke test da fila + validação MNI |
 | `dependabot.yml` | semanal | atualiza actions + pip deps |
 
 Secrets necessarios no repositorio: `VPS_SSH_KEY`, `VPS_HOST`, `VPS_USER`.
