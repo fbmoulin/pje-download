@@ -14,6 +14,7 @@
 - `python worker.py` starts the Redis consumer; the dashboard is not the execution path anymore without it.
 - `pytest tests/test_config.py tests/test_dashboard_api.py tests/test_worker.py tests/test_pje_session.py tests/test_batch_downloader.py -q` is the focused regression suite for orchestration and integrations.
 - `ruff check config.py dashboard_api.py worker.py tests/test_config.py tests/test_dashboard_api.py tests/test_worker.py tests/test_pje_session.py tests/test_batch_downloader.py` keeps lint tight on the critical path.
+- `python tools/verify_spec.py docs/specs/*.md` is the canonical verifier for Markdown specification documents (SDD specs).
 
 ## Coding Style & Naming Conventions
 - Follow the existing Python style: type hints on public functions, concise docstrings, and no unnecessary abstraction layers.
