@@ -486,6 +486,23 @@ curl http://localhost:8007/metrics      # metricas Prometheus
 
 Secrets necessarios no repositorio: `VPS_SSH_KEY`, `VPS_HOST`, `VPS_USER`.
 
+
+### Spec Verifier (Canonical)
+
+O comando `python tools/verify_spec.py` é o verificador oficial de especificações SDD.
+
+```bash
+python tools/verify_spec.py docs/specs/*.md
+```
+
+**Checks atuais (11 total):**
+- Comprimento mínimo, seções obrigatórias, menções de skills (writing-plans, subagent-driven-development, plan-quality-gate)
+- Presença de tabelas, referências, Goal, TDD, seções de Task, menção a commits frequentes
+
+**Integração:**
+- Rodado automaticamente no CI (`ci.yml`)
+- 3 testes unitários em `tests/test_verify_spec.py`
+
 ## Integracao com Kratos Case Pipeline
 
 Este projeto e o primeiro estagio do [Kratos Case Pipeline (KCP)](https://github.com/fbmoulin/kratos-case-pipeline) — o orquestrador que conecta download PJe, extracao PDF e analise FIRAC em um pipeline automatizado para gabinetes judiciais.
