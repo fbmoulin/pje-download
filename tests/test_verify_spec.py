@@ -3,7 +3,6 @@
 Tests for the canonical spec verifier (verify_spec.py)
 """
 
-import pytest
 from pathlib import Path
 from tools.verify_spec import validate_spec
 
