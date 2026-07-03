@@ -1573,7 +1573,7 @@ class TestOnCleanup:
         ds._task = task
         ctx = _make_ctx(state=ds)
         app = MagicMock()
-        app.get = lambda key, default=None: (ctx if key == APP_CTX_KEY else default)
+        app.get = lambda key, default=None: ctx if key == APP_CTX_KEY else default
 
         await _on_cleanup(app)
         assert task.cancelled() or cancelled
@@ -1775,7 +1775,7 @@ class TestCleanupSavesProgress:
         ds._task = None  # no running task
         ctx = _make_ctx(state=ds)
         app = MagicMock()
-        app.get = lambda key, default=None: (ctx if key == APP_CTX_KEY else default)
+        app.get = lambda key, default=None: ctx if key == APP_CTX_KEY else default
 
         await _on_cleanup(app)
 

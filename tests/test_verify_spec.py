@@ -11,7 +11,9 @@ def test_validate_spec_passes_on_good_spec():
     """A well-formed SDD spec should pass all checks."""
     spec = Path("docs/specs/sdd-pje-download.md")
     result = validate_spec(spec)
-    assert result.passed >= 9, f"Too many failures: {result.failures}"  # spec has 11 checks
+    assert result.passed >= 9, (
+        f"Too many failures: {result.failures}"
+    )  # spec has 11 checks
     assert len(result.failures) == 0
 
 

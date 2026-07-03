@@ -34,15 +34,24 @@ STRUCTURAL_CHECKS = [
     ("Has minimum length (>2000 chars)", lambda c: len(c) > 2000),
     ("Contains USER VALIDATION GATE section", lambda c: "USER VALIDATION GATE" in c),
     ("Mentions writing-plans skill", lambda c: "writing-plans" in c),
-    ("Mentions subagent-driven-development skill", lambda c: "subagent-driven-development" in c),
+    (
+        "Mentions subagent-driven-development skill",
+        lambda c: "subagent-driven-development" in c,
+    ),
     ("Mentions plan-quality-gate skill", lambda c: "plan-quality-gate" in c),
     ("Contains at least one table", lambda c: "|" in c and "---" in c),
-    ("Contains References or Referências section", lambda c: "Referências" in c or "References" in c or "references/" in c),
+    (
+        "Contains References or Referências section",
+        lambda c: "Referências" in c or "References" in c or "references/" in c,
+    ),
     # === Novas checagens de qualidade (Task 2.3) ===
     ("Has Goal section", lambda c: "Goal" in c),
     ("Mentions TDD", lambda c: "TDD" in c or "test-driven" in c.lower()),
     ("Contains at least one Task section", lambda c: "### Task" in c),
-    ("Mentions frequent commits", lambda c: "commit" in c.lower() and "frequent" in c.lower()),
+    (
+        "Mentions frequent commits",
+        lambda c: "commit" in c.lower() and "frequent" in c.lower(),
+    ),
 ]
 
 
@@ -110,7 +119,9 @@ def main() -> int:
     print(f"Specs failed: {total_failed}")
 
     if total_failed > 0:
-        print("\nVERDICT: FAILED — one or more specs did not meet structural requirements")
+        print(
+            "\nVERDICT: FAILED — one or more specs did not meet structural requirements"
+        )
         return 1
 
     print("\nVERDICT: PASSED — all specs meet structural requirements")
