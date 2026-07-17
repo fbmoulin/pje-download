@@ -13,8 +13,11 @@ docker compose --profile worker up -d  # + pje worker
 
 # Testes e lint
 pytest tests/ -q
-ruff check dashboard_api.py batch_downloader.py mni_client.py worker.py gdrive_downloader.py pje_session.py config.py metrics.py audit_sync.py file_utils.py async_retry.py
-ruff format dashboard_api.py batch_downloader.py mni_client.py worker.py gdrive_downloader.py pje_session.py config.py metrics.py audit_sync.py file_utils.py async_retry.py
+ruff check .          # CI lints the whole repo (c72b4b4), not a file allowlist
+ruff format --check .
+
+# Spec verifier (SDD) — CI gate, also runnable locally (ci.yml step "Verify Markdown specs")
+python tools/verify_spec.py docs/specs/*.md
 ```
 
 ## Environment (mínimo)
@@ -30,7 +33,7 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest (408 tests) — run with `pytest tests/ -q` before any commit
+- Test suite: pytest (441 tests) — run with `pytest tests/ -q` before any commit
 - Audit sink: asyncpg → Railway Postgres (optional, opt-in via `AUDIT_SYNC_ENABLED`). **Requires PG 15+** — syncer self-disables on older versions (see Sprint 12 B5)
 - Shared helpers: `file_utils.py` (`total_bytes`, `merge_file_lists`), `async_retry.py` (`AsyncRetry` class for exponential backoff)
 
@@ -143,6 +146,18 @@ Sprint 15 — A1 typed protocol + A2 AppContext (2026-05-01, PR #20, tagged v2.5
 - Closure commit: `d90fb26` (CLAUDE.md backlog #4 marked DONE, this Sprint 15 entry, README test count + protocol.py row).
 - Status: DONE — 416→424 tests, ruff clean, 4/4 CI checks green. Approved by `coderabbit:code-reviewer` agent (zero blocking, 5 non-blocking suggestions tracked as backlog item 4 follow-ups). Tag `v2.5.0` annotated.
 
+Post-v2.5.0 — Deploy Verifier + Spec Verifier (SDD) (2026-06-26 → 2026-07, HEAD `9d25778`):
+- Plan: `docs/plans/2026-06-26-vps-deploy-verifier-sdd.md`; canonical spec: `docs/specs/sdd-pje-download.md`
+- **Phase 1 — generic-VPS deploy hardening** (`deploy.yml`):
+  - Task 1.1 — fail-fast `Validate required secrets` step: aborts the deploy up front if any of `VPS_SSH_KEY`/`VPS_HOST`/`VPS_USER`/`MNI_USERNAME`/`MNI_PASSWORD`/`REDIS_PASSWORD`/`DASHBOARD_API_KEY` is missing (`: "${{ secrets.X:?... }}"`). Deploy is now parameterized by `VPS_HOST` secret — no hardcoded host.
+  - Task 1.2 — removed the dead VPS IP `191.252.204.250` (timing out on `/healthz` + `/api/status`) from docs.
+  - Task 1.3 — post-deploy MNI credential smoke test.
+- **Phase 2 — Spec Verifier promoted to a real feature** (`tools/verify_spec.py`):
+  - Canonical verifier for SDD Markdown specs. 11 structural checks (min length, USER VALIDATION GATE, writing-plans / subagent-driven-development / plan-quality-gate skills, table, References, Goal, TDD, `### Task`, frequent-commits). Exit 0 pass / 1 fail / 2 usage.
+  - Tasks 2.1+2.2 — unit tests (`tests/test_verify_spec.py`) + wired into CI as the `Verify Markdown specs` step in `ci.yml` (`python tools/verify_spec.py docs/specs/*.md`). Task 2.3 — added the 4 quality checks (Goal / TDD / Task / frequent-commits).
+- Interstitial: dep bumps (aiohttp 3.14.1, python-deps group #24), added coverage (file_utils contract, concurrent rate-limit, worker shutdown-on-session-expiry), repo-wide `ruff check .`/`format .`, manual `workflow_dispatch` on CI.
+- Status: DONE — 424→441 tests. `v2.5.0` remains the latest tag (post-v2.5.0 work not yet tagged).
+
 ## Security
 
 - `DASHBOARD_API_KEY` env var required for POST endpoints in production (empty = dev mode, no auth)
@@ -210,6 +225,7 @@ Tudo acionável-via-código das auditorias técnicas de 2026-04-17 e 2026-04-18 
 - **Known cosmetic issue:** Grafana 11.3 lands the dashboard in "General" folder rather than `pje-download` folder. Harmless; fix post-deploy via UI or pre-create folder via `POST /api/folders`.
 
 ## Paths
-- WSL: `/mnt/c/projetos-2026/pje-download`
+- Working copy (current, native WSL fs): `/home/fbmoulin/projetos-26-2/pje-download` — matches `origin/main` HEAD.
+- Legacy checkout `/mnt/c/projetos-2026/pje-download` is **STALE** (HEAD `123433f`, pre-v2.5.0) — do not edit; re-clone or `git pull` before using.
 - Dashboard: `:8007`, Worker health: `:8006`, Metrics: `:8007/metrics`
 - Downloads output: `/data/downloads` (Docker) or `./downloads` (local)
