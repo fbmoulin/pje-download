@@ -2,9 +2,16 @@
 
 > Itens acionáveis abertos. Nada aqui bloqueia o uso: o app está em produção (São Paulo) com MNI `healthy`. Histórico e backlog completo em `CLAUDE.md`.
 
+## 🔴 Bug ativo — confiabilidade do Redis nos processos em execução
+
+- [ ] **`Timeout reading from redis:6379` intermitente no worker/dashboard rodando** → orquestração de batch não-confiável: às vezes o worker não consome o job (fica `queued`/`waiting`), às vezes a dashboard não lê o resultado da reply-queue e marca o batch `failed` embora os arquivos tenham sido baixados. **O download em si FUNCIONA** (batch `20260718_161950` baixou 13 docs → 3 PDF + 9 HTML reais em disco); o bug é no plano de controle via Redis.
+  - **Já descartado:** não é o firewall (persiste com ele desanexado), não é `socket_timeout` mal configurado (teste isolado no container: `redis.from_url(REDIS_URL)` + `blpop(timeout=3)` retorna `None` limpo em 3.01s, `ping` 0.01s), não é DNS/rede (TCP `redis:6379` OK), não é restart (persiste após containers frescos).
+  - **Assinatura:** conexão fresh funciona, conexões long-lived nos processos ficam ruins. Suspeita = pool/lifecycle do `redis.asyncio` (ex.: `blpop` cancelado por `asyncio.wait_for` externo envenena a conexão do pool; ou acesso concorrente à mesma conexão). **Investigar com `systematic-debugging`**, não sondagem ad-hoc: capturar o traceback real do `TimeoutError` no processo rodando; revisar wrappers de timeout em `dashboard_api._poll_results_loop` e `worker` blpop; considerar `retry_on_timeout=True`/`health_check_interval`/conexão dedicada por consumidor.
+  - Toda vez que rodar: `docker compose restart worker` dá alívio temporário (conexão nova) mas o erro volta.
+
 ## ▶ Próximo (recomendado)
 
-- [ ] **Validar um download MNI real de ponta a ponta** — agora que o MNI responde `healthy` do VPS de SP, rodar uma consulta real (`consultarProcesso` com `documento=<id>`) contra um processo de teste e confirmar que o PDF chega em `/data/downloads`. É a prova final de que a função-fim funciona, não só o health check.
+- [x] **Validar download MNI real de ponta a ponta** — ✅ FEITO 2026-07-18: `5022505-25.2024.8.08.0012` → MNI autenticou (senha nova), `consultar_processo.success documentos=13`, **3 PDF + 9 HTML reais** em `/data/downloads`. Os 11 "vinculados" o MNI não retorna (precisam do fallback Playwright — limitação do MNI 2.2.2). Bug de placar acima é ortogonal ao sucesso do download.
 
 ## Opcionais (hardening / operação)
 
