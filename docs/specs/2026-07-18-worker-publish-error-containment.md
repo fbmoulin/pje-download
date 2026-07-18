@@ -205,7 +205,33 @@ Update `TODO.md`. Record in the spec whether the `OutOfMemoryError` decision sti
 
 ---
 
-## USER VALIDATION GATE
+## USER VALIDATION GATE — ANSWERED 2026-07-18
+
+Felipe's decisions, recorded before implementation:
+
+| Question | Decision |
+|---|---|
+| Scope of publish paths | **All three** — `_publish_result`, `_publish_progress`, `_publish_dead_letter`. |
+| Layer 2 breadth | **`except Exception`** + traceback + dedicated metric. The backstop is the point. |
+| Root cause | **Fix both** — code containment *and* the Redis config that produces MISCONF. |
+| At-least-once delivery | Stays **out of scope** (see Non-goals). |
+
+### Root-cause decision detail
+
+Two candidate config changes remove the MISCONF trigger:
+
+| Option | Effect | Trade-off |
+|---|---|---|
+| `--save ""` (disable RDB) | No snapshots, so no bgsave, so no MISCONF ever. | Loses restart recovery: jobs queued by n8n in `kratos:pje:jobs` would not survive a Redis restart. |
+| **`--stop-writes-on-bgsave-error no`** ← chosen | Snapshots continue; a failed save is logged but **no longer rejects writes**. | Keeps whatever restart-recovery value RDB provides while removing the fatal behaviour. Standard posture for cache-like Redis. |
+
+Chosen: `--stop-writes-on-bgsave-error no`. It is the surgical change — it removes the
+write-rejection that shreds jobs, without discarding the snapshot's ability to preserve
+queued jobs across a Redis restart. Note this is **defence in depth, not a substitute** for
+the code fix: the code fix also covers `DataError`, ACL errors, and future unforeseen
+classes, none of which this config touches.
+
+### Original gate questions (kept for the record)
 
 Do not begin implementation until Felipe confirms:
 

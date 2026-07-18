@@ -19,11 +19,22 @@ services:
     container_name: pje-redis
     restart: unless-stopped
     mem_limit: 128m
+    # --stop-writes-on-bgsave-error no is load-bearing, not a style choice.
+    # Redis defaults it to `yes`: when a background RDB save fails, the server
+    # rejects EVERY write with `-MISCONF ...`, which redis-py surfaces as a
+    # generic ResponseError. This deployment makes that reachable — snapshots
+    # write to /data and the app's core function is downloading files to disk,
+    # so a full disk turns into "no job can be published". Snapshots still run
+    # (they let queued jobs survive a Redis restart); a failed save is now
+    # logged by Redis instead of freezing the control plane.
+    # Defence in depth only — worker.py also contains ResponseError on every
+    # publish path, which covers the classes this flag does not.
     command: >
       redis-server
       --requirepass ${REDIS_PASSWORD:-pje_redis_2026}
       --maxmemory 96mb
       --maxmemory-policy allkeys-lru
+      --stop-writes-on-bgsave-error no
     volumes:
       - redis_data:/data
     healthcheck:

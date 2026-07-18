@@ -1496,6 +1496,28 @@ class PJeSessionWorker:
                     status=result_data.get("status", "unknown")
                 ).inc()
                 return
+            except redis.ResponseError as exc:
+                # PERMANENT: the server rejected the command itself. Retrying can
+                # never succeed, and the backoff would only delay the durable
+                # fallback below by ~7s per job. The reachable case here is
+                # MISCONF — Redis runs RDB snapshots with
+                # stop-writes-on-bgsave-error, so a failed background save makes
+                # every write return -MISCONF until the save succeeds.
+                # Go straight to the local log so the result is not destroyed.
+                metrics.worker_publish_failures_total.labels(kind="result").inc()
+                log.error(
+                    "pje.queue.result_publish_permanent",
+                    job_id=result_data.get("jobId"),
+                    error=str(exc),
+                    error_class=type(exc).__name__,
+                    note="not retriable; result saved to local log only",
+                )
+                await self._log_job_result(
+                    result_data.get("jobId", ""),
+                    result_data.get("numeroProcesso", ""),
+                    result_data.get("arquivosDownloaded", []),
+                )
+                return
             except (redis.ConnectionError, redis.TimeoutError, OSError) as exc:
                 if attempt == max_retries - 1:
                     metrics.worker_publish_failures_total.labels(kind="result").inc()
@@ -1565,6 +1587,19 @@ class PJeSessionWorker:
                 phase=phase,
                 status=resolved_status,
             ).inc()
+        except redis.ResponseError as exc:
+            # PERMANENT (see _publish_result). Progress events are advisory, so
+            # there is nothing durable to fall back to — but this must not
+            # propagate: it is raised from ~20 call sites inside
+            # download_process, and on escape it kills the whole consumer.
+            metrics.worker_publish_failures_total.labels(kind="progress").inc()
+            log.error(
+                "pje.queue.progress_publish_permanent",
+                job_id=job.get("jobId"),
+                queue=queue_name,
+                error=str(exc),
+                error_class=type(exc).__name__,
+            )
         except (redis.ConnectionError, redis.TimeoutError, OSError) as exc:
             metrics.worker_publish_failures_total.labels(kind="progress").inc()
             log.warning(
@@ -1596,6 +1631,17 @@ class PJeSessionWorker:
         try:
             await self.redis.lpush(DEAD_LETTER_QUEUE, dead_letter_to_json(entry))
             metrics.worker_dead_letters_total.labels(reason=reason).inc()
+        except redis.ResponseError as exc:
+            # PERMANENT (see _publish_result). This path already runs while
+            # handling a malformed payload, so letting it propagate would turn a
+            # bad message into a dead consumer.
+            metrics.worker_publish_failures_total.labels(kind="dead_letter").inc()
+            log.error(
+                "pje.queue.dead_letter_publish_permanent",
+                reason=reason,
+                error=str(exc),
+                error_class=type(exc).__name__,
+            )
         except (redis.ConnectionError, redis.TimeoutError, OSError) as exc:
             metrics.worker_publish_failures_total.labels(kind="dead_letter").inc()
             log.warning(
@@ -1682,15 +1728,41 @@ class PJeSessionWorker:
                 processo=job["numeroProcesso"],
             )
 
-            result_data = await self.download_process(job)
-            if job.get("batchId"):
-                result_data["batchId"] = job["batchId"]
+            # Containment backstop: one bad job must never kill the consumer.
+            # The enumerated handlers in the publish paths cover the errors we
+            # know about; this covers the ones we do not — which is the whole
+            # point, since "someone enumerated every exception class correctly"
+            # is exactly the assumption that failed here. Escaping this loop
+            # exits main() (no `except` there) and the container restarts, so an
+            # uncaught error destroys the in-flight job: blpop already removed it
+            # and there is no ack or processing list to redeliver it.
+            #
+            # Do NOT widen this to BaseException. asyncio.CancelledError derives
+            # from BaseException and must keep propagating, or graceful shutdown
+            # breaks silently. Guarded by
+            # tests/test_worker_publish_error_containment.py.
+            try:
+                result_data = await self.download_process(job)
+                if job.get("batchId"):
+                    result_data["batchId"] = job["batchId"]
 
-            # Publicar resultado para o n8n (com retry)
-            await self._publish_result(
-                result_data,
-                queue_name=job.get("replyQueue", "kratos:pje:results"),
-            )
+                # Publicar resultado para o n8n (com retry)
+                await self._publish_result(
+                    result_data,
+                    queue_name=job.get("replyQueue", "kratos:pje:results"),
+                )
+            except Exception as exc:
+                metrics.worker_publish_failures_total.labels(kind="job").inc()
+                log.error(
+                    "pje.queue.job_failed_uncaught",
+                    job_id=job["jobId"],
+                    processo=job["numeroProcesso"],
+                    error=str(exc),
+                    error_class=type(exc).__name__,
+                    exc_info=True,
+                    note="job dropped; consumer continuing",
+                )
+                continue
 
             # Encerrar se sessão expirou e MNI não disponível
             if result_data["status"] == "session_expired" and self.mni_client is None:

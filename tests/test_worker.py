@@ -26,6 +26,9 @@ def _load_worker_module():
     # Preserve real exception classes so `except redis.ConnectionError` works
     mock_redis_module.ConnectionError = _real_redis.ConnectionError
     mock_redis_module.TimeoutError = _real_redis.TimeoutError
+    # Production code catches ResponseError too (permanent publish failures).
+    # A MagicMock here makes `except redis.ResponseError` raise TypeError.
+    mock_redis_module.ResponseError = _real_redis.ResponseError
     mock_playwright_module = MagicMock()
 
     with patch.dict(
@@ -356,10 +359,11 @@ class TestWorkerClose:
 
 def _patch_redis_exceptions(w):
     """Ensure worker module's redis mock has real exception classes."""
-    from redis.exceptions import ConnectionError, TimeoutError
+    from redis.exceptions import ConnectionError, ResponseError, TimeoutError
 
     w.redis.ConnectionError = ConnectionError
     w.redis.TimeoutError = TimeoutError
+    w.redis.ResponseError = ResponseError
 
 
 def _redis_with_pipeline(execute_side_effect=None):
