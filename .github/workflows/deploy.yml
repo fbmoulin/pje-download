@@ -32,14 +32,22 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Validate required secrets
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          MNI_USERNAME: ${{ secrets.MNI_USERNAME }}
+          MNI_PASSWORD: ${{ secrets.MNI_PASSWORD }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          DASHBOARD_API_KEY: ${{ secrets.DASHBOARD_API_KEY }}
         run: |
-          : "${{ secrets.VPS_SSH_KEY:?VPS_SSH_KEY is required }}"
-          : "${{ secrets.VPS_HOST:?VPS_HOST is required }}"
-          : "${{ secrets.VPS_USER:?VPS_USER is required }}"
-          : "${{ secrets.MNI_USERNAME:?MNI_USERNAME is required }}"
-          : "${{ secrets.MNI_PASSWORD:?MNI_PASSWORD is required }}"
-          : "${{ secrets.REDIS_PASSWORD:?REDIS_PASSWORD is required (must not be default) }}"
-          : "${{ secrets.DASHBOARD_API_KEY:?DASHBOARD_API_KEY is required }}"
+          : "${VPS_SSH_KEY:?VPS_SSH_KEY is required}"
+          : "${VPS_HOST:?VPS_HOST is required}"
+          : "${VPS_USER:?VPS_USER is required}"
+          : "${MNI_USERNAME:?MNI_USERNAME is required}"
+          : "${MNI_PASSWORD:?MNI_PASSWORD is required}"
+          : "${REDIS_PASSWORD:?REDIS_PASSWORD is required (must not be default)}"
+          : "${DASHBOARD_API_KEY:?DASHBOARD_API_KEY is required}"
         shell: bash
 
       - name: Sync files to VPS
