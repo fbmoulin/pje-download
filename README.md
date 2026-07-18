@@ -459,22 +459,31 @@ curl http://localhost:8007/metrics      # metricas Prometheus
 
 ### Producao (VPS)
 
-> **Aviso:** O VPS fixo anterior (`191.252.204.250`) está inativo. O deploy agora usa um VPS genérico configurado via secrets.
+> **Status:** ✅ **Em produção desde 2026-07-18** — Hostinger VPS no datacenter **São Paulo** (KVM 2). Deploy contínuo via GitHub Actions (`deploy.yml`).
 
 | Recurso | Valor |
 |---------|-------|
-| Host | `${{ secrets.VPS_HOST }}` (configurado nos secrets do repositório) |
-| Dashboard | `http://<VPS_HOST>:8007` |
-| Metrics | `http://<VPS_HOST>:8007/metrics` |
+| Host | `${{ secrets.VPS_HOST }}` (São Paulo / BR — via secret) |
 | Path | `/opt/pje-download` |
+| Acesso ao dashboard | **túnel SSH** — as portas 8007/8006 são fechadas de fora pelo firewall |
 
-**Secrets obrigatórios:**
-- `VPS_SSH_KEY`
-- `VPS_HOST`
-- `VPS_USER`
+**Acessar o dashboard** (as portas não são expostas publicamente):
+
+```bash
+ssh -i <chave_deploy> -L 8007:localhost:8007 <VPS_USER>@<VPS_HOST>
+# depois: http://localhost:8007  (envie o header X-API-Key: <DASHBOARD_API_KEY>)
+# a chave está no /opt/pje-download/.env do VPS (DASHBOARD_API_KEY)
+```
+
+> **⚠️ MNI exige egresso brasileiro.** O PJe/TJES fica atrás do AWS CloudFront com **geo-restrição por país**: IP fora do BR recebe `403`. Por isso o VPS **precisa estar num datacenter brasileiro** (o de São Paulo funciona — `mni check: healthy`). Não é whitelist/ofício; é geolocalização do IP. O fallback Playwright depende do mesmo host, então também exige IP BR.
+
+**Secrets obrigatórios** (o `deploy.yml` falha cedo se faltar algum):
+- `VPS_SSH_KEY`, `VPS_HOST`, `VPS_USER`
 - `MNI_USERNAME`, `MNI_PASSWORD`
 - `REDIS_PASSWORD` (não pode ser o default)
 - `DASHBOARD_API_KEY`
+
+> **Troca de região na Hostinger** (se precisar remover/mover o VPS): é operação de **hPanel** (a API ignora `data_center_id`), **1× a cada 30 dias**, muda o IP e **desanexa o firewall** (reanexar). O reinstall instala a chave da conta no `root` mas não roda o post-install — recrie o usuário `deploy` via `root` e atualize o secret `VPS_HOST`.
 
 ### CI/CD (GitHub Actions)
 
