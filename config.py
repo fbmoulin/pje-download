@@ -198,5 +198,28 @@ REDIS_SOCKET_TIMEOUT_SECS = float(
 # Per-batch absolute timeout ceiling — prevents a stuck poll loop from running forever (H2).
 BATCH_MAX_DURATION_SECS = int(os.getenv("BATCH_MAX_DURATION_SECS", "3600"))
 
+# TTL for `kratos:pje:results:<batch_id>` reply queues.
+#
+# The dashboard deletes the reply queue in the `finally` of _run_batch, but that
+# runs in-process: a container restart / redeploy while a batch is still polling
+# skips it entirely and — with no TTL — the key lives forever. Prod 2026-07-18
+# had 4 such orphans (`ttl=-1`, 48 undrained messages) stranded when wedged
+# batches were redeployed out from under the poll loop.
+#
+# The worker refreshes this TTL on every write, so the window only starts
+# decaying after the LAST message; an abandoned queue self-cleans, a live one
+# never expires. MUST exceed BATCH_MAX_DURATION_SECS — a shorter TTL would drop
+# a live batch's undrained results and resurrect the "batch failed but the files
+# are on disk" symptom. Derived so raising the batch ceiling lifts it in lockstep.
+REDIS_RESULT_QUEUE_TTL_MARGIN_SECS = int(
+    os.getenv("REDIS_RESULT_QUEUE_TTL_MARGIN_SECS", "1800")
+)
+REDIS_RESULT_QUEUE_TTL_SECS = int(
+    os.getenv(
+        "REDIS_RESULT_QUEUE_TTL_SECS",
+        str(BATCH_MAX_DURATION_SECS + REDIS_RESULT_QUEUE_TTL_MARGIN_SECS),
+    )
+)
+
 # Disk free-space floor in MB — worker returns 503 / marks disk "low" below this (M7).
 DISK_LOW_THRESHOLD_MB = int(os.getenv("DISK_LOW_THRESHOLD_MB", "2000"))
