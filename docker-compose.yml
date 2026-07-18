@@ -69,7 +69,7 @@ services:
       AUDIT_SYNC_AUTO_MIGRATE: ${AUDIT_SYNC_AUTO_MIGRATE:-false}
       AUDIT_SYNC_DRAIN_TIMEOUT_SECS: ${AUDIT_SYNC_DRAIN_TIMEOUT_SECS:-5.0}
     ports:
-      - "${DASHBOARD_PORT:-8007}:8007"
+      - "127.0.0.1:${DASHBOARD_PORT:-8007}:8007"
     volumes:
       - downloads_data:/data
     depends_on:
@@ -116,7 +116,7 @@ services:
       MNI_TRIBUNAL: ${MNI_TRIBUNAL:-TJES}
       MNI_TIMEOUT: ${MNI_TIMEOUT:-60}
     ports:
-      - "${HEALTH_PORT:-8006}:8006"
+      - "127.0.0.1:${HEALTH_PORT:-8006}:8006"
     volumes:
       - downloads_data:/data
     depends_on:
