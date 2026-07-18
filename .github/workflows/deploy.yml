@@ -115,11 +115,12 @@ jobs:
         uses: appleboy/ssh-action@v1.2.5
         env:
           REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          DASHBOARD_API_KEY: ${{ secrets.DASHBOARD_API_KEY }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: REDIS_PASSWORD
+          envs: REDIS_PASSWORD,DASHBOARD_API_KEY
           script: |
             set -e
             cd /opt/pje-download
@@ -137,7 +138,7 @@ jobs:
 
             echo "Waiting for dashboard healthcheck..."
             for i in $(seq 1 24); do
-              dashboard_status=$(curl -fsS http://localhost:8007/api/status || true)
+              dashboard_status=$(curl -fsS -H "X-API-Key: $DASHBOARD_API_KEY" http://localhost:8007/api/status || true)
               if printf '%s' "$dashboard_status" | grep -Eq '"worker_status"[[:space:]]*:[[:space:]]*"(ready|consuming)"'; then
                 break
               fi
@@ -166,7 +167,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             echo "Validating MNI credentials on VPS..."
-            if docker compose exec -T dashboard python -c "from mni_client import MniClient; MniClient()"; then
+            if docker compose exec -T dashboard python -c "from mni_client import MNIClient; MNIClient()"; then
               echo "MNI credentials are valid"
             else
               echo "MNI validation failed"
