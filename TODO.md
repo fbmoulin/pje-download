@@ -36,6 +36,26 @@
   - **Verificado ao vivo:** `stop-writes-on-bgsave-error = no`, os 3 caminhos com tratamento, contenção presente; 463✓ no CI. Spec: `docs/specs/2026-07-18-worker-publish-error-containment.md` (11/11).
   - 🔴 **Fora de escopo (declarado):** entrega at-least-once. O `blpop` continua sem ack ⇒ um crash entre BLPOP e publish ainda **perde o job**. Este fix torna o **resultado** durável, não o job re-executável.
 
+## ▶ Itens 1 e 2 — pesquisados, prontos para spec
+
+Relatórios completos em `docs/research/` (preservados do scratchpad da sessão, que é efêmero).
+
+### Item 1 — invariante da TTL entre containers (`docs/research/2026-07-18-cross-container-ttl-invariant.md`)
+
+- **Estado: LATENTE, não vivo.** Nenhuma das vars está no `environment:` dos serviços, não há `env_file:`, o `.dockerignore` exclui o `.env` da imagem, e o `printf` do `deploy.yml` não as emite ⇒ hoje ambos os containers rodam os defaults do `config.py` (3600/86400) e a invariante vale por construção. Reabre no momento em que alguém fizer a coisa documentada: adicionar `BATCH_MAX_DURATION_SECS` só ao bloco do dashboard.
+- **Recomendado (opção ii):** o dashboard carimba a TTL derivada dele no `JobMessage`; o worker arma esse valor nas filas que possui. ~6 linhas, em costuras que **já existem** (`_batch_job_payload` é o único ponto de construção e já carimba `replyQueue`; o `_publish_progress` já recebe o dict do job). **FECHA** a invariante (a guarda de import do dashboard já provou TTL > teto naquele processo) e é aditivo/compatível nas duas direções de versão mista.
+- ⚠️ **Armadilhas que a spec não pode errar:** (a) são **DOIS** sites de escrita de TTL — result **e** progress; o progress domina, última escrita vence; (b) usar **segundos relativos, NÃO deadline absoluto** — o caminho de resume não publica job novo, então um deadline carimbado fica obsoleto; (c) o fallback de campo-ausente tem de **logar alto**, senão recria a falha silenciosa que o fix existe pra matar.
+- **Opção (iii) REFUTADA** (dashboard armar a TTL): `worker.py:105-113` — um RPUSH cru recria a chave sem expiração; o dashboard não consegue ser atômico com a escrita do worker.
+- 🔴 **UNKNOWN a resolver antes da spec:** exercitar `config` DENTRO dos dois containers para confirmar os valores efetivos vivos.
+
+### Item 2 — guarda de config: `raise` no import vs clamp (`docs/research/2026-07-18-config-guard-raise-vs-clamp.md`)
+
+- **Estado: NÃO PODE disparar em produção hoje** (mesmos 3 fatos acima). Risco latente; a prioridade se liga ao momento em que alguém plumbar as vars.
+- **Mas o raio de dano é real quando plumbar:** os 3 serviços são `restart: unless-stopped`; o backoff do Docker **cobre até 60s e nunca reseta** quando o processo sai em <10s; `deploy.yml:127` **remove o container antigo ANTES do novo estar saudável**; o gate de health é limitado a 24×5s=120s; e **não há rollback** em lugar nenhum do `deploy.yml`.
+- **Recomendado:** trocar o `raise` por **clamp** (reusando o `max()` que o caminho default já faz) + regra de **não usar `raise` no import sob `unless-stopped`** + fechar o buraco do remove-before-healthy.
+- 🔑 **Princípio proposto (vale além deste caso):** *clampar* quando um valor correto é derivável, a direção segura é inequívoca e nenhuma outra invariante quebra; *abortar* para valores que codificam verdade externa (credenciais, `PJE_BASE_URL`) — e abortar em **tempo de deploy**, não no import.
+- ⚠️ **Caveat crítico:** nem `raise` nem clamp fecham a divergência cross-container (item 1) — isso exige o handshake em runtime.
+
 ## ▶ Próximo (recomendado)
 
 - [x] **Validar download MNI real de ponta a ponta** — ✅ FEITO 2026-07-18: `5022505-25.2024.8.08.0012` → MNI autenticou (senha nova), `consultar_processo.success documentos=13`, **3 PDF + 9 HTML reais** em `/data/downloads`. Os 11 "vinculados" o MNI não retorna (precisam do fallback Playwright — limitação do MNI 2.2.2). Bug de placar acima é ortogonal ao sucesso do download.
