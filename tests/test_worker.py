@@ -653,10 +653,11 @@ class TestPublishResult:
         worker = w.PJeSessionWorker()
         mock_r = _redis_with_pipeline()
         worker.redis = mock_r
+        # No queue_name => the shared n8n control-plane queue, whose lifetime we
+        # do NOT own: it must be written without an expiry.
         await worker._publish_result({"jobId": "J1", "status": "success"})
-        mock_r._pipe.rpush.assert_called_once()
-        # The write must arm an expiry — a bare RPUSH leaks an immortal key.
-        mock_r._pipe.expire.assert_called_once()
+        mock_r.rpush.assert_awaited_once()
+        mock_r._pipe.expire.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_publish_can_target_batch_reply_queue(self):
@@ -706,7 +707,9 @@ class TestPublishResult:
             patch.object(w, "log", MagicMock()),
             patch("worker.asyncio.sleep", new_callable=AsyncMock),
         ):
-            await worker._publish_result({"jobId": "J1"})
+            await worker._publish_result(
+                {"jobId": "J1"}, queue_name="kratos:pje:results:batch-retry"
+            )
         assert mock_r._pipe.execute.await_count == 2
 
     @pytest.mark.asyncio
@@ -731,6 +734,7 @@ class TestPublishResult:
                     "arquivosDownloaded": [{"nome": "doc.pdf"}],
                 },
                 max_retries=2,
+                queue_name="kratos:pje:results:batch-fallback",
             )
         local_log.assert_awaited_once_with(
             "J1",

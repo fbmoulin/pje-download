@@ -158,6 +158,63 @@ async def test_worker_publish_leaves_a_ttl_on_the_reply_queue():
         await client.aclose()
 
 
+class TestTTLScope:
+    """Only the dashboard's per-batch queues are ours to expire.
+
+    `_publish_result` falls back to the un-suffixed `kratos:pje:results`
+    (`worker.py`), which is the **n8n control plane's** queue — drained by an
+    out-of-repo consumer on its own cadence. Attaching an expiry to it silently
+    rewrites a durability contract we do not own: an n8n workflow paused longer
+    than the TTL would return to results that had aged out rather than failed.
+
+    Searching this repo for a consumer finds none, but "no in-repo consumer" is
+    not "no consumer" — `worker.py` documents the queue as feeding n8n.
+    """
+
+    def test_per_batch_queue_is_in_scope(self):
+        import worker
+
+        assert worker.owns_queue_lifecycle("kratos:pje:results:20260718_abc123")
+
+    def test_shared_control_plane_queue_is_out_of_scope(self):
+        import worker
+
+        assert not worker.owns_queue_lifecycle("kratos:pje:results")
+
+    def test_unrelated_queue_is_out_of_scope(self):
+        import worker
+
+        assert not worker.owns_queue_lifecycle("kratos:pje:jobs")
+
+
+class TestTTLSurvivesAnOutage:
+    """The TTL has to outlive a crash, not just a batch.
+
+    `resume_active_batch` re-enters `_run_batch(enqueue_jobs=False)`, and
+    `_enqueue_batch` then skips both the queue delete and the job re-publish
+    (`dashboard_api.py`). Resume therefore *depends on the undrained reply queue
+    still being there*. Nothing re-arms the TTL while the dashboard is down —
+    the window decays from the worker's last write, so an outage longer than the
+    TTL loses every result the dashboard had not yet drained, and nothing
+    re-queues the work.
+
+    Before reply queues expired at all, that resume drained cleanly. Sizing the
+    TTL to the batch ceiling alone would trade an unbounded leak for silent loss
+    across any overnight incident.
+    """
+
+    MIN_OUTAGE_SURVIVAL_SECS = 12 * 3600
+
+    def test_ttl_survives_an_overnight_outage(self):
+        assert config.REDIS_RESULT_QUEUE_TTL_SECS >= self.MIN_OUTAGE_SURVIVAL_SECS, (
+            f"reply-queue TTL ({config.REDIS_RESULT_QUEUE_TTL_SECS}s) must outlive a "
+            f"realistic outage (>= {self.MIN_OUTAGE_SURVIVAL_SECS}s). Resume does not "
+            f"re-enqueue: if the queue expired while the dashboard was down, the "
+            f"undrained results are gone and every processo is marked failed with its "
+            f"files already on disk."
+        )
+
+
 @pytest.mark.asyncio
 async def test_both_worker_publish_paths_set_a_ttl():
     """`_publish_result` and `_publish_progress` must both route through the helper.
@@ -170,19 +227,45 @@ async def test_both_worker_publish_paths_set_a_ttl():
     path = pathlib.Path(__file__).resolve().parent.parent / "worker.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
 
-    # `pipe.rpush` inside rpush_with_ttl is the sanctioned one; what must never
-    # appear is an RPUSH straight onto a client (`self.redis.rpush`, etc.), which
-    # writes a message with no expiry attached.
-    bare_rpush = [
-        node.lineno
+    # Any list-write onto a redis CLIENT is suspect, not just `rpush` — an
+    # earlier version of this test matched `rpush` alone, which `lpush` walked
+    # straight past. The sanctioned writes are the ones queued on the pipeline
+    # inside rpush_with_ttl; those have `expire` alongside them.
+    sanctioned = _pipeline_body_linenos(tree, "rpush_with_ttl")
+    LIST_WRITES = {"rpush", "lpush", "rpushx", "lpushx"}
+
+    offenders = [
+        (node.lineno, node.func.attr)
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "rpush"
-        and not (isinstance(node.func.value, ast.Name) and node.func.value.id == "pipe")
+        and node.func.attr in LIST_WRITES
+        and node.lineno not in sanctioned
+        # DEAD_LETTER_QUEUE is a separate, deliberately durable sink — not a
+        # reply queue, and explicitly out of scope for expiry.
+        and not _writes_to_dead_letter(node)
     ]
-    assert not bare_rpush, (
-        f"worker.py RPUSHes straight onto a redis client at line(s) {bare_rpush}. "
+    assert not offenders, (
+        f"worker.py writes to a list straight on a redis client at {offenders}. "
         f"Reply-queue writes must go through rpush_with_ttl() so the key always "
-        f"carries an expiry; a bare rpush recreates an immortal key."
+        f"carries an expiry; a bare push recreates a key with no expiry."
     )
+
+
+def _pipeline_body_linenos(tree, func_name: str) -> set[int]:
+    """Line numbers of calls inside the named function — the sanctioned writes."""
+    import ast as _ast
+
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.AsyncFunctionDef | _ast.FunctionDef) and (
+            node.name == func_name
+        ):
+            return {n.lineno for n in _ast.walk(node) if isinstance(n, _ast.Call)}
+    raise AssertionError(f"{func_name} not found in worker.py")
+
+
+def _writes_to_dead_letter(node) -> bool:
+    import ast as _ast
+
+    first = node.args[0] if node.args else None
+    return isinstance(first, _ast.Name) and first.id == "DEAD_LETTER_QUEUE"
