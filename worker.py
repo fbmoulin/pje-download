@@ -59,6 +59,7 @@ from config import (
     PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS,
     PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS,
     REDIS_BLPOP_TIMEOUT_SECS,
+    REDIS_RESULT_QUEUE_TTL_SECS,
     REDIS_SOCKET_TIMEOUT_SECS,
     REDIS_CIRCUIT_THRESHOLD,
     DISK_LOW_THRESHOLD_MB,
@@ -79,6 +80,24 @@ def _unique_filename(directory: Path, filename: str) -> str:
 # _merge_downloaded_files moved to file_utils.merge_file_lists (Sprint 2 Q2).
 # Kept this alias so existing call sites (and any external imports) keep working.
 _merge_downloaded_files = merge_file_lists
+
+
+async def rpush_with_ttl(redis_client, queue_name: str, payload: str) -> None:
+    """RPUSH onto a reply queue and (re)arm its expiry in one round trip.
+
+    The worker is what brings `kratos:pje:results:<batch_id>` into existence, so
+    the expiry has to be set here — a bare RPUSH recreates an immortal key even
+    right after the dashboard deleted it.
+
+    The TTL is re-armed on every write, so the window only starts decaying after
+    the last message: a live batch never expires, an abandoned one self-cleans.
+    Pipelined so a write can't land without its expiry (which is precisely how
+    the 4 orphaned queues of 2026-07-18 would come back).
+    """
+    async with redis_client.pipeline(transaction=True) as pipe:
+        pipe.rpush(queue_name, payload)
+        pipe.expire(queue_name, REDIS_RESULT_QUEUE_TTL_SECS)
+        await pipe.execute()
 
 
 @dataclass
@@ -1448,7 +1467,7 @@ class PJeSessionWorker:
         result_json = result_to_json(result_data)
         for attempt in range(max_retries):
             try:
-                await self.redis.rpush(queue_name, result_json)
+                await rpush_with_ttl(self.redis, queue_name, result_json)
                 metrics.worker_results_total.labels(
                     status=result_data.get("status", "unknown")
                 ).inc()
@@ -1517,7 +1536,7 @@ class PJeSessionWorker:
             "updatedAt": datetime.now(UTC).isoformat(),
         }
         try:
-            await self.redis.rpush(queue_name, progress_to_json(payload))
+            await rpush_with_ttl(self.redis, queue_name, progress_to_json(payload))
             metrics.worker_progress_events_total.labels(
                 phase=phase,
                 status=resolved_status,

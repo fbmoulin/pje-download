@@ -7,6 +7,8 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
 from prometheus_client import generate_latest
 
+import config
+
 
 def _load_worker_module():
     """Import worker with heavy dependencies mocked out."""
@@ -360,6 +362,32 @@ def _patch_redis_exceptions(w):
     w.redis.TimeoutError = TimeoutError
 
 
+def _redis_with_pipeline(execute_side_effect=None):
+    """Redis mock whose ``.pipeline()`` matches redis.asyncio's real shape.
+
+    Reply-queue writes go through ``worker.rpush_with_ttl``, which pipelines
+    RPUSH + EXPIRE so a message can never land without its expiry. Mirrors the
+    real contract: ``pipeline()`` is sync and returns an async context manager;
+    queueing commands on it is sync; only ``execute()`` is awaited.
+
+    Exposes the queued pipeline as ``._pipe`` so tests assert on
+    ``._pipe.rpush`` / ``._pipe.expire`` instead of a bare ``rpush``.
+    """
+    pipe = MagicMock()
+    pipe.rpush = MagicMock(return_value=pipe)
+    pipe.expire = MagicMock(return_value=pipe)
+    pipe.execute = AsyncMock(side_effect=execute_side_effect)
+
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=pipe)
+    cm.__aexit__ = AsyncMock(return_value=False)
+
+    r = AsyncMock()
+    r.pipeline = MagicMock(return_value=cm)
+    r._pipe = pipe
+    return r
+
+
 class TestRedisInitRetry:
     """init() retries Redis connection with exponential backoff."""
 
@@ -623,16 +651,18 @@ class TestPublishResult:
     async def test_publish_succeeds(self):
         w = _load_worker_module()
         worker = w.PJeSessionWorker()
-        mock_r = AsyncMock()
+        mock_r = _redis_with_pipeline()
         worker.redis = mock_r
         await worker._publish_result({"jobId": "J1", "status": "success"})
-        mock_r.rpush.assert_awaited_once()
+        mock_r._pipe.rpush.assert_called_once()
+        # The write must arm an expiry — a bare RPUSH leaks an immortal key.
+        mock_r._pipe.expire.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_publish_can_target_batch_reply_queue(self):
         w = _load_worker_module()
         worker = w.PJeSessionWorker()
-        mock_r = AsyncMock()
+        mock_r = _redis_with_pipeline()
         worker.redis = mock_r
 
         await worker._publish_result(
@@ -640,16 +670,20 @@ class TestPublishResult:
             queue_name="kratos:pje:results:batch-123",
         )
 
-        mock_r.rpush.assert_awaited_once_with(
+        mock_r._pipe.rpush.assert_called_once_with(
             "kratos:pje:results:batch-123",
             ANY,
+        )
+        mock_r._pipe.expire.assert_called_once_with(
+            "kratos:pje:results:batch-123",
+            config.REDIS_RESULT_QUEUE_TTL_SECS,
         )
 
     @pytest.mark.asyncio
     async def test_publish_result_updates_metric(self):
         w = _load_worker_module()
         worker = w.PJeSessionWorker()
-        worker.redis = AsyncMock()
+        worker.redis = _redis_with_pipeline()
 
         await worker._publish_result({"jobId": "J1", "status": "partial_success"})
 
@@ -664,15 +698,16 @@ class TestPublishResult:
         w = _load_worker_module()
         _patch_redis_exceptions(w)
         worker = w.PJeSessionWorker()
-        mock_r = AsyncMock()
-        mock_r.rpush = AsyncMock(side_effect=[RedisConnectionError("down"), None])
+        mock_r = _redis_with_pipeline(
+            execute_side_effect=[RedisConnectionError("down"), None]
+        )
         worker.redis = mock_r
         with (
             patch.object(w, "log", MagicMock()),
             patch("worker.asyncio.sleep", new_callable=AsyncMock),
         ):
             await worker._publish_result({"jobId": "J1"})
-        assert mock_r.rpush.await_count == 2
+        assert mock_r._pipe.execute.await_count == 2
 
     @pytest.mark.asyncio
     async def test_publish_falls_back_to_local_log(self, tmp_path):
@@ -681,8 +716,7 @@ class TestPublishResult:
         w = _load_worker_module()
         _patch_redis_exceptions(w)
         worker = w.PJeSessionWorker()
-        mock_r = AsyncMock()
-        mock_r.rpush = AsyncMock(side_effect=RedisConnectionError("down"))
+        mock_r = _redis_with_pipeline(execute_side_effect=RedisConnectionError("down"))
         worker.redis = mock_r
         local_log = AsyncMock()
         with (
@@ -708,7 +742,7 @@ class TestPublishResult:
     async def test_publish_progress_uses_reply_queue(self):
         w = _load_worker_module()
         worker = w.PJeSessionWorker()
-        mock_r = AsyncMock()
+        mock_r = _redis_with_pipeline()
         worker.redis = mock_r
 
         await worker._publish_progress(
@@ -722,9 +756,14 @@ class TestPublishResult:
             "Consultando metadados",
         )
 
-        mock_r.rpush.assert_awaited_once_with(
+        mock_r._pipe.rpush.assert_called_once_with(
             "kratos:pje:results:batch-1",
             ANY,
+        )
+        # Progress events create the queue too — they must arm the expiry as well.
+        mock_r._pipe.expire.assert_called_once_with(
+            "kratos:pje:results:batch-1",
+            config.REDIS_RESULT_QUEUE_TTL_SECS,
         )
 
         output = generate_latest(w.metrics.REGISTRY).decode()
