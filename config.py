@@ -166,6 +166,35 @@ MNI_HEALTH_CACHE_TTL_SECS = int(os.getenv("MNI_HEALTH_CACHE_TTL_SECS", "30"))
 RESULT_WAIT_TIMEOUT_SECS = int(os.getenv("RESULT_WAIT_TIMEOUT_SECS", "360"))
 RESULT_POLL_BLPOP_TIMEOUT_SECS = int(os.getenv("RESULT_POLL_BLPOP_TIMEOUT_SECS", "5"))
 
+# Redis socket read deadline. MUST exceed every blocking command issued on the
+# connection, or that command can never complete normally.
+#
+# redis-py 8.0.0 (Dependabot #24, 4da8899) flipped AbstractConnection's
+# socket_timeout default from None to 5 — silently, and exactly onto the 5s both
+# BLPOP sites above use. A BLPOP whose timeout >= socket_timeout ALWAYS loses the
+# race: the read deadline fires before the server's nil reply lands, so
+# read_response raises TimeoutError instead of returning None (redis/asyncio/
+# connection.py:778). Measured in prod: BLPOP(3)->None@3.02s, BLPOP(5)->raise@5.01s,
+# BLPOP(8)->raise@5.01s. Every empty-queue poll raised; the worker's circuit
+# breaker tripped to redis_unreachable and the dashboard failed batches whose
+# files were already on disk.
+#
+# Derived (not hardcoded) so raising either BLPOP timeout lifts this in lockstep.
+# Never set this to None: an unbounded read means a dead TCP connection hangs
+# forever and the circuit breaker never trips.
+REDIS_SOCKET_TIMEOUT_MARGIN_SECS = float(
+    os.getenv("REDIS_SOCKET_TIMEOUT_MARGIN_SECS", "10")
+)
+REDIS_MAX_BLOCKING_TIMEOUT_SECS = max(
+    REDIS_BLPOP_TIMEOUT_SECS, RESULT_POLL_BLPOP_TIMEOUT_SECS
+)
+REDIS_SOCKET_TIMEOUT_SECS = float(
+    os.getenv(
+        "REDIS_SOCKET_TIMEOUT_SECS",
+        str(REDIS_MAX_BLOCKING_TIMEOUT_SECS + REDIS_SOCKET_TIMEOUT_MARGIN_SECS),
+    )
+)
+
 # Per-batch absolute timeout ceiling — prevents a stuck poll loop from running forever (H2).
 BATCH_MAX_DURATION_SECS = int(os.getenv("BATCH_MAX_DURATION_SECS", "3600"))
 

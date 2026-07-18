@@ -59,6 +59,7 @@ from config import (
     PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS,
     PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS,
     REDIS_BLPOP_TIMEOUT_SECS,
+    REDIS_SOCKET_TIMEOUT_SECS,
     REDIS_CIRCUIT_THRESHOLD,
     DISK_LOW_THRESHOLD_MB,
     sha256_file,
@@ -177,7 +178,14 @@ class PJeSessionWorker:
         # exhaustion so the orchestrator (or systemd) sees a hard failure
         # rather than a silently-stuck worker.
         async def _ping() -> None:
-            self.redis = redis.from_url(REDIS_URL, decode_responses=True)
+            # socket_timeout is explicit and load-bearing: it must clear the
+            # BLPOP timeout below, or every empty-queue poll raises instead of
+            # returning None. See config.REDIS_SOCKET_TIMEOUT_SECS.
+            self.redis = redis.from_url(
+                REDIS_URL,
+                decode_responses=True,
+                socket_timeout=REDIS_SOCKET_TIMEOUT_SECS,
+            )
             await self.redis.ping()
 
         retry = AsyncRetry(
