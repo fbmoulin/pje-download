@@ -12,6 +12,16 @@
   - **Fix:** `socket_timeout` explícito nos dois sites de construção do cliente, **derivado** das constantes de BLPOP (`config.REDIS_SOCKET_TIMEOUT_SECS`) para subir em lockstep. Nunca `None` (conexão TCP morta penduraria para sempre e o circuit breaker nunca dispararia); nunca hardcoded (o bug foi confiar num default de biblioteca para comportamento load-bearing).
   - **Verificado ao vivo** pós-deploy: worker `unhealthy`→`healthy`, status `redis_unreachable`→`consuming`, **0** `redis_error`. 446 testes verdes no CI (era 441).
 
+## ✅ Reply-queues órfãs — RESOLVIDO 2026-07-18 (PR #33, `7b4c24f`)
+
+- [x] **4 chaves `kratos:pje:results:*` com `ttl=-1`** (48 mensagens não drenadas) — vazamento ilimitado.
+  - **Mecanismo:** a dashboard apaga a reply-queue no `finally` do `_run_batch`, mas `finally` roda **in-process**. Restart/redeploy com o batch ainda no `_poll_results_loop` pula o bloco inteiro e, **sem TTL**, a chave vive para sempre. Foi o que houve quando o bug do BLPOP travou batches até os containers serem redeployados por baixo do poll loop — uma chave por batch interrompido.
+  - **Fix:** quem cria a chave é o **worker** (um RPUSH cru a recria mesmo logo após a dashboard apagar), então a expiração foi para o caminho de escrita: `worker.rpush_with_ttl` faz RPUSH+EXPIRE **pipelinado**. Pipeline e não dois `await` de propósito: `_publish_result` tem retry, e uma falha entre um RPUSH cru e seu EXPIRE **republicaria a mensagem** (resultado duplicado); MULTI/EXEC aplica os dois ou nenhum.
+  - **TTL derivada** de `BATCH_MAX_DURATION_SECS` (+30min) e **re-armada a cada escrita** — fila abandonada se auto-limpa, fila viva nunca expira. ⚠️ TTL **abaixo** do teto do batch expiraria a fila em pleno voo e descartaria resultados = ressuscitaria o sintoma "batch failed com arquivos em disco".
+  - 🔑 **Premortem (`high`, confirmado) pegou o buraco:** a invariante estava só nos **testes**, e os testes importam a config com os **defaults** — um deploy podia invertê-la em silêncio (subir `BATCH_MAX_DURATION_SECS` e esquecer a TTL) com a suíte 100% verde. Agora há guarda **fail-fast no import** (`config.py`, mesmo idioma do `PJE_BASE_URL`).
+  - **As 4 órfãs:** conteúdo preservado em `~/orphan-queues-20260718/` no VPS, depois `EXPIRE 5400` — se auto-deletam. ⚠️ o fix é **forward-only**: não varre chaves pré-existentes.
+  - **Verificado ao vivo pós-deploy:** escrita real nasce com `ttl=5400`; 455✓ no CI (0 skips).
+
 ## ▶ Próximo (recomendado)
 
 - [x] **Validar download MNI real de ponta a ponta** — ✅ FEITO 2026-07-18: `5022505-25.2024.8.08.0012` → MNI autenticou (senha nova), `consultar_processo.success documentos=13`, **3 PDF + 9 HTML reais** em `/data/downloads`. Os 11 "vinculados" o MNI não retorna (precisam do fallback Playwright — limitação do MNI 2.2.2). Bug de placar acima é ortogonal ao sucesso do download.
