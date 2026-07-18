@@ -221,5 +221,19 @@ REDIS_RESULT_QUEUE_TTL_SECS = int(
     )
 )
 
+# The derivation above is only the DEFAULT — both sides are independently
+# env-overridable, so a deploy can set REDIS_RESULT_QUEUE_TTL_SECS explicitly (or
+# raise BATCH_MAX_DURATION_SECS and forget the TTL) and quietly invert the
+# relationship. The test suite would not notice: it imports these with their
+# defaults. Fail fast at import instead, because the failure this guards against
+# is silent — a queue expiring mid-batch drops undrained results and the batch is
+# reported failed with its files sitting on disk.
+if REDIS_RESULT_QUEUE_TTL_SECS <= BATCH_MAX_DURATION_SECS:
+    raise ValueError(
+        f"REDIS_RESULT_QUEUE_TTL_SECS ({REDIS_RESULT_QUEUE_TTL_SECS}s) must exceed "
+        f"BATCH_MAX_DURATION_SECS ({BATCH_MAX_DURATION_SECS}s): a reply queue that "
+        f"expires before its batch can finish silently discards undrained results."
+    )
+
 # Disk free-space floor in MB — worker returns 503 / marks disk "low" below this (M7).
 DISK_LOW_THRESHOLD_MB = int(os.getenv("DISK_LOW_THRESHOLD_MB", "2000"))

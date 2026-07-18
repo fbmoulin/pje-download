@@ -51,6 +51,64 @@ class TestTTLInvariant:
         assert config.REDIS_RESULT_QUEUE_TTL_SECS > 0
 
 
+class TestTTLInvariantEnforcedAtRuntime:
+    """The invariant must hold for the values production actually runs with.
+
+    The asserts above only ever see the *defaults*, because that is what the
+    suite imports. Both sides of the inequality are independently
+    env-overridable, so a deploy can violate it while the whole suite stays
+    green — which is precisely the shape of failure this change exists to
+    prevent. The guard therefore has to live in the app, at import time.
+    """
+
+    @staticmethod
+    def _reload_config(monkeypatch, **env):
+        import importlib
+
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        return importlib.reload(config)
+
+    def test_ttl_below_batch_ceiling_is_rejected(self, monkeypatch):
+        with pytest.raises(ValueError, match="REDIS_RESULT_QUEUE_TTL_SECS"):
+            self._reload_config(
+                monkeypatch,
+                BATCH_MAX_DURATION_SECS="3600",
+                REDIS_RESULT_QUEUE_TTL_SECS="60",
+            )
+
+    def test_raising_the_batch_ceiling_alone_is_rejected(self, monkeypatch):
+        """The realistic operator mistake: lengthen batches, forget the TTL."""
+        with pytest.raises(ValueError, match="REDIS_RESULT_QUEUE_TTL_SECS"):
+            self._reload_config(
+                monkeypatch,
+                BATCH_MAX_DURATION_SECS="86400",
+                REDIS_RESULT_QUEUE_TTL_SECS="5400",
+            )
+
+    def test_consistent_override_is_accepted(self, monkeypatch):
+        cfg = self._reload_config(
+            monkeypatch,
+            BATCH_MAX_DURATION_SECS="86400",
+            REDIS_RESULT_QUEUE_TTL_SECS="90000",
+        )
+        assert cfg.REDIS_RESULT_QUEUE_TTL_SECS == 90000
+
+    def test_derived_default_still_satisfies_the_invariant(self, monkeypatch):
+        """Raising only the ceiling is fine when the TTL is left derived."""
+        cfg = self._reload_config(monkeypatch, BATCH_MAX_DURATION_SECS="86400")
+        assert cfg.REDIS_RESULT_QUEUE_TTL_SECS > 86400
+
+
+@pytest.fixture(autouse=True)
+def _restore_config():
+    """Undo any monkeypatched reload so later tests see the real config."""
+    yield
+    import importlib
+
+    importlib.reload(config)
+
+
 @pytest.mark.asyncio
 async def test_worker_publish_leaves_a_ttl_on_the_reply_queue():
     """Real-socket proof: after a worker push, the key is NOT immortal.
