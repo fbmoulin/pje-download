@@ -214,10 +214,31 @@ BATCH_MAX_DURATION_SECS = int(os.getenv("BATCH_MAX_DURATION_SECS", "3600"))
 REDIS_RESULT_QUEUE_TTL_MARGIN_SECS = int(
     os.getenv("REDIS_RESULT_QUEUE_TTL_MARGIN_SECS", "1800")
 )
+
+# The TTL must outlive a CRASH, not merely a batch. `resume_active_batch` re-enters
+# `_run_batch(enqueue_jobs=False)`, and `_enqueue_batch` then skips both the queue
+# delete and the job re-publish — so resume *depends on the undrained reply queue
+# still existing*. Nothing re-arms the TTL while the dashboard is down: the window
+# decays from the worker's LAST WRITE. An outage longer than the TTL therefore
+# loses every undrained result and re-queues nothing, and the batch is marked
+# failed with its files already on disk.
+#
+# Sizing this to the batch ceiling alone would trade an unbounded leak for silent
+# loss across any overnight incident. The floor below is what makes the fix a net
+# win rather than a swap of one failure for another; the leak stays bounded because
+# the key still expires within a day.
+REDIS_RESULT_QUEUE_TTL_FLOOR_SECS = int(
+    os.getenv("REDIS_RESULT_QUEUE_TTL_FLOOR_SECS", str(24 * 3600))
+)
 REDIS_RESULT_QUEUE_TTL_SECS = int(
     os.getenv(
         "REDIS_RESULT_QUEUE_TTL_SECS",
-        str(BATCH_MAX_DURATION_SECS + REDIS_RESULT_QUEUE_TTL_MARGIN_SECS),
+        str(
+            max(
+                BATCH_MAX_DURATION_SECS + REDIS_RESULT_QUEUE_TTL_MARGIN_SECS,
+                REDIS_RESULT_QUEUE_TTL_FLOOR_SECS,
+            )
+        ),
     )
 )
 

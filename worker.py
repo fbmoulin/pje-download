@@ -82,18 +82,42 @@ def _unique_filename(directory: Path, filename: str) -> str:
 _merge_downloaded_files = merge_file_lists
 
 
+#: Per-batch reply queues are `kratos:pje:results:<batch_id>`. The un-suffixed
+#: `kratos:pje:results` is a DIFFERENT queue: the n8n control plane's, drained by
+#: an out-of-repo consumer on its own cadence (see `consume_queue` and the publish
+#: site below). Its lifetime is not ours to bound.
+RESULT_QUEUE_PREFIX = "kratos:pje:results"
+
+
+def owns_queue_lifecycle(queue_name: str) -> bool:
+    """True only for the per-batch reply queues the dashboard creates and deletes.
+
+    Expiry is applied strictly to those. Attaching a TTL to the shared control
+    plane queue would silently rewrite a durability contract owned by n8n — a
+    workflow paused longer than the TTL would come back to results that had aged
+    out rather than failed, with nothing logged.
+    """
+    return queue_name.startswith(f"{RESULT_QUEUE_PREFIX}:")
+
+
 async def rpush_with_ttl(redis_client, queue_name: str, payload: str) -> None:
     """RPUSH onto a reply queue and (re)arm its expiry in one round trip.
 
     The worker is what brings `kratos:pje:results:<batch_id>` into existence, so
-    the expiry has to be set here — a bare RPUSH recreates an immortal key even
-    right after the dashboard deleted it.
+    the expiry has to be set here — a bare RPUSH recreates a key with no expiry
+    even right after the dashboard deleted it.
 
     The TTL is re-armed on every write, so the window only starts decaying after
     the last message: a live batch never expires, an abandoned one self-cleans.
     Pipelined so a write can't land without its expiry (which is precisely how
     the 4 orphaned queues of 2026-07-18 would come back).
+
+    Queues we do not own are written without an expiry — see `owns_queue_lifecycle`.
     """
+    if not owns_queue_lifecycle(queue_name):
+        await redis_client.rpush(queue_name, payload)
+        return
+
     async with redis_client.pipeline(transaction=True) as pipe:
         pipe.rpush(queue_name, payload)
         pipe.expire(queue_name, REDIS_RESULT_QUEUE_TTL_SECS)
