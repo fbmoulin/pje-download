@@ -16,9 +16,10 @@ RUN pip install --no-cache-dir \
         "redis[hiredis]" asyncpg && \
     apt-get update && apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
-COPY --chown=appuser:appuser config.py mni_client.py gdrive_downloader.py \
-     batch_downloader.py dashboard_api.py dashboard.html metrics.py \
-     audit.py audit_sync.py pje_session.py ./
+# Copy all first-party modules (was an explicit list that drifted — Sprint 13/14
+# helpers async_retry.py/file_utils.py/protocol.py were missing, crash-looping the
+# dashboard on `from async_retry import AsyncRetry`). *.py mirrors the worker's COPY . .
+COPY --chown=appuser:appuser *.py dashboard.html ./
 COPY --chown=appuser:appuser static/ static/
 COPY --chown=appuser:appuser migrations/ migrations/
 RUN mkdir -p /data/downloads && chown -R appuser:appuser /data
