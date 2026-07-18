@@ -61,6 +61,7 @@ from config import (
     DOWNLOAD_BASE_DIR as DEFAULT_OUTPUT,
     REDIS_URL,
     HEALTH_PORT as WORKER_HEALTH_PORT,
+    REDIS_SOCKET_TIMEOUT_SECS,
     RESULT_POLL_BLPOP_TIMEOUT_SECS,
     RESULT_WAIT_TIMEOUT_SECS,
     BATCH_MAX_DURATION_SECS,
@@ -198,7 +199,15 @@ class DashboardState:
     async def get_redis(self) -> redis.Redis:
         """Lazily create a Redis client used by the dashboard control plane."""
         if self._redis is None:
-            self._redis = redis.from_url(REDIS_URL, decode_responses=True)
+            # socket_timeout is explicit and load-bearing: it must clear the
+            # reply-queue BLPOP timeout in _poll_results_loop, or a quiet queue
+            # raises instead of returning None and the batch is marked failed
+            # even though its files are on disk. See config.REDIS_SOCKET_TIMEOUT_SECS.
+            self._redis = redis.from_url(
+                REDIS_URL,
+                decode_responses=True,
+                socket_timeout=REDIS_SOCKET_TIMEOUT_SECS,
+            )
         await self._redis.ping()
         return self._redis
 

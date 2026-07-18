@@ -53,6 +53,10 @@ jobs:
     services:
       redis:
         image: redis:7.4-alpine
+        # Published so the real-socket BLPOP regression test in
+        # tests/test_redis_socket_timeout.py actually runs instead of skipping.
+        ports:
+          - 6379:6379
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 10s
