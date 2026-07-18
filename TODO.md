@@ -20,7 +20,11 @@
   - **TTL derivada** de `BATCH_MAX_DURATION_SECS` (+30min) e **re-armada a cada escrita** — fila abandonada se auto-limpa, fila viva nunca expira. ⚠️ TTL **abaixo** do teto do batch expiraria a fila em pleno voo e descartaria resultados = ressuscitaria o sintoma "batch failed com arquivos em disco".
   - 🔑 **Premortem (`high`, confirmado) pegou o buraco:** a invariante estava só nos **testes**, e os testes importam a config com os **defaults** — um deploy podia invertê-la em silêncio (subir `BATCH_MAX_DURATION_SECS` e esquecer a TTL) com a suíte 100% verde. Agora há guarda **fail-fast no import** (`config.py`, mesmo idioma do `PJE_BASE_URL`).
   - **As 4 órfãs:** conteúdo preservado em `~/orphan-queues-20260718/` no VPS, depois `EXPIRE 5400` — se auto-deletam. ⚠️ o fix é **forward-only**: não varre chaves pré-existentes.
-  - **Verificado ao vivo pós-deploy:** escrita real nasce com `ttl=5400`; 455✓ no CI (0 skips).
+  - ⚠️ **#33 tinha DUAS regressões, corrigidas em #34 (`f8d1358`)** — achadas por review adversarial *depois* do merge:
+    1. a TTL era aplicada **a toda** fila que o worker escreve, inclusive a compartilhada `kratos:pje:results` = **a fila do n8n** (consumidor externo). A justificativa de #33 ("0 consumidores no repo") era a busca errada: *sem consumidor no repo* ≠ *sem consumidor*. Agora só as filas por batch (`owns_queue_lifecycle`).
+    2. a TTL era dimensionada pelo **teto do batch**, que limita a janela errada. `resume_active_batch` re-entra com `enqueue_jobs=False` e **não re-enfileira** — o resume DEPENDE da fila não drenada existir. Nada re-arma a TTL com a dashboard fora do ar. Em 90 min, qualquer outage noturno perdia todo resultado não drenado (antes a chave era imortal e o resume funcionava). Agora **piso de 24h**.
+  - **Verificado ao vivo pós-deploy:** fila por batch `ttl=86400`, fila do n8n `ttl=-1`; 459✓ no CI.
+  - 🔴 **Aberto (decisão humana):** (a) o guard de import é **por processo**, e as duas metades da invariante vivem em containers diferentes (`BATCH_MAX_DURATION_SECS` só no dashboard, `REDIS_RESULT_QUEUE_TTL_SECS` só no worker) — divergência cross-container passa nos dois guards; (b) valor ruim virando `raise` no import + `restart: unless-stopped` = **crash-loop**, não recusa; (c) `redis.ResponseError` fora da tupla capturada em `_publish_result`, cujo call site está no `while` do `consume_queue` **sem try** ⇒ derruba o consumo (pré-existente). Detalhe em `.premortems/PREMORTEM-2026-07-18T21-20-00Z-addendum.md`.
 
 ## ▶ Próximo (recomendado)
 
