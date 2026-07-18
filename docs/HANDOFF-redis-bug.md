@@ -1,5 +1,42 @@
 # HANDOFF — bug de confiabilidade do Redis (redis.asyncio)
 
+> # ✅ RESOLVIDO — 2026-07-18, PR #32 (`2b6a784`)
+>
+> **Causa-raiz: regressão do `redis-py 8.0.0`** (bump do Dependabot #24, `4da8899`).
+> O default de `socket_timeout` em `AbstractConnection.__init__` mudou de `None` para
+> **5** — exatamente o timeout que os dois BLPOP usam. Comando bloqueante com
+> timeout **>= `socket_timeout`** nunca termina normalmente: o deadline do socket
+> dispara antes do `nil` do servidor, e `read_response` **levanta**
+> `TimeoutError` em vez de retornar `None` (`redis/asyncio/connection.py:778`).
+>
+> Medido no container de produção:
+> `BLPOP(3)→None@3.017s` · `BLPOP(5)→raise@5.006s` · `BLPOP(8)→raise@5.008s`.
+> O `BLPOP(8)` falhar em **5.008s** prova que o teto é um 5 fixo, não o argumento.
+>
+> **Fix:** `socket_timeout` explícito e derivado (`config.REDIS_SOCKET_TIMEOUT_SECS`)
+> nos dois clientes. Detalhes e verificação ao vivo em `TODO.md`.
+>
+> ---
+>
+> ## ⚠️ ERRO DESTE DOCUMENTO — leia antes de reusar o método
+>
+> A seção **"Já descartado"** abaixo estava **ERRADA** no item mais importante.
+> Ela descartava `socket_timeout` com base num teste isolado que usou
+> `blpop(timeout=3)` — **o único valor abaixo do novo default de 5** — e por isso
+> retornou `None` limpo e pareceu saudável. O teste não estava errado; estava
+> medindo o único ponto que passa.
+>
+> A hipótese principal deste handoff (conexão long-lived envenenada por `blpop`
+> cancelado) também foi **refutada**: um cliente **novo, em processo novo**, dentro
+> do mesmo container, falhava igual em 5.006s.
+>
+> **Lição:** ao descartar uma hipótese com um teste, varie o parâmetro suspeito.
+> Um único ponto de medição não descarta um teto — ele só mostra um lado dele.
+>
+> ---
+>
+> _Conteúdo original abaixo, preservado como registro histórico._
+
 > Handoff para uma sessão focada de debug. **Método: `superpowers:systematic-debugging`.**
 > NÃO sonde ad-hoc — capture o traceback real primeiro, confirme a causa-raiz, só então corrija.
 

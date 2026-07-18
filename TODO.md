@@ -2,12 +2,15 @@
 
 > Itens acionáveis abertos. Nada aqui bloqueia o uso: o app está em produção (São Paulo) com MNI `healthy`. Histórico e backlog completo em `CLAUDE.md`.
 
-## 🔴 Bug ativo — confiabilidade do Redis nos processos em execução
+## ✅ Bug do Redis — RESOLVIDO 2026-07-18 (PR #32, `2b6a784`)
 
-- [ ] **`Timeout reading from redis:6379` intermitente no worker/dashboard rodando** → orquestração de batch não-confiável: às vezes o worker não consome o job (fica `queued`/`waiting`), às vezes a dashboard não lê o resultado da reply-queue e marca o batch `failed` embora os arquivos tenham sido baixados. **O download em si FUNCIONA** (batch `20260718_161950` baixou 13 docs → 3 PDF + 9 HTML reais em disco); o bug é no plano de controle via Redis.
-  - **Já descartado:** não é o firewall (persiste com ele desanexado), não é `socket_timeout` mal configurado (teste isolado no container: `redis.from_url(REDIS_URL)` + `blpop(timeout=3)` retorna `None` limpo em 3.01s, `ping` 0.01s), não é DNS/rede (TCP `redis:6379` OK), não é restart (persiste após containers frescos).
-  - **Assinatura:** conexão fresh funciona, conexões long-lived nos processos ficam ruins. Suspeita = pool/lifecycle do `redis.asyncio` (ex.: `blpop` cancelado por `asyncio.wait_for` externo envenena a conexão do pool; ou acesso concorrente à mesma conexão). **Investigar com `systematic-debugging`**, não sondagem ad-hoc: capturar o traceback real do `TimeoutError` no processo rodando; revisar wrappers de timeout em `dashboard_api._poll_results_loop` e `worker` blpop; considerar `retry_on_timeout=True`/`health_check_interval`/conexão dedicada por consumidor.
-  - Toda vez que rodar: `docker compose restart worker` dá alívio temporário (conexão nova) mas o erro volta.
+- [x] **`Timeout reading from redis:6379`** — causa-raiz = **regressão do redis-py 8.0.0**, não pool/cancelamento.
+  - `redis-py 8.0.0` (bump do Dependabot #24, `4da8899`) mudou o default de `socket_timeout` em `AbstractConnection.__init__` de `None` para **5** — exatamente o valor que os dois BLPOP usam. Um comando bloqueante com timeout **>= `socket_timeout`** nunca termina normalmente: o deadline do socket dispara antes do `nil` do servidor chegar, então `read_response` **levanta** `TimeoutError` em vez de retornar `None` (`redis/asyncio/connection.py:778`).
+  - Medido no container de produção: `BLPOP(3)→None@3.017s`, `BLPOP(5)→raise@5.006s`, `BLPOP(8)→raise@5.008s`. O `BLPOP(8)` falhar em 5.008s é a prova: o teto é um 5 fixo, não o argumento do blpop.
+  - **Por que parecia intermitente:** job que chega enquanto o BLPOP já espera retorna na hora e funciona. Só a fila **vazia** levantava — daí o circuit breaker latchar `redis_unreachable` e o backoff dormir até 60s (jobs parados em `queued`), e a dashboard marcar `failed` batches cujos arquivos já estavam em disco.
+  - **⚠️ Por que a investigação anterior "descartou" `socket_timeout`:** o teste isolado usou `blpop(timeout=3)` — o único valor **abaixo** do novo default — então retornou `None` limpo e pareceu saudável. A conclusão "não é `socket_timeout`" estava errada.
+  - **Fix:** `socket_timeout` explícito nos dois sites de construção do cliente, **derivado** das constantes de BLPOP (`config.REDIS_SOCKET_TIMEOUT_SECS`) para subir em lockstep. Nunca `None` (conexão TCP morta penduraria para sempre e o circuit breaker nunca dispararia); nunca hardcoded (o bug foi confiar num default de biblioteca para comportamento load-bearing).
+  - **Verificado ao vivo** pós-deploy: worker `unhealthy`→`healthy`, status `redis_unreachable`→`consuming`, **0** `redis_error`. 446 testes verdes no CI (era 441).
 
 ## ▶ Próximo (recomendado)
 
