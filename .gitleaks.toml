@@ -1,0 +1,110 @@
+# Configuracao do gitleaks para o pje-download.
+#
+# POR QUE ESTE ARQUIVO EXISTE
+# ---------------------------
+# Este repositorio e PUBLICO e o codigo lida com autos judiciais. O ruleset
+# embutido do gitleaks cobre bem credenciais de provedor (AWS, GitHub, Google),
+# mas foi verificado em 2026-07-18 que ele NAO tem nenhuma regra para PII
+# brasileira: grep por cpf/cnpj/cnj nas ~200 regras oficiais deu ZERO
+# ocorrencias. O mesmo vale para trufflehog, detect-secrets e git-secrets.
+# Por isso as regras [[rules]] abaixo sao obrigatorias e escritas a mao.
+#
+# O que este arquivo NAO cobre, e nao tem como cobrir:
+#   - NOME DE PESSOA. Nao existe regex viavel ("duas palavras capitalizadas"
+#     casa com nome de classe, de cidade, de lei, de arquivo). Só NER
+#     resolveria, e ha decisao registrada com sign-off contra usar NER.
+#     Num repo publico, essa e a exposicao residual mais seria.
+#   - CPF/CNPJ sem pontuacao: falso positivo alto demais para bloquear no
+#     gitleaks, que nao executa codigo de validacao. Ficam para a 2a etapa,
+#     em tools/validate_br_pii.py, que valida digito verificador.
+#
+# Uso (o hook pre-push faz isso automaticamente):
+#   gitleaks git --log-opts="<range>" --config .gitleaks.toml --redact -v .
+# --redact e OBRIGATORIO: sem ele o achado e impresso no terminal e nos logs,
+# e o proprio gate vira vetor de vazamento.
+
+title = "pje-download — segredos + PII brasileira"
+
+[extend]
+# Mantem as ~200 regras oficiais de credencial. As regras abaixo SOMAM.
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# Numero de processo CNJ — Resolucao CNJ 65/2008
+# Formato NNNNNNN-DD.AAAA.J.TR.OOOO (7 sequencial, 2 DV, 4 ano, 1 segmento,
+# 2 tribunal, 4 origem). O DV usa Modulo 97 Base 10 (ISO 7064), NAO modulo 11
+# — mas para um gate isso e irrelevante: o formato pontuado ja e distintivo
+# o bastante e quase nao colide com outra coisa.
+# ---------------------------------------------------------------------------
+[[rules]]
+id = "br-cnj-process-number"
+description = "Numero de processo CNJ nao mascarado (PII de autos)"
+regex = '''\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b'''
+tags = ["pii", "br", "cnj"]
+# SEM `keywords` DE PROPOSITO: keywords e pre-filtro de performance — se
+# presente, a regra so dispara quando a palavra aparece por perto. O numero de
+# processo aparece nu, sem rotulo, entao keywords geraria FALSO NEGATIVO.
+
+  [[rules.allowlists]]
+  description = "numeros de teste/fixture"
+  regexes = [
+    '''0000000-00\.0000\.0\.00\.0000''',
+    '''1234567-89\.2024\.8\.26\.0100''',
+  ]
+
+# ---------------------------------------------------------------------------
+# CPF pontuado. A forma nua (11 digitos) NAO entra aqui: casaria com qualquer
+# timestamp em ms, protocolo ou id de banco. Ela e tratada na 2a etapa, com
+# validacao de digito verificador.
+# ---------------------------------------------------------------------------
+[[rules]]
+id = "br-cpf-formatted"
+description = "CPF pontuado (PII) - confirmar DV em tools/validate_br_pii.py"
+regex = '''\b\d{3}\.\d{3}\.\d{3}-\d{2}\b'''
+tags = ["pii", "br", "cpf"]
+
+  [[rules.allowlists]]
+  description = "CPFs de teste: digitos repetidos passam no modulo 11 mas sao invalidos"
+  # ENUMERADO DE PROPOSITO. O padrao natural seria com retrovisor —
+  # \b(\d)\1{2}\.\1{3}\.\1{3}-\1{2}\b — mas o gitleaks usa RE2 (motor do Go),
+  # que NAO suporta retrovisor: nao e limitacao de sintaxe, e decisao de projeto
+  # do RE2 para garantir tempo linear. Com retrovisor o gitleaks nao apenas
+  # ignora a regra: ele CRASHA no parse do config (verificado em 2026-07-19).
+  # Como so existem 10 CPFs de digito repetido, enumerar e exato e barato.
+  regexes = [
+    '''\b(?:000\.000\.000-00|111\.111\.111-11|222\.222\.222-22|333\.333\.333-33|444\.444\.444-44|555\.555\.555-55|666\.666\.666-66|777\.777\.777-77|888\.888\.888-88|999\.999\.999-99)\b''',
+  ]
+
+# ---------------------------------------------------------------------------
+# CNPJ. ATENCAO AO PRAZO: a partir de 31/07/2026 (IN RFB 2.229/2024) o CNPJ
+# passa a ser ALFANUMERICO — as 12 primeiras posicoes aceitam A-Z, os 2 DVs
+# continuam numericos. Uma regra so com \d teria falso negativo nas inscricoes
+# novas, por isso o padrao abaixo ja usa [A-Z0-9]. Isso cobre tambem os CNPJs
+# numericos legados, que continuam validos.
+# ---------------------------------------------------------------------------
+[[rules]]
+id = "br-cnpj"
+description = "CNPJ pontuado, formato alfanumerico (vigente 31/07/2026) e legado"
+regex = '''\b[A-Z0-9]{2}\.[A-Z0-9]{3}\.[A-Z0-9]{3}/[A-Z0-9]{4}-\d{2}\b'''
+tags = ["pii", "br", "cnpj"]
+
+  [[rules.allowlists]]
+  description = "CNPJs de teste"
+  regexes = [
+    '''00\.000\.000/0000-00''',
+    '''11\.111\.111/1111-11''',
+  ]
+
+# ---------------------------------------------------------------------------
+# Allowlist global: caminhos onde PII sintetica e esperada.
+# Mantida DELIBERADAMENTE curta. Cada caminho aqui e um ponto cego permanente;
+# quando o gate reclamar de um caso legitimo, prefira o allowlist por regex
+# (acima) ou o fingerprint em .gitleaksignore, que sao cirurgicos.
+# ---------------------------------------------------------------------------
+[allowlist]
+description = "caminhos com dados sinteticos"
+paths = [
+  '''\.gitleaks\.toml$''',
+  '''tools/validate_br_pii\.py$''',
+  '''tests/fixtures/.*\.(json|xml)$''',
+]

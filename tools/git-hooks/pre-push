@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Hook pre-push: varre o que esta sendo enviado atras de segredo e PII brasileira.
+#
+# POR QUE ESTE HOOK EXISTE
+# ------------------------
+# Este repositorio e PUBLICO e o codigo lida com autos judiciais. Pela politica
+# de push do Felipe (~/.claude/CLAUDE.md), repo publico esta na faixa que exige
+# varredura antes de empurrar. O que sobe para um remote publico nao tem
+# desfazer: pode ser clonado, cacheado e indexado antes de qualquer correcao.
+#
+# Este arquivo e VERSIONADO em tools/git-hooks/ porque .git/hooks/ nao e — um
+# hook que vive so em .git/ desaparece no proximo clone sem ninguem notar.
+# Instale com: bash tools/install-git-hooks.sh
+#
+# FALHA FECHADA, DE PROPOSITO
+# ---------------------------
+# Se o gitleaks nao estiver instalado, ou der erro, ou o range sair vazio, este
+# hook BLOQUEIA o push. Isso e o OPOSTO do padrao de outros guardas do ambiente,
+# que falham abertos para nao travar trabalho por bug interno. A diferenca e o
+# papel: um guarda que AVISA pode falhar aberto; um guarda que SUBSTITUI uma
+# aprovacao humana, nao. Se este falhar aberto, o push segue sem nenhuma rede.
+#
+# Bypass: `git push --no-verify` pula este hook (limitacao do git). Existe um
+# guarda separado no Claude Code que nega esse flag, mas ele nao ve push
+# digitado direto no terminal.
+
+set -uo pipefail
+
+GITLEAKS="${GITLEAKS_BIN:-$HOME/.local/bin/gitleaks}"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+CONFIG="$REPO_ROOT/.gitleaks.toml"
+VALIDATOR="$REPO_ROOT/tools/validate_br_pii.py"
+ZERO="0000000000000000000000000000000000000000"
+
+bloquear() {
+  echo "" >&2
+  echo "🔴 PUSH BLOQUEADO — $1" >&2
+  echo "" >&2
+  exit 1
+}
+
+# Pre-requisitos. Ausencia de ferramenta NAO e motivo para deixar passar.
+[ -x "$GITLEAKS" ] || bloquear "gitleaks nao encontrado em $GITLEAKS.
+Instale (curl do release para ~/.local/bin) ou aponte GITLEAKS_BIN.
+Este hook falha FECHADO: sem scanner, nao ha varredura, entao nao ha push."
+[ -f "$CONFIG" ] || bloquear ".gitleaks.toml ausente em $CONFIG.
+Sem as regras de PII brasileira a varredura seria so de credencial — e as
+regras BR sao justamente as que nenhuma ferramenta traz de fabrica."
+
+# O git entrega no stdin uma linha por ref:
+#   <ref local> <sha local> <ref remota> <sha remoto>
+while read -r _ref_local sha_local _ref_remota sha_remoto; do
+  # Delecao de branch: nada de conteudo entrando.
+  [ "$sha_local" = "$ZERO" ] && continue
+
+  if [ "$sha_remoto" = "$ZERO" ]; then
+    # BRANCH NOVA. Sem tratar este caso, o PRIMEIRO push de uma branch escapa
+    # inteiro da varredura — que e exatamente quando mais conteudo entra de uma vez.
+    # Compara contra tudo que ja existe no remote.
+    range="$(git for-each-ref --format='%(refname)' refs/remotes | sed 's/^/--not /' | tr '\n' ' ') $sha_local"
+    descricao="branch nova (comparando com todo o remote)"
+  else
+    range="$sha_remoto..$sha_local"
+    descricao="$range"
+  fi
+
+  echo "🔍 varrendo $descricao ..." >&2
+
+  # Etapa 1 — gitleaks: credenciais (ruleset embutido) + PII pontuada (regras BR).
+  # --redact e obrigatorio: sem ele o achado seria impresso no terminal e nos
+  # logs, e o proprio gate viraria vetor de vazamento.
+  if ! "$GITLEAKS" git --log-opts="$range" --config "$CONFIG" --redact -v "$REPO_ROOT" 2>&1; then
+    bloquear "gitleaks encontrou segredo ou PII no que esta sendo enviado (acima, redigido).
+Remova ou mascare ANTES do commit: o historico do git preserva o dado mesmo
+que um commit posterior o apague. Se for falso positivo, use .gitleaksignore
+com o fingerprint especifico — nunca desligue a regra inteira."
+  fi
+
+  # Etapa 2 — CPF/CNPJ SEM pontuacao, confirmados por digito verificador.
+  # O gitleaks nao executa codigo, entao nao consegue distinguir um CPF nu de
+  # um timestamp de 11 digitos. Este passo consegue.
+  if [ -f "$VALIDATOR" ]; then
+    if ! git diff "$range" 2>/dev/null | python3 "$VALIDATOR"; then
+      bloquear "PII brasileira com digito verificador VALIDO no diff (acima, mascarada)."
+    fi
+  fi
+done
+
+echo "✅ varredura limpa — push liberado" >&2
+exit 0

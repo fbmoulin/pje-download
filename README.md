@@ -121,7 +121,29 @@ playwright install chromium
 export MNI_USERNAME="12345678900"   # CPF sem pontos
 export MNI_PASSWORD="senha"
 export MNI_TRIBUNAL="TJES"         # TJES, TJES_2G, TJBA, TJBA_2G, TJCE, TRT17
+
+# Hooks de git (OBRIGATORIO apos todo clone novo)
+bash tools/install-git-hooks.sh
 ```
+
+### Varredura pre-push (obrigatoria)
+
+Este repositorio e **publico** e o codigo lida com autos judiciais. O hook
+`pre-push` varre o que esta sendo enviado atras de credenciais e de **PII
+brasileira** (numero de processo CNJ, CPF e CNPJ, com validacao de digito
+verificador) antes de qualquer coisa sair para o remote.
+
+O hook vive em `tools/git-hooks/` (versionado) e precisa ser copiado para
+`.git/hooks/` pelo instalador acima — `.git/hooks/` nao e versionado, entao um
+hook que morasse so ali desapareceria no proximo clone, em silencio.
+
+Requer o `gitleaks` em `~/.local/bin/gitleaks` (ou aponte `GITLEAKS_BIN`). O hook
+**falha fechado**: sem o scanner, ou sem `.gitleaks.toml`, o push e bloqueado —
+um gate que falha aberto e indistinguivel de um gate ausente.
+
+Falso positivo se resolve com `.gitleaksignore` usando o *fingerprint* especifico
+do achado, nunca desligando a regra. Limite conhecido: **nome de pessoa nao e
+detectavel por regex** e continua descoberto.
 
 ## Configuracao
 
