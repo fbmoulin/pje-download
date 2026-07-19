@@ -32,6 +32,24 @@ import sys
 RE_CPF_NU = re.compile(r"(?<!\d)\d{11}(?!\d)")
 RE_CNPJ_NU = re.compile(r"(?<![A-Z0-9])[A-Z0-9]{12}\d{2}(?![A-Z0-9])")
 
+# Cabecalho de arquivo no diff unificado: "+++ b/caminho/do/arquivo".
+RE_ARQUIVO = re.compile(r"^\+\+\+ b/(.+)$")
+
+# Caminhos onde PII sintetica e esperada. ESPELHA [allowlist].paths do
+# .gitleaks.toml DE PROPOSITO: as duas etapas precisam concordar sobre o escopo.
+# Quando discordavam, o gate bloqueou o proprio commit que o instalava — a etapa
+# 1 sabia que este arquivo contem vetores de teste e a etapa 2 nao.
+# Mantida CURTA: cada caminho aqui e um ponto cego permanente.
+CAMINHOS_PERMITIDOS = (
+    re.compile(r"^tools/validate_br_pii\.py$"),
+    re.compile(r"^\.gitleaks\.toml$"),
+    re.compile(r"^tests/fixtures/.*\.(json|xml)$"),
+)
+
+
+def _permitido(caminho: str) -> bool:
+    return any(p.match(caminho) for p in CAMINHOS_PERMITIDOS)
+
 
 def cpf_valido(cpf: str) -> bool:
     """Valida CPF por modulo 11.
@@ -76,11 +94,24 @@ def cnpj_valido(cnpj: str) -> bool:
 
 
 def achados_no_diff(diff: str) -> list[tuple[int, str, str]]:
-    """Retorna (numero da linha no diff, tipo, valor) para cada PII confirmada."""
+    """Retorna (numero da linha no diff, tipo, valor) para cada PII confirmada.
+
+    Rastreia o arquivo corrente pelo cabecalho '+++ b/...' e pula os caminhos de
+    CAMINHOS_PERMITIDOS, para nao acusar os proprios vetores de teste.
+    """
     achados: list[tuple[int, str, str]] = []
+    arquivo_atual = ""
+    pulando = False
     for i, linha in enumerate(diff.splitlines(), 1):
-        # Só linhas adicionadas. '+++' e cabecalho de arquivo, nao conteudo.
-        if not linha.startswith("+") or linha.startswith("+++"):
+        cabecalho = RE_ARQUIVO.match(linha)
+        if cabecalho:
+            arquivo_atual = cabecalho.group(1)
+            pulando = _permitido(arquivo_atual)
+            continue
+        if pulando:
+            continue
+        # Só linhas adicionadas. '+++' ja foi tratado acima.
+        if not linha.startswith("+"):
             continue
         for m in RE_CPF_NU.finditer(linha):
             if cpf_valido(m.group()):
@@ -136,6 +167,36 @@ def _self_test() -> int:
     ok_sujo, ok_limpo = n_sujo == 1, n_limpo == 0
     falhas += 0 if ok_sujo else 1
     falhas += 0 if ok_limpo else 1
+
+    # Consciencia de caminho. O par abaixo e o que impede que a permissao vire
+    # um buraco geral: o MESMO conteudo tem de ser ignorado no arquivo de
+    # vetores e PEGO em qualquer outro arquivo.
+    corpo = "+cpf = '52998224725'\n"
+    n_permitido = len(achados_no_diff("+++ b/tools/validate_br_pii.py\n" + corpo))
+    n_normal = len(achados_no_diff("+++ b/app/handler.py\n" + corpo))
+    ok_perm, ok_norm = n_permitido == 0, n_normal == 1
+    falhas += 0 if ok_perm else 1
+    falhas += 0 if ok_norm else 1
+    print(
+        f"{'OK  ' if ok_perm else 'ERRO'} CPF em caminho PERMITIDO (vetores de teste) -> {n_permitido} achado(s)"
+    )
+    print(
+        f"{'OK  ' if ok_norm else 'ERRO'} MESMO CPF em arquivo normal -> {n_normal} achado(s)"
+    )
+
+    # Multiplos arquivos no mesmo diff: o estado de 'pular' tem de ser RESETADO
+    # no cabecalho seguinte, senao um arquivo permitido cegaria todos os que
+    # vierem depois dele no mesmo push.
+    n_misto = len(
+        achados_no_diff(
+            "+++ b/tools/validate_br_pii.py\n" + corpo + "+++ b/app/x.py\n" + corpo
+        )
+    )
+    ok_misto = n_misto == 1
+    falhas += 0 if ok_misto else 1
+    print(
+        f"{'OK  ' if ok_misto else 'ERRO'} diff com arquivo permitido ANTES de um normal -> {n_misto} achado(s)"
+    )
     print(
         f"{'OK  ' if ok_sujo else 'ERRO'} diff com 1 CPF em linha adicionada -> {n_sujo} achado(s) (linha removida ignorada)"
     )
