@@ -93,7 +93,7 @@ Candidatos de fix a **AVALIAR** (não aplicar às cegas): `retry_on_timeout=True
 ## Acesso e ambiente
 
 - Repo: `~/projetos-26-2/pje-download`, branch **master** (⚠️ NÃO `/mnt/c/...` — é STALE).
-- Deploy ao vivo: Hostinger VPS São Paulo — `ssh -i ~/.ssh/pje_deploy deploy@91.108.125.85`.
+- Deploy ao vivo: Hostinger VPS São Paulo — `ssh pje-vps` (alias em `~/.ssh/config` — repo publico, host nao versionado).
   App em `/opt/pje-download` via `docker compose`. Portas só em `127.0.0.1` (túnel SSH).
   API precisa de `X-API-Key` (em `/opt/pje-download/.env`).
 - ⚠️ **PRODUÇÃO** com credenciais MNI reais e autos com PII. **O download FUNCIONA — não

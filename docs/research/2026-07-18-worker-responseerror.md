@@ -1,7 +1,7 @@
 # Research 03 — `redis.ResponseError` escaping `consume_queue`
 
 Repo: `/home/fbmoulin/projetos-26-2/pje-download` (branch `master`)
-Prod: Hostinger VPS `91.108.125.85`, `/opt/pje-download`, docker compose
+Prod: Hostinger VPS `pje-vps`, `/opt/pje-download`, docker compose
 All section-A facts below were read from the **running prod worker container**
 (`redis.__version__` printed as `8.0.0`), not from the local venv and not from memory.
 
@@ -28,7 +28,7 @@ alone leaves that path live. See §C8b; it is the decisive argument for §E opti
 
 Command run:
 ```
-ssh -i ~/.ssh/pje_deploy deploy@91.108.125.85 \
+ssh pje-vps \
   'cd /opt/pje-download && docker compose exec -T worker python -c "..."'
 ```
 Output (`redis version: 8.0.0`), each line `Name <- [first 4 MRO entries]`:
