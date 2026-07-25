@@ -28,7 +28,14 @@ jobs:
           cache: pip
 
       - name: Install ruff
-        run: pip install ruff
+        # Pinned deliberately. An unpinned `pip install ruff` follows upstream releases, so a
+        # new rule set turns CI red on a repo nobody touched -- and because `test` needs `lint`
+        # and `deploy.yml` gates on CI concluding success, a red lint silently kills the deploy
+        # pipeline too. That is exactly what happened: this job passed on 0.14.14 and, once
+        # upstream moved to 0.16.0, reported 208 errors and 7 reformats on unchanged code,
+        # leaving Deploy dead from 2026-07-19 to 2026-07-25.
+        # Bumping this pin is a real task with its own PR (new rules must be fixed, not waived).
+        run: pip install ruff==0.14.14
 
       - name: Check
         run: ruff check .
