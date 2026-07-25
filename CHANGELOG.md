@@ -6,6 +6,63 @@ o projeto segue versionamento semântico.
 
 ## [Unreleased]
 
+### Infraestrutura de CI e guardas (2026-07-25)
+
+- **`ci.yml` passa a pinar `ruff==0.14.14`** (PR #39). Sem pin, o job seguia os releases do
+  upstream: quando o ruff foi para `0.16.0`, passou a reportar **208 erros e 7 arquivos a
+  reformatar em código byte-a-byte idêntico**. Como `test` declara `needs: lint` e o `deploy.yml`
+  gateia em CI concluir `success`, um lint vermelho não bloqueava só a suíte — **matava o
+  pipeline de deploy em silêncio**. O último Deploy verde antes disso foi em **2026-07-19**;
+  ficou 6 dias parado. Subir o pin passa a ser tarefa deliberada, com PR próprio.
+- **Deploy restaurado e verificado por conteúdo.** Após o merge, CI verde, `deploy.yml` disparou
+  e os 7 passos passaram — incluindo `Validate MNI credentials`. Confirmado na máquina, não pelo
+  label do run: o pin presente na árvore deployada, dashboard e worker reiniciados (`Up 34s`
+  contra o redis intocado em `Up 6 days`), `/health` em `status: consuming`, `mni: healthy`.
+
+### Fixed (2026-07-25)
+
+- **`tools/git-hooks/pre-push` bloqueava TODO primeiro push de branch com acusação falsa de PII**
+  (PR #38). O caminho de branch nova montava **uma** string de range em sintaxe de `rev-list`
+  (`--not <ref> … <sha>`) e a entregava a dois consumidores com gramáticas incompatíveis:
+  `gitleaks --log-opts` aceita, `git diff` **rejeita com exit 129**. Sob `set -uo pipefail`, essa
+  falha virava falha de pipeline e o hook anunciava *"PII brasileira com dígito verificador
+  VÁLIDO"* sem ter varrido nada — mensagem indistinguível de um achado real (o único sinal era a
+  ausência de achado impresso). A metade silenciosa era pior: a mesma string fazia o gitleaks
+  receber um token vazio e varrer **0 commits**, falhando **ABERTO** exatamente no caso que o
+  tratamento de branch nova existe para cobrir.
+  - **Fix:** duas variáveis, cada uma na gramática do seu consumidor (`log_opts` para o gitleaks,
+    lista explícita de commits para a Etapa 2). A Etapa 2 passa a varrer **commit a commit** via
+    `git show` em vez de diferenciar as pontas do range — o que fecha uma brecha extra: um CPF
+    adicionado num commit e removido no seguinte some do `git diff A..B` e permanece no histórico
+    para sempre, que é a premissa do arquivo inteiro. `git show` também funciona em commit raiz.
+  - **Verificado nas duas direções**, porque um fix que só para de bloquear é indistinguível de
+    desligar o guarda: branch limpa agora passa (**1 commit varrido**, era 0) e branch com CPF
+    válido no módulo 11 continua bloqueada, agora imprimindo o achado e nomeando o commit.
+  - ⚠️ `.git/hooks/` não é atualizado por `git pull` — rode `bash tools/install-git-hooks.sh`.
+
+### Security (2026-07-25)
+
+- **Host de produção removido dos docs versionados** (`fb405e7`). O repositório é público e quatro
+  linhas rastreadas carregavam o IP público do VPS vivo, uma delas junto do usuário de deploy e do
+  nome da chave SSH, ao lado de notas dizendo o caminho da app e que o firewall do provedor está
+  desanexado. Nada disso é segredo no sentido do gitleaks — por isso o gate reportava zero — mas
+  lido em conjunto é um mapa operacional do host. Substituído por um alias SSH (`pje-vps`, em
+  `~/.ssh/config`, não versionado), o que mantém os comandos documentados executáveis.
+  - **Não redigidos de propósito:** os IPs desativados (`2.24.x.x`, `191.252.x.x`). O segundo é o
+    *assunto* de `docs/plans/2026-06-26-vps-deploy-verifier-sdd.md`, cujos passos de verificação
+    fazem `grep -r` por ele — apagar quebraria um documento executável para proteger um endereço
+    morto.
+  - ⚠️ **Redação limita propagação futura, não desfaz exposição passada:** o valor segue no
+    histórico do git e na blob API. O passo que age sobre o que já vazou é rotacionar a chave SSH
+    de deploy e a `DASHBOARD_API_KEY` — **ainda não feito** (adiado deliberadamente).
+
+### Docs (2026-07-25)
+
+- Corrigidos três pontos que ensinavam algo já refutado: `CLAUDE.md` listava "MNI blocked by cloud
+  IP" em *Known Issues* enquanto o mesmo arquivo, 19 linhas abaixo, documentava o geo-bloqueio como
+  resolvido desde 07-18; o item 5 do backlog dizia que o teste do `forbid_external` estava
+  "bloqueado por IP cloud"; e a contagem de testes (441) estava 22 atrás da real.
+
 ### Produção (2026-07-18) — primeiro deploy ao vivo
 
 - **Deploy em produção** num Hostinger VPS (KVM 2, datacenter **São Paulo**), com CD contínuo via `deploy.yml` (`workflow_run` após `ci.yml` verde). App no ar: dashboard/worker/redis `Up (healthy)`, `mni check: healthy`.

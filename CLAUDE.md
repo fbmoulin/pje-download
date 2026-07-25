@@ -15,6 +15,8 @@ docker compose --profile worker up -d  # + pje worker
 pytest tests/ -q
 ruff check .          # CI lints the whole repo (c72b4b4), not a file allowlist
 ruff format --check .
+# ⚠️ CI pins ruff==0.14.14 (ci.yml, PR #39). Lint locally with that exact version or you will
+# disagree with CI in both directions. Unpinned, 0.16.0 reports 208 errors on this tree.
 
 # Spec verifier (SDD) — CI gate, also runnable locally (ci.yml step "Verify Markdown specs")
 python tools/verify_spec.py docs/specs/*.md
@@ -33,7 +35,12 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest (441 tests) — run with `pytest tests/ -q` before any commit
+- Test suite: pytest — **463 tests** (measured 2026-07-25) — run with `pytest tests/ -q` before any commit
+  - ⚠️ **Without a reachable redis you get "461 passed, 2 skipped", and the 2 skips are silent.**
+    They are `tests/test_redis_socket_timeout.py` and `tests/test_result_queue_ttl.py` — the only
+    real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
+    publishes redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379
+    redis:7.4-alpine` first, or treat a green run as proving nothing about the redis pin.
 - Audit sink: asyncpg → Railway Postgres (optional, opt-in via `AUDIT_SYNC_ENABLED`). **Requires PG 15+** — syncer self-disables on older versions (see Sprint 12 B5)
 - Shared helpers: `file_utils.py` (`total_bytes`, `merge_file_lists`), `async_retry.py` (`AsyncRetry` class for exponential backoff)
 
@@ -198,8 +205,19 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 ## Known Issues (remaining)
 
-- MNI blocked by cloud IP — Playwright fallback via `pje_session.py`
+- ~~MNI blocked by cloud IP~~ — **RESOLVED 2026-07-18, entry was stale.** It was never a
+  whitelist/ofício problem: PJe/TJES sits behind AWS CloudFront with country geo-restriction, so
+  a non-BR IP gets `403` (POP `BOS50`) and a BR IP gets `200` (POP `GRU3`). Fixed by moving the
+  VPS to the São Paulo datacenter. See backlog item 1's follow-up below for the full diagnosis —
+  this section contradicted it for a week. Re-confirmed 2026-07-25: production `/health` reports
+  `mni: healthy`, and the live TJES WSDL fetches with HTTP 200 from a BR IP.
 - Test coverage ~85% — remaining ~15% are deep Playwright integration paths (low ROI)
+- **`/health` carries no build identity** — no `version`, no `build_sha`. The deploy proves
+  liveness, never *which* build is answering, and because the image is built on the production
+  host from an rsynced tree there is no immutable artifact to name either. Verifying a deploy
+  today means grepping file content on the box and reading container start times. Fix planned:
+  `BUILD_SHA` build arg → `/health` → deploy asserts it (pdf-graph's `scripts/deploy.sh` is the
+  template).
 
 ## Backlog (não-código)
 
@@ -217,7 +235,7 @@ Tudo acionável-via-código das auditorias técnicas de 2026-04-17 e 2026-04-18 
 4. ~~**Sprint 4 (A1/A2)**~~ — DONE 2026-05-01. PR #20 squash-merged (`4be29fe`): A1 `protocol.py` (`JobMessage`/`ResultMessage`/`ProgressMessage`/`DeadLetterEntry` typed dataclasses, 122L) + worker `_publish_result` migration + `job_from_json` input validation; A2 `dashboard_api` 7 module globals collapsed into `AppContext` dataclass at `app[APP_CTX_KEY]`. +8 tests (416→424), wire format byte-identical, ruff clean.
    - Follow-up (5-line): migrate `worker._try_official_api` to construct `ResultMessage` via typed helper instead of inline dict — left out of PR #20 to keep scope tight.
    - Follow-up (typing): add `batchId: NotRequired[str | None]` to `ProgressMessage` (worker.py:1494 sets it but type doesn't declare; surfaced by code-reviewer agent).
-5. **zeep SSRF hardening (defense-in-depth)** — bump para `zeep==4.3.3` já feito (`23d5e8a`, fecha Dependabot alert #1 / GHSA-4cc2-g9w2-fhf6). Falta: passar `Settings(forbid_external=True)` no `Client(...)` em `mni_client.py:178`. **Não aplicar às cegas** — WSDLs do MNI/PJe frequentemente fazem `xsd:import` de schemas externos; ligar o flag pode quebrar o cliente com `ExternalReferenceForbidden`. Requer teste contra fetch de WSDL real (precisa de acesso MNI live + credenciais, hoje bloqueado por IP cloud). Ataque direto já mitigado: as URLs de WSDL são allowlist hardcoded `.jus.br` (`mni_client.py:46-51`).
+5. **zeep SSRF hardening (defense-in-depth)** — bump para `zeep==4.3.3` já feito (`23d5e8a`, fecha Dependabot alert #1 / GHSA-4cc2-g9w2-fhf6). Falta: passar `Settings(forbid_external=True)` no `Client(...)` em `mni_client.py:178`. **Não aplicar às cegas** — WSDLs do MNI/PJe frequentemente fazem `xsd:import` de schemas externos; ligar o flag pode quebrar o cliente com `ExternalReferenceForbidden`. Requer teste contra fetch de WSDL real. **⚠️ O bloqueador citado aqui NÃO existe mais** — dizia "hoje bloqueado por IP cloud", refutado desde 2026-07-18 (geo-bloqueio resolvido, ver item 1) e comprovado em 2026-07-25: `curl https://pje.tjes.jus.br/pje/intercomunicacao?wsdl` de IP BR devolve **HTTP 200, 34,5 KB**, e o WSDL do TJES tem **5 `xs:import`/`xs:include` mas ZERO `schemaLocation`** — ou seja, os imports são só de namespace e não disparam fetch externo, que é justamente o dado que faltava para avaliar `forbid_external=True`. ⚠️ Medido **só no TJES**: `TRIBUNAL_ENDPOINTS` tem 6 tribunais e um WSDL com `schemaLocation` externo quebraria o cliente com `ExternalReferenceForbidden`. Meça os outros 5 antes de ligar o flag. Este item está desbloqueado. Ataque direto já mitigado: as URLs de WSDL são allowlist hardcoded `.jus.br` (`mni_client.py:46-51`).
 
 ## Observability
 

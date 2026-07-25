@@ -137,6 +137,14 @@ O hook vive em `tools/git-hooks/` (versionado) e precisa ser copiado para
 `.git/hooks/` pelo instalador acima — `.git/hooks/` nao e versionado, entao um
 hook que morasse so ali desapareceria no proximo clone, em silencio.
 
+> **⚠️ Se voce instalou o hook antes de 2026-07-25, RODE O INSTALADOR DE NOVO.** A versao
+> anterior bloqueava **todo primeiro push de branch** acusando "PII com digito verificador
+> VALIDO" sem ter varrido nada (`git diff` rejeitava a sintaxe de range e, sob `pipefail`,
+> a falha virava acusacao), e no mesmo caminho o gitleaks varria **0 commits** — falhando
+> ABERTO justamente no caso que o tratamento de branch nova existe para cobrir. Corrigido
+> no PR #38. Como a copia em `.git/hooks/` nao e atualizada por `git pull`, um clone antigo
+> continua rodando a versao quebrada.
+
 Requer o `gitleaks` em `~/.local/bin/gitleaks` (ou aponte `GITLEAKS_BIN`). O hook
 **falha fechado**: sem o scanner, ou sem `.gitleaks.toml`, o push e bloqueado —
 um gate que falha aberto e indistinguivel de um gate ausente.
@@ -511,7 +519,7 @@ ssh -i <chave_deploy> -L 8007:localhost:8007 <VPS_USER>@<VPS_HOST>
 
 | Workflow | Trigger | Etapas |
 |----------|---------|--------|
-| `ci.yml` | push / PR | ruff lint → pytest (441 testes em master, v2.6.0) — badge acima |
+| `ci.yml` | push / PR | ruff lint (**pinado em `0.14.14`**) → pytest (**463 testes** em master) — badge acima |
 | `deploy.yml` | CI concluido com sucesso em `master` | rsync → `docker compose up --build` no VPS → healthcheck worker/dashboard → smoke test da fila + validação MNI |
 | `dependabot.yml` | semanal | atualiza actions + pip deps |
 

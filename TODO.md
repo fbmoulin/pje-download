@@ -60,10 +60,44 @@ Relatórios completos em `docs/research/` (preservados do scratchpad da sessão,
 
 - [x] **Validar download MNI real de ponta a ponta** — ✅ FEITO 2026-07-18: `5022505-25.2024.8.08.0012` → MNI autenticou (senha nova), `consultar_processo.success documentos=13`, **3 PDF + 9 HTML reais** em `/data/downloads`. Os 11 "vinculados" o MNI não retorna (precisam do fallback Playwright — limitação do MNI 2.2.2). Bug de placar acima é ortogonal ao sucesso do download.
 
+## ▶ Aberto agora (revisão de 2026-07-25)
+
+Contexto completo, com medições: `~/.claude/docs/handoff/2026-07-25-pje-download-repo-review.md`
+(fora do repo, porque cita o host de produção).
+
+- [ ] **`BUILD_SHA` no `/health` + assert no deploy.** Hoje o deploy prova que *algo* responde,
+  nunca **qual build** — e como a imagem é construída no host de produção a partir da árvore
+  sincronizada, não existe artefato imutável para nomear. Verificar um deploy hoje significa
+  grepar conteúdo de arquivo na máquina e ler horário de start de container. Template pronto:
+  `scripts/deploy.sh` do pdf-graph (resolve referência imutável, grepa marcadores por entrega,
+  compara `build_sha`). **Fazer a metade barata primeiro**: build arg → `/health` → assert no
+  deploy, que funciona sem registry e sem mudar o fluxo rsync. Publicar imagem em GHCR e
+  deployar por digest fica adiado — para app de host único o rsync se defende.
+- [ ] **Regras de infraestrutura no `.gitleaks.toml`.** O gate acha credencial e PII brasileira,
+  e por isso reportou **zero** sobre o IP público do VPS, o e-mail institucional e a linha
+  `ssh -i` que estavam publicados (ver `fb405e7`). O comentário do próprio config diz que nome de
+  pessoa é o buraco residual insolúvel; identificador de infraestrutura é um **segundo** buraco, e
+  ao contrário de nome ele **é** regexável: IPv4 fora de RFC1918, e-mail `jus.br`, linha `ssh -i`.
+  ⚠️ **Armadilha:** uma regra de IPv4 dispara nos IPs mortos que ficaram de propósito
+  (`2.24.126.161`, `191.252.204.250`), inclusive dentro de
+  `docs/plans/2026-06-26-vps-deploy-verifier-sdd.md`, onde o IP é o objeto de um passo de
+  verificação. Allowlist **por valor**, nunca por caminho — escopo por caminho cegaria a regra na
+  árvore `docs/`, que é exatamente onde o IP vivo estava.
+- [ ] **Mesclar Dependabot #36 e #37.** Estavam vermelhos pelo ruff (agora resolvido) e, por
+  `test` depender de `lint`, a suíte **nunca rodou** neles: eram *não validados*, não apenas
+  bloqueados. Validados localmente em venvs limpos **contra um redis vivo**: **463 passed, 0
+  skipped** tanto nas deps pinadas quanto nas do #37 (que traz `structlog` 25→26, um major, e
+  `redis[hiredis]` 8.0.0→8.0.1). ⚠️ Mesclar é **outro deploy em produção**, desta vez carregando
+  versões novas — decisão diferente de restaurar o pipeline. O Dependabot precisa rebasear sobre
+  o pin antes.
+- [ ] **Rotacionar a chave SSH de deploy e a `DASHBOARD_API_KEY`.** Adiado deliberadamente pelo
+  Felipe em 2026-07-25. É o único passo que reduz a exposição **já ocorrida** do host — a redação
+  dos docs (`fb405e7`) só limita propagação futura, porque o valor permanece no histórico do git.
+
 ## Opcionais (hardening / operação)
 
 - [ ] **Sink de auditoria no Railway** — `AUDIT_SYNC_ENABLED=true` + `DATABASE_URL=<audit_writer>` (projeto `pje-audit`). A auditoria JSON-L local já grava no volume; o sink é redundância. Ver `CLAUDE.md` §"Audit Sync".
-- [ ] **zeep `forbid_external=True`** (`mni_client.py:178`) — defense-in-depth contra SSRF via `xsd:import`. **Testar antes:** WSDLs do MNI podem importar schemas externos legítimos → pode quebrar com `ExternalReferenceForbidden`. Agora é testável (o MNI é alcançável do VPS).
+- [ ] **zeep `forbid_external=True`** (`mni_client.py:178`) — defense-in-depth contra SSRF via `xsd:import`. **Testar antes:** WSDLs do MNI podem importar schemas externos legítimos → pode quebrar com `ExternalReferenceForbidden`. ✅ **Medido 2026-07-25 no TJES:** o WSDL vivo baixa com HTTP 200 (34,5 KB) de IP BR e tem **5 `xs:import`/`xs:include` com ZERO `schemaLocation`** — imports só de namespace, que não disparam fetch externo. ⚠️ Medido **só no TJES**; `TRIBUNAL_ENDPOINTS` tem 6 tribunais e basta um com `schemaLocation` externo para quebrar. Meça os outros 5 antes de ligar.
 
 ## Follow-ups pequenos (dívida de tipos, do Sprint 15)
 

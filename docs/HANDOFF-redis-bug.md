@@ -1,5 +1,9 @@
 # HANDOFF — bug de confiabilidade do Redis (redis.asyncio)
 
+> **📍 Documento HISTÓRICO.** O estado atual do projeto está em
+> `docs/handoff/2026-07-25-ci-pin-guarda-pii-e-revisao.md`. Este arquivo cobre só o bug do
+> Redis de 07-18, já resolvido — não o use como ponto de retomada.
+
 > # ✅ RESOLVIDO — 2026-07-18, PR #32 (`2b6a784`)
 >
 > **Causa-raiz: regressão do `redis-py 8.0.0`** (bump do Dependabot #24, `4da8899`).
