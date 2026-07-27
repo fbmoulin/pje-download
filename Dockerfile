@@ -27,6 +27,15 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -sf http://127.0.0.1:8007/api/status || exit 1
 EXPOSE 8007
 USER appuser
+# ── Build identity — MUST stay last ──
+# An ARG invalidates every layer below it. Near the top of this file it would
+# force pip install (and, in the worker target, `playwright install chromium`)
+# to re-run on every single deploy. Here the only layer it busts is its own.
+# ARG is also stage-scoped: declaring it once in `base` would not reach this
+# target, so each target declares its own.
+ARG BUILD_SHA=unknown
+ENV BUILD_SHA=${BUILD_SHA}
+LABEL org.opencontainers.image.revision="${BUILD_SHA}"
 CMD ["python", "dashboard_api.py", "--port", "8007", "--output", "/data/downloads"]
 
 # ── Worker target: includes Playwright + Xvfb ──
@@ -43,4 +52,11 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -sf http://127.0.0.1:8006/health || exit 1
 EXPOSE 8006
 USER appuser
+# ── Build identity — MUST stay last (see the note in the dashboard target) ──
+# This target is the expensive one: `pip install -r requirements.txt` plus
+# `playwright install chromium`. An ARG above those turns every deploy into a
+# multi-minute rebuild.
+ARG BUILD_SHA=unknown
+ENV BUILD_SHA=${BUILD_SHA}
+LABEL org.opencontainers.image.revision="${BUILD_SHA}"
 CMD ["python", "worker.py"]
