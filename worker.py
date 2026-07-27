@@ -44,6 +44,7 @@ log: structlog.BoundLogger = structlog.get_logger("kratos.pje-worker")
 # ─────────────────────────────────────────────
 
 from config import (
+    build_identity,
     PJE_BASE_URL,
     SESSION_STATE_PATH,
     DOWNLOAD_BASE_DIR,
@@ -1886,6 +1887,9 @@ class PJeSessionWorker:
             "service": "pje-worker",
             "status": self._health_status,
             "healthy": healthy,
+            # Provenance, not function: `healthy: true` is satisfied by the PREVIOUS
+            # build too. This is the only field that says WHICH build is answering.
+            "build_sha": build_identity(),
             "checks": checks,
             "mni_enabled": self.mni_client is not None,
             "session_valid": self.session_valid,

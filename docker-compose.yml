@@ -53,6 +53,11 @@ services:
       context: .
       dockerfile: Dockerfile
       target: dashboard
+      args:
+        # Interpolated from the shell env or from .env — deploy.yml writes it there.
+        # Falls back to "unknown", which the deploy treats as a FAILURE, not a pass:
+        # a missing value is indistinguishable from a stale image at assert time.
+        BUILD_SHA: ${BUILD_SHA:-unknown}
     container_name: pje-dashboard
     restart: unless-stopped
     mem_limit: 256m
@@ -106,6 +111,8 @@ services:
       context: .
       dockerfile: Dockerfile
       target: worker
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
     container_name: pje-worker
     restart: unless-stopped
     mem_limit: 512m

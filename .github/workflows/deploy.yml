@@ -81,18 +81,23 @@ jobs:
           MNI_PASSWORD: ${{ secrets.MNI_PASSWORD }}
           REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
           DASHBOARD_API_KEY: ${{ secrets.DASHBOARD_API_KEY }}
+          # The commit this deploy is shipping. There is no git on the VPS (rsync
+          # excludes .git/), so the workflow is the only place that knows it.
+          BUILD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: MNI_USERNAME,MNI_PASSWORD,REDIS_PASSWORD,DASHBOARD_API_KEY
+          envs: MNI_USERNAME,MNI_PASSWORD,REDIS_PASSWORD,DASHBOARD_API_KEY,BUILD_SHA
           script: |
             : "${MNI_USERNAME:?missing MNI_USERNAME secret}"
             : "${MNI_PASSWORD:?missing MNI_PASSWORD secret}"
             : "${REDIS_PASSWORD:?missing REDIS_PASSWORD secret}"
             : "${DASHBOARD_API_KEY:?missing DASHBOARD_API_KEY secret}"
+            : "${BUILD_SHA:?missing BUILD_SHA — refusing to deploy an unidentifiable build}"
             {
               printf 'APP_ENV=production\n'
+              printf 'BUILD_SHA=%s\n' "${BUILD_SHA}"
               printf 'MNI_USERNAME=%s\n' "${MNI_USERNAME}"
               printf 'MNI_PASSWORD=%s\n' "${MNI_PASSWORD}"
               printf 'MNI_TRIBUNAL=TJES\n'
@@ -116,11 +121,12 @@ jobs:
         env:
           REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
           DASHBOARD_API_KEY: ${{ secrets.DASHBOARD_API_KEY }}
+          BUILD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: REDIS_PASSWORD,DASHBOARD_API_KEY
+          envs: REDIS_PASSWORD,DASHBOARD_API_KEY,BUILD_SHA
           script: |
             set -e
             cd /opt/pje-download
@@ -136,6 +142,29 @@ jobs:
             done
             printf '%s' "$worker_health" | grep -Eq '"healthy"[[:space:]]*:[[:space:]]*true'
 
+            # ── Provenance, not just function ──
+            # Everything above is satisfied by the PREVIOUS build just as well as
+            # by this one: a stale image that never got replaced answers "healthy"
+            # exactly the same. This is the only check that names WHICH commit is
+            # serving. See docs/superpowers/specs/2026-07-27-build-sha-health-identity.md
+            echo "Asserting the running worker reports the deployed build..."
+            running_sha=$(printf '%s' "$worker_health" \
+              | sed -n 's/.*"build_sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            echo "  expected: ${BUILD_SHA}"
+            echo "  running:  ${running_sha:-<absent>}"
+            if [ -z "$running_sha" ] || [ "$running_sha" = "unknown" ]; then
+              echo "FAIL: /health carries no build identity. Either BUILD_SHA never reached"
+              echo "the build args, or the running image predates this change. Both are"
+              echo "indistinguishable from a stale image at this point, so this is a failure."
+              exit 1
+            fi
+            if [ "$running_sha" != "$BUILD_SHA" ]; then
+              echo "FAIL: THE RUNNING CODE IS NOT WHAT THIS DEPLOY BUILT."
+              echo "Do NOT measure or conclude anything against this instance."
+              exit 1
+            fi
+            echo "  OK — running build matches the deployed commit."
+
             echo "Waiting for dashboard healthcheck..."
             for i in $(seq 1 24); do
               dashboard_status=$(curl -fsS -H "X-API-Key: $DASHBOARD_API_KEY" http://localhost:8007/api/status || true)
@@ -145,6 +174,24 @@ jobs:
               sleep 5
             done
             printf '%s' "$dashboard_status" | grep -Eq '"worker_status"[[:space:]]*:[[:space:]]*"(ready|consuming)"'
+
+            # The dashboard is a SEPARATE image, so it needs its own provenance
+            # check: the worker matching proves nothing about it. /healthz is used
+            # rather than /api/status because it is public by design.
+            echo "Asserting the running dashboard reports the deployed build..."
+            # No -f on purpose: /healthz answers 503 when a batch is pending resume,
+            # and -f would discard the body. Readiness is already asserted above via
+            # /api/status; here we only want the identity, which 503 still carries.
+            dash_health=$(curl -sS http://localhost:8007/healthz || true)
+            dash_sha=$(printf '%s' "$dash_health" \
+              | sed -n 's/.*"build_sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            echo "  expected: ${BUILD_SHA}"
+            echo "  running:  ${dash_sha:-<absent>}"
+            if [ "$dash_sha" != "$BUILD_SHA" ]; then
+              echo "FAIL: the dashboard is not running the build this deploy produced."
+              exit 1
+            fi
+            echo "  OK — dashboard build matches the deployed commit."
 
             echo "Running queue smoke test..."
             before_dead=$(docker compose exec -T redis redis-cli -a "$REDIS_PASSWORD" LLEN kratos:pje:dead-letter | tr -d '\r')

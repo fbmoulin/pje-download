@@ -65,14 +65,21 @@ Relatórios completos em `docs/research/` (preservados do scratchpad da sessão,
 Contexto completo, com medições: `~/.claude/docs/handoff/2026-07-25-pje-download-repo-review.md`
 (fora do repo, porque cita o host de produção).
 
-- [ ] **`BUILD_SHA` no `/health` + assert no deploy.** Hoje o deploy prova que *algo* responde,
-  nunca **qual build** — e como a imagem é construída no host de produção a partir da árvore
-  sincronizada, não existe artefato imutável para nomear. Verificar um deploy hoje significa
-  grepar conteúdo de arquivo na máquina e ler horário de start de container. Template pronto:
-  `scripts/deploy.sh` do pdf-graph (resolve referência imutável, grepa marcadores por entrega,
-  compara `build_sha`). **Fazer a metade barata primeiro**: build arg → `/health` → assert no
-  deploy, que funciona sem registry e sem mudar o fluxo rsync. Publicar imagem em GHCR e
-  deployar por digest fica adiado — para app de host único o rsync se defende.
+- [x] **`BUILD_SHA` no `/health` + assert no deploy** — ✅ **IMPLEMENTADO 2026-07-27**, PR aberto,
+  **ainda NÃO mergeado** (mergear é deploy em produção → autorização do Felipe). Build arg →
+  `ENV` → `config.build_identity()` → `build_sha` no `/health` do worker e no `/healthz` da
+  dashboard; `deploy.yml` escreve o SHA no `.env` da VPS e falha se o serviço reportar outro
+  valor, ou `"unknown"`, ou nada. Spec: `docs/superpowers/specs/2026-07-27-build-sha-health-identity.md`.
+  - **Publicar em GHCR e deployar por digest continua ADIADO de propósito** — para app de host
+    único o rsync se defende, e um registry privado traz de brinde a falha de auth silenciosa que
+    foi um dos dois mecanismos do incidente do pdf-graph. Reabrir só se aparecer um segundo host.
+  - ⚠️ **O que essa asserção NÃO prova:** a imagem é construída no host a partir de árvore
+    rsyncada, então o `build_sha` prova *"construída a partir da árvore que o workflow rotulou
+    X"*, não *"a árvore é byte-a-byte o commit X"*. Edição manual na máquina entre o rsync e o
+    build passa batido. O modo de falha real — build que não rodou, container que não trocou —
+    esse sim é pego de forma exata.
+  - ⚠️ **Não mova o `ARG BUILD_SHA` do fim dos targets do Dockerfile.** Um `ARG` invalida toda
+    camada abaixo dele: no topo, todo deploy refaz `pip install` e `playwright install chromium`.
 - [ ] **Regras de infraestrutura no `.gitleaks.toml`.** O gate acha credencial e PII brasileira,
   e por isso reportou **zero** sobre o IP público do VPS, o e-mail institucional e a linha
   `ssh -i` que estavam publicados (ver `fb405e7`). O comentário do próprio config diz que nome de
