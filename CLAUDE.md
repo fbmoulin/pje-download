@@ -20,6 +20,11 @@ ruff format --check .
 
 # Spec verifier (SDD) — CI gate, also runnable locally (ci.yml step "Verify Markdown specs")
 python tools/verify_spec.py docs/specs/*.md
+
+# Gitleaks infra rules — verifies BOTH directions (4 must fire, 8 must not).
+# Run it after ANY edit to .gitleaks.toml. Not in CI yet (the runner has no
+# gitleaks), so nothing else exercises these rules.
+bash tools/verify_gitleaks_rules.sh
 ```
 
 ## Environment (mínimo)

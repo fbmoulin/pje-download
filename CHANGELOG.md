@@ -32,6 +32,28 @@ o projeto segue versionamento semântico.
 - Spec: `docs/superpowers/specs/2026-07-27-build-sha-health-identity.md`. Suíte: **471 testes**
   (463 + 8), 0 skipped, contra um redis vivo.
 
+### Security — identificadores de infraestrutura no gate de PII (2026-07-27)
+
+- **Três regras novas no `.gitleaks.toml`:** `infra-public-ipv4`, `infra-jusbr-email` e
+  `infra-ssh-invite`. Em 2026-07-25 quatro linhas rastreadas publicaram o IP do VPS vivo, uma
+  delas junto do usuário de deploy e do nome da chave SSH, e o gate reportou **zero**: as regras
+  existentes procuram credencial e PII de pessoa, e um IP não é nenhuma das duas. O comentário do
+  próprio arquivo já dizia que **nome de pessoa** é o buraco residual insolúvel; identificador de
+  infraestrutura era um **segundo** buraco — e, ao contrário de nome, ele **é** regexável.
+- **`tools/verify_gitleaks_rules.sh`** — verifica as regras **nas duas direções** (12 casos: 4 que
+  devem disparar, 8 que não devem). Uma regra de gate erra de dois jeitos opostos, e medir só um
+  lado não distingue "regra boa" de "regra desligada". O script **falha fechado** se o gitleaks
+  faltar: verificador que pula reporta verde sem ter verificado nada.
+- ⚠️ **A colisão real não era a prevista.** O alerta registrado era sobre os dois IPs desativados
+  mantidos de propósito nos docs — e o allowlist **por valor** (nunca por caminho, porque foi em
+  `docs/` que o IP vivo estava) resolveu isso. O que de fato gerou 6 dos 12 falsos positivos
+  iniciais foi **`Chrome/120.0.0.0`**: versão de 4 partes em User-Agent casa com qualquer regex de
+  dotted-quad. Tratado com `regexTarget = "line"`, já que o RE2 não tem lookbehind para expressar
+  "não precedido de barra".
+- Medido: **0 falso positivo** na árvore rastreada; o total do repositório continua nos mesmos
+  **251** achados de número CNJ pré-existentes.
+- ▶ O verificador ainda **não roda no CI** (o runner não instala gitleaks) — follow-up no `TODO.md`.
+
 ### Infraestrutura de CI e guardas (2026-07-25)
 
 - **`ci.yml` passa a pinar `ruff==0.14.14`** (PR #39). Sem pin, o job seguia os releases do
