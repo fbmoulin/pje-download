@@ -250,7 +250,11 @@ Tudo acionável-via-código das auditorias técnicas de 2026-04-17 e 2026-04-18 
 - **Known cosmetic issue:** Grafana 11.3 lands the dashboard in "General" folder rather than `pje-download` folder. Harmless; fix post-deploy via UI or pre-create folder via `POST /api/folders`.
 
 ## Paths
-- Working copy (current, native WSL fs): `/home/fbmoulin/projetos-26-2/pje-download` — matches `origin/main` HEAD.
-- Legacy checkout `/mnt/c/projetos-2026/pje-download` is **STALE** (HEAD `123433f`, pre-v2.5.0) — do not edit; re-clone or `git pull` before using.
+- Working copy (current, native WSL fs): `/home/fbmoulin/projetos-26-2/pje-download` — matches `origin/master` HEAD. (The default branch is `master`; this line said `origin/main` until 2026-07-27, contradicting the repo's own top trap.)
+- **Three other copies exist on this machine. All are STALE — do not edit any of them.** Measured 2026-07-27:
+  - `/mnt/c/projetos-2026/pje-download` — HEAD `123433f`, pre-v2.5.0.
+  - `~/projetos-2026/pje-download` — an **empty** git repo (branch `master`, zero commits) that merely contains the next one.
+  - `~/projetos-2026/pje-download/pje-download` — HEAD `1a772ec` (2026-06-27), **32 commits behind** `master`. Predates the Redis fixes (PRs #32/#33/#35), the ruff pin and the pre-push PII hook.
+  - Re-clone or `git pull` before using any of them; prefer the working copy above.
 - Dashboard: `:8007`, Worker health: `:8006`, Metrics: `:8007/metrics`
 - Downloads output: `/data/downloads` (Docker) or `./downloads` (local)
