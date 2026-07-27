@@ -65,10 +65,11 @@ Relatórios completos em `docs/research/` (preservados do scratchpad da sessão,
 Contexto completo, com medições: `~/.claude/docs/handoff/2026-07-25-pje-download-repo-review.md`
 (fora do repo, porque cita o host de produção).
 
-- [x] **`BUILD_SHA` no `/health` + assert no deploy** — ✅ **MERGEADO 2026-07-27** (PR #40, squash
-  `c4469420`, autorizado pelo Felipe). ⚠️ **AINDA NÃO EM PRODUÇÃO:** o deploy disparado pelo merge
-  falhou no passo `Sync files to VPS` (rsync/SSH), **antes** de qualquer passo novo — a asserção
-  de build ainda não rodou nem uma vez, e a VPS segue com o código anterior. Build arg →
+- [x] **`BUILD_SHA` no `/health` + assert no deploy** — ✅ **MERGEADO E NO AR 2026-07-27** (PR #40,
+  squash `c4469420`). **Verificado por conteúdo, não por rótulo:** `master` HEAD `da4b9f2` e os dois
+  serviços na VPS reportam `build_sha = da4b9f2cd1a166…` (worker `/health` e dashboard `/healthz`),
+  com ambos os containers recriados (`Up 58 seconds`) e o redis intocado (`Up 9 days`). A asserção
+  nova rodou no deploy e passou. Build arg →
   `ENV` → `config.build_identity()` → `build_sha` no `/health` do worker e no `/healthz` da
   dashboard; `deploy.yml` escreve o SHA no `.env` da VPS e falha se o serviço reportar outro
   valor, ou `"unknown"`, ou nada. Spec: `docs/superpowers/specs/2026-07-27-build-sha-health-identity.md`.
@@ -105,23 +106,23 @@ Contexto completo, com medições: `~/.claude/docs/handoff/2026-07-25-pje-downlo
   `docs/plans/2026-06-26-vps-deploy-verifier-sdd.md`, onde o IP é o objeto de um passo de
   verificação. Allowlist **por valor**, nunca por caminho — escopo por caminho cegaria a regra na
   árvore `docs/`, que é exatamente onde o IP vivo estava.
-- [ ] 🔴 **BLOQUEADOR NOVO (2026-07-27): o runner do GitHub não alcança a VPS na porta 22.**
-  O deploy falha no passo `Sync files to VPS` — **duas vezes, idêntico**, em ~5 s (o timeout padrão
-  do `ssh-keyscan`), com **zero stderr**. Nenhum passo posterior chega a rodar, então **nada é
-  sincronizado e produção fica intacta** no código anterior. Não é transitório e **não tem relação
-  com o PR #40**: os passos que ele mudou vêm depois e nunca executaram.
-  - **Medido daqui, com a MESMA chave e o MESMO usuário do deploy** (`~/.ssh/pje_deploy`, `deploy`):
-    `ssh` conecta, `ssh-keyscan` devolve 3 chaves em **2,2 s**, `rsync --dry-run` sai **0**. A VPS
-    está de pé (uptime 9 dias, 3 containers `healthy`). Ou seja: o comando está certo e a máquina
-    está viva — o que muda é **a origem**.
-  - **Descartado:** firewall Hostinger `330806` (`pje-download-fw`) — a regra é `accept TCP 22
-    source=any` e o grupo está `is_synced: false`. **Não verificado:** firewall no nível do host
-    (`ufw`/`iptables`) e restrições no `sshd_config` — o usuário `deploy` **não tem sudo sem
-    senha**, e a senha de root (`~/.pje_vps_root_pw`) é credencial de emergência que não usei sem
-    decisão do Felipe.
-  - ⚠️ **Consequência prática:** todo merge em `master` produz um Deploy vermelho até isso ser
-    resolvido, e **`master` está adiante de produção**. Não conclua nada sobre o `build_sha` em
-    produção: a asserção nova **nunca rodou**.
+- [ ] ⚠️ **`Sync files to VPS` é INTERMITENTE — 2 falhas seguidas e depois sucesso (2026-07-27).**
+  O passo falhou duas vezes de forma idêntica (~5 s, que é o timeout padrão do `ssh-keyscan`, com
+  **zero stderr**) e, no terceiro disparo, **passou sem nenhuma intervenção**. Não é o "blip único"
+  que o histórico registrava, mas também **não é uma quebra permanente** — a conclusão de que
+  "não é transitório", tirada das duas primeiras falhas, estava **errada**: duas amostras não
+  distinguem falha permanente de falha intermitente com taxa alta.
+  - **O que ficou medido:** daqui, com a **mesma chave e o mesmo usuário** do deploy
+    (`~/.ssh/pje_deploy`, `deploy`), `ssh-keyscan` devolve 3 chaves em **2,2 s** e
+    `rsync --dry-run` sai **0**, com a VPS de pé (uptime 9 dias). Firewall Hostinger `330806`
+    **descartado**: regra `accept TCP 22 source=any`, grupo `is_synced: false`.
+  - **Não verificado:** `ufw`/`iptables` no host e restrições no `sshd_config` — o usuário `deploy`
+    não tem sudo sem senha, e `~/.pje_vps_root_pw` é credencial de emergência.
+  - ▶ **Se voltar a doer:** o remédio barato é re-disparar (`gh workflow run deploy.yml`), e o
+    diagnóstico só avança acrescentando `-v` ao `ssh-keyscan`/`rsync` no passo — hoje ele falha
+    **sem imprimir nada**, e é essa mudez que impede fechar a causa.
+  - ✅ **Falha segura:** o passo é anterior a qualquer escrita, então uma falha aqui **não deixa
+    estado parcial** — nada sincroniza e produção permanece no código anterior.
 - [ ] **Mesclar Dependabot #36 e #41.** ⚠️ **O #37 não existe mais** — o Dependabot o FECHOU e
   abriu o **#41** com 5 updates (um `prometheus_client` a mais), então a validação local registrada
   no handoff de 25/07, que era sobre o #37, **não transfere**. O que vale agora é o CI, que rodou
