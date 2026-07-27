@@ -35,7 +35,7 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **463 tests** (measured 2026-07-25) — run with `pytest tests/ -q` before any commit
+- Test suite: pytest — **471 tests** (measured 2026-07-27) — run with `pytest tests/ -q` before any commit
   - ⚠️ **Without a reachable redis you get "461 passed, 2 skipped", and the 2 skips are silent.**
     They are `tests/test_redis_socket_timeout.py` and `tests/test_result_queue_ttl.py` — the only
     real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
@@ -212,12 +212,23 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
   this section contradicted it for a week. Re-confirmed 2026-07-25: production `/health` reports
   `mni: healthy`, and the live TJES WSDL fetches with HTTP 200 from a BR IP.
 - Test coverage ~85% — remaining ~15% are deep Playwright integration paths (low ROI)
-- **`/health` carries no build identity** — no `version`, no `build_sha`. The deploy proves
-  liveness, never *which* build is answering, and because the image is built on the production
-  host from an rsynced tree there is no immutable artifact to name either. Verifying a deploy
-  today means grepping file content on the box and reading container start times. Fix planned:
-  `BUILD_SHA` build arg → `/health` → deploy asserts it (pdf-graph's `scripts/deploy.sh` is the
-  template).
+- ~~**`/health` carries no build identity**~~ — **FIXED 2026-07-27** (implemented; the PR is not
+  merged yet — merging is a production deploy). `BUILD_SHA` build arg → `ENV` →
+  `config.build_identity()` → `build_sha` in the worker's `/health` and the dashboard's
+  `/healthz`; `deploy.yml` asserts both against the commit it deployed and fails on a mismatch,
+  on `"unknown"`, or on an absent value. Read it with
+  `curl -s localhost:8006/health | jq -r .build_sha` (worker) or
+  `curl -s localhost:8007/healthz | jq -r .build_sha` (dashboard, public — no API key needed).
+  - ⚠️ **Do NOT move `ARG BUILD_SHA` out of the tail of each Dockerfile target.** An `ARG`
+    invalidates every layer below it; near the top, every deploy re-runs `pip install` and
+    `playwright install chromium`. Measured 2026-07-27: with the ARG last, a rebuild with a
+    *different* SHA completes in **0.6 s** with `pip install` served from cache, and the reported
+    value still changes. `ARG` is stage-scoped — each target declares its own.
+  - ⚠️ **What it does not prove:** the image is built on the production host from an rsynced
+    tree, so `build_sha` means "built from the tree the workflow labelled X", not "the tree is
+    byte-for-byte commit X". It catches the real failure mode (image not rebuilt, container not
+    replaced), not a hand-edit on the box.
+  - Deploying by registry digest stays deliberately out of scope for a single-host app.
 
 ## Backlog (não-código)
 

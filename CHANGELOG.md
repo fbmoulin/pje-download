@@ -6,6 +6,32 @@ o projeto segue versionamento semântico.
 
 ## [Unreleased]
 
+### Added — identidade de build no `/health` (2026-07-27)
+
+- **`build_sha` no corpo do `/health` do worker e do `/healthz` da dashboard**, assado na imagem
+  como build arg (`config.build_identity()`). Até aqui o deploy provava **função** — que *alguma
+  coisa* responde — e nunca **proveniência** — *qual commit* está respondendo. Todas as asserções
+  existentes (`"healthy": true`, `worker_status` em `ready|consuming`, o smoke da dead-letter) são
+  satisfeitas **igualmente bem pelo build ANTERIOR**: uma imagem que não foi reconstruída, ou um
+  container que nunca foi substituído, produzia um deploy inteiramente verde. É o modo de falha
+  que em 2026-07-18 fez o pdf-graph rodar código `v1.7.3` sob a tag `1.7.6` e invalidar três
+  sessões de medição.
+- **`deploy.yml` passa a falhar quando o SHA reportado difere do que ele acabou de deployar**, e
+  trata `"unknown"`/ausente como **falha**, não como aprovação — no momento da asserção, valor
+  ausente é indistinguível de imagem velha. Dashboard e worker são checados **separadamente**, por
+  serem imagens distintas: o worker bater não diz nada sobre a dashboard.
+- **`ARG BUILD_SHA` fica no FIM de cada target do `Dockerfile`, deliberadamente.** Um `ARG`
+  invalida toda camada abaixo dele; no topo, forçaria `pip install` e `playwright install
+  chromium` a rodar em **todo** deploy. Medido: com um SHA diferente, a camada cara volta como
+  `Using cache` e o valor ainda assim muda. `ARG` também é escopado por stage — declarar só na
+  `base` não alcançaria nenhum dos dois targets.
+- ⚠️ **Limite honesto:** como a imagem é construída **no host de produção a partir de uma árvore
+  rsyncada**, o `build_sha` prova *"esta imagem foi construída a partir da árvore que o workflow
+  rotulou X"*, não que a árvore é byte-a-byte o commit X. Isso cobre o modo de falha real (imagem
+  não reconstruída / container não substituído), não uma edição manual na máquina.
+- Spec: `docs/superpowers/specs/2026-07-27-build-sha-health-identity.md`. Suíte: **471 testes**
+  (463 + 8), 0 skipped, contra um redis vivo.
+
 ### Infraestrutura de CI e guardas (2026-07-25)
 
 - **`ci.yml` passa a pinar `ruff==0.14.14`** (PR #39). Sem pin, o job seguia os releases do
