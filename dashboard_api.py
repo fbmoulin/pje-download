@@ -47,6 +47,7 @@ log: structlog.BoundLogger = structlog.get_logger("kratos.dashboard-api")
 # ─────────────────────────────────────────────
 
 from config import (
+    build_identity,
     APP_ENV,
     AUDIT_LOG_DIR,
     AUDIT_LOG_RETENTION_DAYS,
@@ -1024,6 +1025,10 @@ async def handle_healthz(request: web.Request) -> web.Response:
         {
             "service": "pje-dashboard",
             "ready": ready,
+            # Provenance. /healthz is public on purpose (see _AUTH_PUBLIC_PREFIXES),
+            # which is what makes the deploy assertion checkable over plain HTTP
+            # without handing the API key to the checker.
+            "build_sha": build_identity(),
             "current_batch": state.current_batch_id,
             "checks": checks,
         },

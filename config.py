@@ -31,6 +31,25 @@ def load_env() -> None:
 load_env()
 
 
+def build_identity() -> str:
+    """SHA of the commit this image was built from — "unknown" outside a CI build.
+
+    Injected as a Docker build arg by `deploy.yml` and promoted to an ENV in the
+    Dockerfile, so the value travels *with* the image layer it describes. A file
+    written next to the code would be a second artifact that can drift from the
+    image independently — which is exactly the lie this exists to detect.
+
+    Read at call time, never captured in a module-level constant: constants here
+    evaluate at import, before `load_env()` has necessarily run, and cannot be
+    exercised by a test without `importlib.reload`.
+
+    A blank value is deliberately collapsed to "unknown". `BUILD_SHA=` is what an
+    unthreaded build arg produces, and the deploy must treat that as a failure
+    rather than as an identity.
+    """
+    return os.environ.get("BUILD_SHA", "").strip() or "unknown"
+
+
 def is_valid_processo(numero: str) -> bool:
     """Validate CNJ process number format."""
     return bool(CNJ_PATTERN.match(numero.strip()))
