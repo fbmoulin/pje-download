@@ -65,8 +65,10 @@ Relatórios completos em `docs/research/` (preservados do scratchpad da sessão,
 Contexto completo, com medições: `~/.claude/docs/handoff/2026-07-25-pje-download-repo-review.md`
 (fora do repo, porque cita o host de produção).
 
-- [x] **`BUILD_SHA` no `/health` + assert no deploy** — ✅ **IMPLEMENTADO 2026-07-27**, PR aberto,
-  **ainda NÃO mergeado** (mergear é deploy em produção → autorização do Felipe). Build arg →
+- [x] **`BUILD_SHA` no `/health` + assert no deploy** — ✅ **MERGEADO 2026-07-27** (PR #40, squash
+  `c4469420`, autorizado pelo Felipe). ⚠️ **AINDA NÃO EM PRODUÇÃO:** o deploy disparado pelo merge
+  falhou no passo `Sync files to VPS` (rsync/SSH), **antes** de qualquer passo novo — a asserção
+  de build ainda não rodou nem uma vez, e a VPS segue com o código anterior. Build arg →
   `ENV` → `config.build_identity()` → `build_sha` no `/health` do worker e no `/healthz` da
   dashboard; `deploy.yml` escreve o SHA no `.env` da VPS e falha se o serviço reportar outro
   valor, ou `"unknown"`, ou nada. Spec: `docs/superpowers/specs/2026-07-27-build-sha-health-identity.md`.
@@ -80,7 +82,20 @@ Contexto completo, com medições: `~/.claude/docs/handoff/2026-07-25-pje-downlo
     esse sim é pego de forma exata.
   - ⚠️ **Não mova o `ARG BUILD_SHA` do fim dos targets do Dockerfile.** Um `ARG` invalida toda
     camada abaixo dele: no topo, todo deploy refaz `pip install` e `playwright install chromium`.
-- [ ] **Regras de infraestrutura no `.gitleaks.toml`.** O gate acha credencial e PII brasileira,
+- [x] **Regras de infraestrutura no `.gitleaks.toml`** — ✅ **IMPLEMENTADO 2026-07-27** (PR #42).
+  Três regras: `infra-public-ipv4`, `infra-jusbr-email`, `infra-ssh-invite`. Verificador
+  permanente em `tools/verify_gitleaks_rules.sh` (**12/12**, nas duas direções), que **falha
+  fechado** se o gitleaks faltar — verificador que "pula" reporta verde sem ter verificado nada.
+  - **Allowlist por VALOR, como o alerta abaixo pedia.** Os dois IPs mortos seguem nos docs e não
+    disparam. Medido: 0 falso positivo na árvore rastreada (o total do repo continua nos mesmos
+    251 achados de CNJ pré-existentes).
+  - ⚠️ **A colisão real não era com os IPs mortos — era com `Chrome/120.0.0.0`**, versão de 4
+    partes em User-Agent, 6 dos 12 falsos positivos iniciais. Tratada com `regexTarget = "line"`,
+    porque o RE2 não tem lookbehind para dizer "não precedido de barra".
+  - ▶ **Follow-up:** o verificador ainda não roda no CI (o runner não instala gitleaks). Enquanto
+    isso, a regra só é exercitada por quem rodar o script à mão.
+- [ ] ~~**Regras de infraestrutura no `.gitleaks.toml`.**~~ *(contexto original, mantido para
+  leitura)* O gate acha credencial e PII brasileira,
   e por isso reportou **zero** sobre o IP público do VPS, o e-mail institucional e a linha
   `ssh -i` que estavam publicados (ver `fb405e7`). O comentário do próprio config diz que nome de
   pessoa é o buraco residual insolúvel; identificador de infraestrutura é um **segundo** buraco, e
@@ -90,7 +105,28 @@ Contexto completo, com medições: `~/.claude/docs/handoff/2026-07-25-pje-downlo
   `docs/plans/2026-06-26-vps-deploy-verifier-sdd.md`, onde o IP é o objeto de um passo de
   verificação. Allowlist **por valor**, nunca por caminho — escopo por caminho cegaria a regra na
   árvore `docs/`, que é exatamente onde o IP vivo estava.
-- [ ] **Mesclar Dependabot #36 e #37.** Estavam vermelhos pelo ruff (agora resolvido) e, por
+- [ ] 🔴 **BLOQUEADOR NOVO (2026-07-27): o runner do GitHub não alcança a VPS na porta 22.**
+  O deploy falha no passo `Sync files to VPS` — **duas vezes, idêntico**, em ~5 s (o timeout padrão
+  do `ssh-keyscan`), com **zero stderr**. Nenhum passo posterior chega a rodar, então **nada é
+  sincronizado e produção fica intacta** no código anterior. Não é transitório e **não tem relação
+  com o PR #40**: os passos que ele mudou vêm depois e nunca executaram.
+  - **Medido daqui, com a MESMA chave e o MESMO usuário do deploy** (`~/.ssh/pje_deploy`, `deploy`):
+    `ssh` conecta, `ssh-keyscan` devolve 3 chaves em **2,2 s**, `rsync --dry-run` sai **0**. A VPS
+    está de pé (uptime 9 dias, 3 containers `healthy`). Ou seja: o comando está certo e a máquina
+    está viva — o que muda é **a origem**.
+  - **Descartado:** firewall Hostinger `330806` (`pje-download-fw`) — a regra é `accept TCP 22
+    source=any` e o grupo está `is_synced: false`. **Não verificado:** firewall no nível do host
+    (`ufw`/`iptables`) e restrições no `sshd_config` — o usuário `deploy` **não tem sudo sem
+    senha**, e a senha de root (`~/.pje_vps_root_pw`) é credencial de emergência que não usei sem
+    decisão do Felipe.
+  - ⚠️ **Consequência prática:** todo merge em `master` produz um Deploy vermelho até isso ser
+    resolvido, e **`master` está adiante de produção**. Não conclua nada sobre o `build_sha` em
+    produção: a asserção nova **nunca rodou**.
+- [ ] **Mesclar Dependabot #36 e #41.** ⚠️ **O #37 não existe mais** — o Dependabot o FECHOU e
+  abriu o **#41** com 5 updates (um `prometheus_client` a mais), então a validação local registrada
+  no handoff de 25/07, que era sobre o #37, **não transfere**. O que vale agora é o CI, que rodou
+  nos dois: **463 passed, 0 skipped**. Ambos rebasados sobre o master atual.
+- [ ] ~~**Mesclar Dependabot #36 e #37.**~~ *(contexto original)* Estavam vermelhos pelo ruff (agora resolvido) e, por
   `test` depender de `lint`, a suíte **nunca rodou** neles: eram *não validados*, não apenas
   bloqueados. Validados localmente em venvs limpos **contra um redis vivo**: **463 passed, 0
   skipped** tanto nas deps pinadas quanto nas do #37 (que traz `structlog` 25→26, um major, e
