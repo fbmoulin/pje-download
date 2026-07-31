@@ -47,9 +47,21 @@ tags = ["pii", "br", "cnj"]
 
   [[rules.allowlists]]
   description = "numeros de teste/fixture"
+  # Todos aqui carregam DIGITO VERIFICADOR INVALIDO de proposito. Esse e o
+  # discriminador entre exemplo e caso real — e e justamente o que esta regra
+  # NAO consegue aplicar: gitleaks casa formato, nao executa codigo. Por isso
+  # um placeholder com formato valido precisa ser listado aqui explicitamente,
+  # ou bloqueia o proprio commit que o introduz (aconteceu em 2026-07-31).
+  # A validacao de DV mora na 2a etapa (tools/validate_br_pii.py), que aprova
+  # estes numeros sem precisar de allowlist nenhuma.
   regexes = [
     '''0000000-00\.0000\.0\.00\.0000''',
     '''1234567-89\.2024\.8\.26\.0100''',
+    # Substituem 3 numeros REAIS da comarca 0012 removidos em 2026-07-31.
+    # Preservam o que is_processo_antigo() le: digito inicial e ano.
+    '''5000000-00\.2024\.8\.08\.0012''',
+    '''0000000-00\.2011\.8\.08\.0012''',
+    '''5000001-00\.2024\.8\.08\.0012''',
   ]
 
 # ---------------------------------------------------------------------------

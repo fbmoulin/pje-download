@@ -29,7 +29,7 @@ O projeto **pje-download** e um sistema Python 3.12 (~6.000 linhas) que automati
 
 | # | Issue | Arquivo | Impacto |
 |---|-------|---------|---------|
-| C1 | **Credenciais reais (.env)** — CPF `07175573758`, senha `Scraper@123`, Redis password em plaintext no repo | `.env:2-3` | Comprometimento total da conta PJe. Rotacao imediata. |
+| C1 | **Credenciais reais (.env)** — CPF `[REDIGIDO]`, senha `[REDIGIDO]`, Redis password em plaintext no repo | `.env:2-3` | Comprometimento total da conta PJe. Rotacao imediata. |
 | C2 | **Zero auth na Dashboard API** — 0.0.0.0:8007 sem API key, token ou session. Qualquer cliente na rede pode submeter downloads de documentos judiciais | `dashboard_api.py:720` | Acesso nao autorizado a documentos sigilosos |
 | C3 | **`_acquire_session_lock` retorna True em falha** — conflata ImportError (sem fcntl) com OSError (lock held), permitindo corrupcao concorrente de session file | `worker.py:107-121` | Corrupcao de sessao entre workers simultaneos |
 | C4 | **`DashboardState.batches` sem eviction** — cresce indefinidamente na memoria, sem limpar batches antigos | `dashboard_api.py:71-99` | OOM kill do container apos centenas de batches |

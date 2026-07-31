@@ -58,7 +58,7 @@ Relatórios completos em `docs/research/` (preservados do scratchpad da sessão,
 
 ## ▶ Próximo (recomendado)
 
-- [x] **Validar download MNI real de ponta a ponta** — ✅ FEITO 2026-07-18: `5022505-25.2024.8.08.0012` → MNI autenticou (senha nova), `consultar_processo.success documentos=13`, **3 PDF + 9 HTML reais** em `/data/downloads`. Os 11 "vinculados" o MNI não retorna (precisam do fallback Playwright — limitação do MNI 2.2.2). Bug de placar acima é ortogonal ao sucesso do download.
+- [x] **Validar download MNI real de ponta a ponta** — ✅ FEITO 2026-07-18: `5000001-00.2024.8.08.0012` → MNI autenticou (senha nova), `consultar_processo.success documentos=13`, **3 PDF + 9 HTML reais** em `/data/downloads`. Os 11 "vinculados" o MNI não retorna (precisam do fallback Playwright — limitação do MNI 2.2.2). Bug de placar acima é ortogonal ao sucesso do download.
 
 ## ▶ Aberto agora (revisão de 2026-07-25)
 

@@ -101,7 +101,7 @@ Candidatos de fix a **AVALIAR** (não aplicar às cegas): `retry_on_timeout=True
   App em `/opt/pje-download` via `docker compose`. Portas só em `127.0.0.1` (túnel SSH).
   API precisa de `X-API-Key` (em `/opt/pje-download/.env`).
 - ⚠️ **PRODUÇÃO** com credenciais MNI reais e autos com PII. **O download FUNCIONA — não
-  regredir.** Processo de teste que retorna 13 docs: `5022505-25.2024.8.08.0012`.
+  regredir.** Processo de teste que retorna 13 docs: `5000001-00.2024.8.08.0012`.
 - ⚠️ **NÃO re-anexar** o firewall Hostinger (quebra a rede inter-container do Docker;
   por isso as portas foram para `127.0.0.1`).
 
