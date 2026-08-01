@@ -206,7 +206,7 @@ Sem `worker.py` ativo, a dashboard aceita o batch mas nao tem plano de execucao.
 python batch_downloader.py --input processos.csv --output ./downloads
 
 # Via argumentos
-python batch_downloader.py -p "5008407-35.2024.8.08.0012,0126923-56.2011.8.08.0012"
+python batch_downloader.py -p "5000000-00.2024.8.08.0012,0000000-00.2011.8.08.0012"
 
 # Sem anexos + batch menor
 python batch_downloader.py -i processos.txt --skip-anexos --batch-size 3
@@ -246,10 +246,10 @@ python worker.py
 
 ```json
 {
-  "processos": ["5008407-35.2024.8.08.0012", "0126923-56.2011.8.08.0012"],
+  "processos": ["5000000-00.2024.8.08.0012", "0000000-00.2011.8.08.0012"],
   "include_anexos": true,
   "gdrive_map": {
-    "0126923-56.2011.8.08.0012": "https://drive.google.com/drive/folders/ABC123"
+    "0000000-00.2011.8.08.0012": "https://drive.google.com/drive/folders/ABC123"
   }
 }
 ```
@@ -431,11 +431,11 @@ Use `/healthz` para healthcheck/orquestracao. Use `/api/status` para diagnostico
 
 ```
 downloads/
-  5008407-35.2024.8.08.0012/
+  5000000-00.2024.8.08.0012/
     Peticao Inicial_56705862.html
     Contestacao_25393735.pdf
     ...
-  0126923-56.2011.8.08.0012/
+  0000000-00.2011.8.08.0012/
     escaneados_gdrive/       # Processos antigos
       documento_1.pdf
     Parecer_67249671.html    # Docs do MNI

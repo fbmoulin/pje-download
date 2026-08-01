@@ -72,10 +72,10 @@ class TestExtractFolderId:
 
 class TestIsProcessoAntigo:
     def test_starts_with_5_is_moderno(self):
-        assert is_processo_antigo("5008407-35.2024.8.08.0012") is False
+        assert is_processo_antigo("5000000-00.2024.8.08.0012") is False
 
     def test_starts_with_0_is_antigo(self):
-        assert is_processo_antigo("0126923-56.2011.8.08.0012") is True
+        assert is_processo_antigo("0000000-00.2011.8.08.0012") is True
 
     def test_starts_with_1_is_antigo(self):
         assert is_processo_antigo("1234567-89.2024.8.08.0001") is True
@@ -94,7 +94,7 @@ class TestIsProcessoAntigo:
         assert is_processo_antigo("5000001-01.2013.8.08.0001") is False
 
     def test_year_2024_starting_with_5_is_moderno(self):
-        assert is_processo_antigo("5008407-35.2024.8.08.0012") is False
+        assert is_processo_antigo("5000000-00.2024.8.08.0012") is False
 
     def test_no_year_in_number_falls_back_to_prefix(self):
         # No CNJ format match — falls back to starts-with-5 rule only

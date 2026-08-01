@@ -844,7 +844,7 @@ class TestDownloadProcess:
             result = await worker.download_process(
                 {
                     "jobId": "JG",
-                    "numeroProcesso": "0126923-56.2011.8.08.0012",
+                    "numeroProcesso": "0000000-00.2011.8.08.0012",
                     "gdriveUrl": "https://drive.google.com/drive/folders/ABC123",
                 }
             )

@@ -686,7 +686,7 @@ def is_processo_antigo(numero_processo: str) -> bool:
     Detecta se um processo é antigo (escaneado/Google Drive).
 
     Regra primária: processos novos do PJe começam com "5"
-    (ex: 5008407-35.2024.8.08.0012).
+    (ex: 5000000-00.2024.8.08.0012).
 
     Regra secundária: mesmo começando com "5", processos anteriores a 2013
     são considerados antigos pois foram digitalizados antes da migração ao PJe.
