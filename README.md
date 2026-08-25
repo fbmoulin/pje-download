@@ -1,3 +1,5 @@
+
+
 # PJe Download
 
 [![CI](https://github.com/fbmoulin/pje-download/actions/workflows/ci.yml/badge.svg)](https://github.com/fbmoulin/pje-download/actions/workflows/ci.yml)
@@ -522,6 +524,8 @@ ssh -i <chave_deploy> -L 8007:localhost:8007 <VPS_USER>@<VPS_HOST>
 | `ci.yml` | push / PR | ruff lint (**pinado em `0.14.14`**) → pytest (**463 testes** em master) — badge acima |
 | `deploy.yml` | CI concluido com sucesso em `master` | rsync → `docker compose up --build` no VPS → healthcheck worker/dashboard → smoke test da fila + validação MNI |
 | `dependabot.yml` | semanal | atualiza actions + pip deps |
+
+Localmente, suba um Redis antes de rodar `pytest tests/` (`docker run -d --rm -p 6379:6379 redis:7.4-alpine`); sem ele, 2 testes de socket real pulam silenciosamente.
 
 Secrets necessarios no repositorio: `VPS_SSH_KEY`, `VPS_HOST`, `VPS_USER`.
 
