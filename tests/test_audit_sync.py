@@ -481,6 +481,135 @@ class TestLagMetric:
         assert snap["rows_total"] == 1
 
 
+class TestLagGauge:
+    """Regression cover for the Prometheus gauge ``PjeAuditSyncLagHigh`` reads.
+
+    ``TestLagMetric`` above only ever asserted ``health_snapshot``'s dict field.
+    The gauge itself was declared, scraped and never written, so it exported a
+    constant ``0.0`` and the alert (``pje_audit_sync_lag_seconds > 60``) could
+    not fire. These tests read the gauge through the registry, the same way
+    Prometheus does.
+    """
+
+    @staticmethod
+    def _gauge() -> float | None:
+        import metrics
+
+        return metrics.REGISTRY.get_sample_value("pje_audit_sync_lag_seconds")
+
+    @pytest.fixture(autouse=True)
+    def _reset_gauge(self):
+        import metrics
+
+        # Shared registry: pin a sentinel so a passing assertion can never be
+        # an artefact of another test's leftover value.
+        metrics.audit_sync_lag_seconds.set(-1.0)
+        yield
+
+    @pytest.mark.asyncio
+    async def test_gauge_climbs_while_a_backlog_is_unsynced(self, tmp_path: Path):
+        """The case the alert exists for: local entries Postgres never got."""
+        from datetime import UTC, datetime, timedelta
+
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        # Nothing has ever synced, so the baseline is syncer start.
+        syncer._started_at = datetime.now(UTC) - timedelta(minutes=10)
+        _make_jsonl(tmp_path / f"audit-{date.today()}.jsonl", [_audit_entry()])
+
+        syncer._publish_lag()
+
+        lag = self._gauge()
+        assert lag is not None
+        assert 595 < lag < 610, f"expected ~600s of lag, gauge reported {lag}"
+        assert lag > 60, "must exceed the PjeAuditSyncLagHigh threshold"
+
+    @pytest.mark.asyncio
+    async def test_gauge_is_zero_once_caught_up(self, tmp_path: Path):
+        """An idle, fully-synced deployment must not alert overnight.
+
+        This is why the gauge follows the metric's own HELP string (newest local
+        vs newest synced) rather than ``health_snapshot``'s ``now - last_synced``,
+        which would climb forever on a quiet system.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        syncer._ensure_pool = AsyncMock()
+        syncer._insert_batch = AsyncMock()
+
+        old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+        _make_jsonl(
+            tmp_path / f"audit-{date.today()}.jsonl", [_audit_entry(timestamp=old)]
+        )
+        await syncer._tick()  # drains the file and saves the cursor
+        syncer._publish_lag()
+
+        assert syncer._pending_bytes() == 0
+        assert self._gauge() == 0.0
+
+    @pytest.mark.asyncio
+    async def test_gauge_published_even_when_the_tick_raises(self, tmp_path: Path):
+        """A tick that raises is exactly when lag must keep climbing.
+
+        Publishing inside the ``try`` would freeze the gauge on its last good
+        value for the whole outage — the failure the alert is meant to catch.
+        """
+        import asyncio
+        from datetime import UTC, datetime, timedelta
+
+        syncer = audit_sync.create_syncer(
+            **_factory_kwargs(audit_dir=tmp_path, interval_secs=0)
+        )
+        assert syncer is not None
+        syncer._started_at = datetime.now(UTC) - timedelta(minutes=5)
+        _make_jsonl(tmp_path / f"audit-{date.today()}.jsonl", [_audit_entry()])
+
+        async def exploding_tick():
+            raise RuntimeError("Postgres unreachable")
+
+        syncer._tick = exploding_tick
+        task = asyncio.create_task(syncer.run_forever())
+        for _ in range(50):
+            if (self._gauge() or -1.0) > 0:
+                break
+            await asyncio.sleep(0.02)
+        syncer.shutdown.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+        lag = self._gauge()
+        assert lag is not None and lag > 60, (
+            f"gauge must climb through a failing tick, reported {lag}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_pending_bytes_ignores_files_outside_catchup_window(
+        self, tmp_path: Path
+    ):
+        """Files the tick will never read must not be counted as backlog,
+        or the gauge would alert forever on data that is out of scope."""
+        syncer = audit_sync.create_syncer(
+            **_factory_kwargs(audit_dir=tmp_path, catchup_days=7)
+        )
+        assert syncer is not None
+        stale = date.today() - timedelta(days=30)
+        _make_jsonl(tmp_path / f"audit-{stale}.jsonl", [_audit_entry()])
+
+        assert syncer._pending_bytes() == 0
+        syncer._publish_lag()
+        assert self._gauge() == 0.0
+
+    @pytest.mark.asyncio
+    async def test_publish_lag_never_raises_into_the_loop(self, tmp_path: Path):
+        """A broken gauge must not take the syncer down with it."""
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        syncer._pending_bytes = MagicMock(side_effect=OSError("audit dir gone"))
+
+        syncer._publish_lag()  # must not raise
+
+
 class TestPasswordNeverLogged:
     @pytest.mark.asyncio
     async def test_no_password_in_logs_during_lifecycle(self, tmp_path: Path, caplog):

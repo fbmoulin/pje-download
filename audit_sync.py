@@ -217,6 +217,7 @@ class AuditSyncer:
         self._last_error: str | None = None
         self._last_synced_event_ts: datetime | None = None
         self._last_tick_at: datetime | None = None
+        self._started_at = datetime.now(UTC)
         self._rows_total = 0
         # Set to True by _verify_pg_version when Postgres < 15 is detected.
         # Once disabled, ticks early-return and run_forever exits on next wait.
@@ -253,6 +254,11 @@ class AuditSyncer:
                 )
                 if _metrics is not None:
                     _metrics.audit_sync_batches_total.labels(status="failed").inc()
+            # Outside the try/except on purpose: a tick that RAISED is exactly
+            # when lag must keep climbing. Reporting lag only on the happy path
+            # would leave the gauge frozen at its last good value during the
+            # outage the alert exists to catch.
+            self._publish_lag()
             dt = (datetime.now(UTC) - t0).total_seconds()
             if _metrics is not None:
                 _metrics.audit_sync_latency_seconds.observe(dt)
@@ -436,6 +442,66 @@ class AuditSyncer:
         raise last_exc or RuntimeError("insert_batch: unknown failure")
 
     # ── tick orchestration ─────────────────────────────────────────────
+
+    def _pending_bytes(self) -> int:
+        """Bytes inside the catchup window not yet covered by a saved cursor.
+
+        This is the backlog: what the local JSON-L holds that Postgres has not
+        been told about. Zero means caught up, which is the only condition that
+        justifies reporting zero lag.
+        """
+        oldest_allowed = date.today() - timedelta(days=self.catchup_days)
+        pending = 0
+        for path in sorted(self.audit_dir.glob("audit-*.jsonl")):
+            file_date = _parse_file_date(path.name)
+            if file_date is None or file_date < oldest_allowed:
+                continue
+            try:
+                filesize = path.stat().st_size
+            except OSError:
+                continue
+            pending += max(filesize - _load_cursor(path), 0)
+        return pending
+
+    def _publish_lag(self) -> None:
+        """Set ``pje_audit_sync_lag_seconds`` — the gauge the alert reads.
+
+        This wiring did not exist before. ``_last_synced_event_ts`` was
+        maintained (and its tz handling fixed in Sprint 12 B2, whose comment
+        already called it "the lag gauge") but only ever reached ``/healthz``
+        as a dict field. The Prometheus gauge was declared, scraped, and never
+        written — and because an unlabelled Gauge is materialised at
+        construction, it exported a constant ``0.0`` rather than going absent.
+        ``PjeAuditSyncLagHigh`` (``> 60``) therefore could not fire, and the two
+        Grafana panels read as perfect sync. A silent zero is worse than No
+        Data: No Data breaks the panel visibly and leaves the alert unknown.
+
+        Definition follows the metric's own HELP string — "event-time lag
+        between newest local JSON-L entry and newest synced row" — *not*
+        ``health_snapshot``'s ``now - last_synced``. That distinction is what
+        keeps an idle, fully-synced deployment at zero instead of alerting
+        every night simply because no documents were downloaded.
+
+        Failure modes this reports honestly:
+        - caught up (no pending bytes) -> 0, whatever the wall clock says
+        - backlog + stalled/raising sync -> climbs, so the alert fires
+        - backlog and nothing ever synced -> measured from syncer start, so a
+          syncer that never worked still climbs instead of reading 0 forever
+        - self-disabled on PG<15 -> ticks early-return, backlog stays, climbs
+        """
+        if _metrics is None:
+            return
+        try:
+            pending = self._pending_bytes()
+        except Exception:  # noqa: BLE001 — a gauge must never break the loop
+            logger.warning("audit_sync.lag_publish_failed", exc_info=True)
+            return
+        if pending == 0:
+            _metrics.audit_sync_lag_seconds.set(0.0)
+            return
+        baseline = self._last_synced_event_ts or self._started_at
+        lag = (datetime.now(UTC) - baseline).total_seconds()
+        _metrics.audit_sync_lag_seconds.set(max(lag, 0.0))
 
     async def _tick(self) -> None:
         """One sweep over files within the catchup window."""
