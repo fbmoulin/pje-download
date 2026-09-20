@@ -1,8 +1,11 @@
 # Full analysis — pje-download @ `1bbcdde`
 
-Read-only analysis. **No production file was modified by this report.** Every claim below was
-measured in this session; where a step could not be executed, it says so explicitly instead of
-asserting the conclusion.
+Analysis performed read-only against `1bbcdde`; every claim below was measured in this session,
+and where a step could not be executed it says so explicitly instead of asserting the conclusion.
+
+The branch has since gained fixes for **F1** and **F2** (see the status note below). The baseline
+and the findings are recorded as they were *at analysis time* — the 471-test baseline is the
+pre-fix number; the branch now carries 485.
 
 ---
 
@@ -10,6 +13,8 @@ asserting the conclusion.
 
 **The repo is in good health and its docs are unusually honest — the findings here are not
 regressions, they are four places where a stated guarantee is not the guarantee that exists.**
+
+> **Status:** F1 and F2 are fixed on this branch (`1e788f7`, `dfbd8a7`). F3–F6 remain open.
 
 Lint, format, specs and tests are green (471 collected, matching `CLAUDE.md` exactly). The
 architecture, the containment work of PRs #32–#35, and the `build_sha` provenance chain all hold
@@ -55,6 +60,8 @@ below depends on the difference.
 ---
 
 ## F1 — `pje_audit_sync_lag_seconds` is never set: the alert cannot fire, and the panel reads *perfect*
+
+> ✅ **FIXED** in `1e788f7` on this branch. Kept below as the diagnosis.
 
 **Severity: high (latent — see reachability).** The gauge is declared in `metrics.py`, consumed by
 one alert rule and two Grafana panels, and **never written by any production code path.**
@@ -116,6 +123,15 @@ metric named in `alert-rules.yml` has a production writer; that check would have
 ---
 
 ## F2 — The dashboard image ignores `requirements.txt` entirely
+
+> ✅ **FIXED** in `dfbd8a7` on this branch. Kept below as the diagnosis.
+>
+> Derived from `requirements.txt` by excluding only `playwright` (139 MB measured,
+> never imported by the dashboard) rather than adding a second pin list — a parallel
+> list is what drifted here in the first place. Guarded by
+> `tests/test_image_dependency_pins.py` (9 tests). Docker was unavailable in the
+> analysis environment, so **the image was not built**; what was verified is that the
+> derivation yields the same 8 packages, now pinned, and that pip resolves them.
 
 **Severity: high.** The worker target installs pinned deps. The dashboard target installs a
 **hand-written, completely unpinned list**:
@@ -398,8 +414,8 @@ Each is independently shippable; `AGENTS.md` asks that these not be mixed into o
 
 | # | Finding | Effort | Why this order |
 |---|---|---|---|
-| 1 | **F2** dashboard `-r requirements.txt` | 1 line | Largest blast radius per character; makes CI mean something for both images |
-| 2 | **F1** wire the lag gauge | ~3 lines | Must land *before* the Railway sink is enabled, not after |
+| ~~1~~ | ~~**F2** dashboard `-r requirements.txt`~~ | ✅ `dfbd8a7` | Largest blast radius per character; makes CI mean something for both images |
+| ~~2~~ | ~~**F1** wire the lag gauge~~ | ✅ `1e788f7` | Must land *before* the Railway sink is enabled, not after |
 | 3 | **F3** rename or implement the credential gate | 1 line / ~10 | Rename is free and stops the false assurance immediately |
 | 4 | **F5** host-compare the gdrive URL | ~5 lines | Independent of everything else |
 | 5 | **F4 + F6** together | larger | Never F4 alone — that ships downloads with no CNJ trail |
