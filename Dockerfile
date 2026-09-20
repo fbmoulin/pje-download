@@ -11,9 +11,25 @@ COPY requirements.txt .
 
 # ── Dashboard target: no Playwright, no Xvfb ──
 FROM base AS dashboard
-RUN pip install --no-cache-dir \
-        aiohttp prometheus_client structlog zeep requests gdown \
-        "redis[hiredis]" asyncpg && \
+# Versions come from requirements.txt — DERIVED, never a second list.
+#
+# This used to be a hand-written list of bare package names with no version
+# specifier at all, so the dashboard image ignored every pin the repo has:
+# measured 2026-09-20, a rebuild shipped redis 8.1.0, structlog 26.1.0 (a major)
+# and aiohttp 3.14.3 while requirements.txt pinned 8.0.0 / 25.5.0 / 3.14.1. CI
+# tests the pinned set, so nothing green said anything about what the dashboard
+# actually ran, and the two containers of one deploy ran different libraries.
+# That is the same class as the redis-py 8.0.0 socket_timeout outage (PR #32),
+# whose stated defence is precisely this pin.
+#
+# Only playwright is dropped: it is 139 MB and the dashboard never imports it
+# (pje_session imports it lazily, inside functions). Deriving by exclusion
+# rather than maintaining a second pin list is deliberate — a second list is
+# what drifted here, and what drifted in the COPY list fixed by 237ea55. A new
+# dependency added to requirements.txt now reaches this image automatically.
+RUN grep -vE '^playwright[=<>~!]' requirements.txt > /tmp/requirements-dashboard.txt && \
+    pip install --no-cache-dir -r /tmp/requirements-dashboard.txt && \
+    rm /tmp/requirements-dashboard.txt && \
     apt-get update && apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 # Copy all first-party modules (was an explicit list that drifted — Sprint 13/14
