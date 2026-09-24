@@ -66,6 +66,78 @@ class TestExtractFolderId:
 
 
 # ─────────────────────────────────────────────
+# extract_folder_id — host-aware SSRF guard (F5)
+# ─────────────────────────────────────────────
+
+_LEGIT_GDRIVE_URLS = [
+    # (url, expected id) — the four documented forms, with/without ?usp=sharing
+    ("https://drive.google.com/drive/folders/1AbC_dEf", "1AbC_dEf"),
+    ("https://drive.google.com/drive/folders/1AbC?usp=sharing", "1AbC"),
+    ("https://drive.google.com/drive/u/0/folders/1AbC", "1AbC"),
+    ("https://drive.google.com/drive/u/12/folders/1AbC?usp=sharing", "1AbC"),
+    ("https://drive.google.com/open?id=1AbC", "1AbC"),
+    ("https://drive.google.com/open?id=1AbC&usp=sharing", "1AbC"),
+    ("https://drive.google.com/folderview?id=1AbC", "1AbC"),
+    ("https://drive.google.com/folderview?id=1AbC&usp=sharing", "1AbC"),
+    # host is case-insensitive; trailing slash and fragment are harmless
+    ("https://DRIVE.GOOGLE.COM/drive/folders/1AbC", "1AbC"),
+    ("https://drive.google.com/drive/folders/1AbC/", "1AbC"),
+    ("https://drive.google.com/drive/folders/1AbC#grid", "1AbC"),
+]
+
+_HOSTILE_GDRIVE_URLS = [
+    # Every case measured to PASS the original substring guard (report F5)
+    "https://attacker.example/x?u=drive.google.com/drive/folders/1AbC",
+    "https://evil.test/drive.google.com/drive/folders/1AbC",
+    "http://169.254.169.254/drive.google.com/drive/folders/1AbC",
+    "file:///etc/drive.google.com/drive/folders/1AbC",
+    # Host-suffix and userinfo tricks — hostname must be exactly drive.google.com
+    "https://drive.google.com.evil.test/drive/folders/1AbC",
+    "https://evil.test.drive.google.com/drive/folders/1AbC",
+    "https://drive.google.com@evil.test/drive/folders/1AbC",
+    "https://user:pw@drive.google.com/drive/folders/1AbC",
+    "https://drive.google.com:8443/drive/folders/1AbC",
+    # Deliberate policy: https only. PJe and Drive links are always https.
+    "http://drive.google.com/drive/folders/1AbC",
+    "ftp://drive.google.com/drive/folders/1AbC",
+    "//drive.google.com/drive/folders/1AbC",
+    "drive.google.com/drive/folders/1AbC",
+    # Right host, wrong path / id charset
+    "https://drive.google.com/",
+    "https://drive.google.com/drive/folders/",
+    "https://drive.google.com/drive/folders/1AbC/../../etc",
+    "https://drive.google.com/drive/folders/1AbC%2Fx",
+    "https://drive.google.com/open?id=",
+    "https://drive.google.com/open?id=1AbC/evil",
+    "https://drive.google.com/embeddedfolderview?id=1AbC",
+    # Empty / non-URL garbage
+    "",
+    "   ",
+    "not a url",
+    "https://",
+    "https:///drive/folders/1AbC",
+]
+
+
+class TestExtractFolderIdHostAware:
+    """F5: the guard must compare scheme+host, not search for a substring."""
+
+    @pytest.mark.parametrize(("url", "expected"), _LEGIT_GDRIVE_URLS)
+    def test_accepts_legitimate_forms(self, url, expected):
+        assert extract_folder_id(url) == expected
+
+    @pytest.mark.parametrize("url", _HOSTILE_GDRIVE_URLS)
+    def test_rejects_hostile_or_malformed(self, url):
+        assert extract_folder_id(url) is None, url
+
+    @pytest.mark.parametrize("value", [None, 42, ["https://drive.google.com"]])
+    def test_non_string_input_returns_none(self, value):
+        # gdrive_map values come straight from JSON — a non-string must be
+        # rejected, not raise TypeError (→ 500) inside the handler.
+        assert extract_folder_id(value) is None  # type: ignore[arg-type]
+
+
+# ─────────────────────────────────────────────
 # is_processo_antigo
 # ─────────────────────────────────────────────
 
@@ -220,6 +292,39 @@ class TestDownloadGdriveFolderOrchestration:
                 tmp_path,
             )
         assert result == expected
+
+    @pytest.mark.asyncio
+    async def test_strategies_receive_canonical_url_not_raw_input(self, tmp_path):
+        """F5 belt-and-braces: strategies 1 and 3 must never see the caller's
+        raw URL. ``page.goto`` in strategy 3 is the SSRF sink; handing it a
+        URL rebuilt from the extracted id means a regression in the guard
+        cannot steer Chromium to a caller-supplied host."""
+        captured: dict[str, str] = {}
+
+        async def _capture_gdown(folder_url, output_dir):
+            captured["gdown"] = folder_url
+            return None
+
+        async def _capture_playwright(folder_url, output_dir):
+            captured["playwright"] = folder_url
+            return None
+
+        with (
+            patch("gdrive_downloader._try_gdown", side_effect=_capture_gdown),
+            patch("gdrive_downloader._try_requests_parse", return_value=None),
+            patch(
+                "gdrive_downloader._try_playwright_download",
+                side_effect=_capture_playwright,
+            ),
+        ):
+            result = await download_gdrive_folder(
+                "https://drive.google.com/drive/u/0/folders/1AbC?usp=sharing",
+                tmp_path,
+            )
+
+        assert result == []
+        canonical = "https://drive.google.com/drive/folders/1AbC"
+        assert captured == {"gdown": canonical, "playwright": canonical}
 
     @pytest.mark.asyncio
     async def test_all_strategies_fail_returns_empty(self, tmp_path):

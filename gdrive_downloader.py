@@ -26,6 +26,7 @@ import hashlib
 import re
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import structlog
 
@@ -41,21 +42,54 @@ log: structlog.BoundLogger = structlog.get_logger("kratos.gdrive")
 # ─────────────────────────────────────────────
 
 
+_GDRIVE_HOST = "drive.google.com"
+_GDRIVE_FOLDER_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+# Path-only (the host is checked separately): /drive/folders/<id>, /drive/u/<n>/folders/<id>
+_GDRIVE_FOLDER_PATH_RE = re.compile(r"/drive(?:/u/\d+)?/folders/([A-Za-z0-9_-]+)/?")
+# Query-only forms: /open?id=<id>, /folderview?id=<id>
+_GDRIVE_QUERY_ID_PATHS = frozenset({"/open", "/folderview"})
+
+
 def extract_folder_id(url: str) -> str | None:
-    """Extrai o folder ID de uma URL do Google Drive."""
-    # Formatos conhecidos:
-    # https://drive.google.com/drive/folders/FOLDER_ID
-    # https://drive.google.com/drive/folders/FOLDER_ID?usp=sharing
-    # https://drive.google.com/drive/u/0/folders/FOLDER_ID
-    patterns = [
-        r"drive\.google\.com/drive(?:/u/\d+)?/folders/([a-zA-Z0-9_-]+)",
-        r"drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)",
-        r"drive\.google\.com/folderview\?id=([a-zA-Z0-9_-]+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
+    """Extrai o folder ID de uma URL do Google Drive.
+
+    Esta função é o guard anti-SSRF do ``gdrive_map`` (``dashboard_api.handle_download``)
+    e a única barreira antes de ``page.goto`` em ``_try_playwright_download``. Por isso
+    ela compara scheme+host de verdade em vez de procurar uma substring: a versão
+    anterior (``re.search`` sem âncora) aceitava
+    ``https://evil.test/drive.google.com/drive/folders/1AbC`` e
+    ``http://169.254.169.254/drive.google.com/drive/folders/1AbC``.
+
+    Aceita SOMENTE ``https://drive.google.com`` (host exato, sem userinfo nem porta)
+    nos formatos:
+      /drive/folders/FOLDER_ID[?usp=sharing]
+      /drive/u/N/folders/FOLDER_ID[?usp=sharing]
+      /open?id=FOLDER_ID
+      /folderview?id=FOLDER_ID
+    Qualquer outra coisa → ``None``. ``http://`` é rejeitado de propósito: links do
+    PJe e do Drive são sempre https.
+    """
+    if not isinstance(url, str):
+        return None
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return None
+    if parts.scheme != "https":
+        return None
+    # netloc, não hostname: "user@drive.google.com" e "drive.google.com:8443" têm
+    # hostname correto mas nenhum link real do Drive carrega userinfo ou porta.
+    if parts.netloc.lower() != _GDRIVE_HOST:
+        return None
+
+    match = _GDRIVE_FOLDER_PATH_RE.fullmatch(parts.path)
+    if match:
+        return match.group(1)
+
+    if parts.path in _GDRIVE_QUERY_ID_PATHS:
+        ids = parse_qs(parts.query).get("id") or []
+        if len(ids) == 1 and _GDRIVE_FOLDER_ID_RE.fullmatch(ids[0]):
+            return ids[0]
     return None
 
 
@@ -500,9 +534,15 @@ async def download_gdrive_folder(
         log.error("gdrive.invalid_url", url=folder_url)
         return []
 
+    # Daqui em diante NENHUMA estratégia vê a URL crua do chamador: a URL é
+    # reconstruída a partir do id validado, então ``page.goto`` (estratégia 3)
+    # nunca recebe um host fornecido por terceiros, mesmo se o guard regredir.
+    canonical_url = f"https://{_GDRIVE_HOST}/drive/folders/{folder_id}"
+
     log.info(
         "gdrive.download.start",
         folder_id=folder_id,
+        url=canonical_url,
         output=str(output_dir),
         strategy=strategy,
     )
@@ -512,7 +552,7 @@ async def download_gdrive_folder(
 
     # Estratégia 1: gdown
     if strategy in ("auto", "gdown"):
-        files = await _try_gdown(folder_url, output_dir)
+        files = await _try_gdown(canonical_url, output_dir)
         if files:
             elapsed = time.monotonic() - start
             log.info(
@@ -538,7 +578,7 @@ async def download_gdrive_folder(
 
     # Estratégia 3: Playwright
     if strategy in ("auto", "playwright"):
-        files = await _try_playwright_download(folder_url, output_dir)
+        files = await _try_playwright_download(canonical_url, output_dir)
         if files:
             elapsed = time.monotonic() - start
             log.info(
