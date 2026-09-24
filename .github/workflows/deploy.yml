@@ -59,7 +59,18 @@ jobs:
           mkdir -p ~/.ssh
           echo "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+          # No ssh-keyscan here on purpose. It used to run right above this
+          # line, but the rsync below passes StrictHostKeyChecking=no, so its
+          # output could never be consulted — it was dead code with exactly
+          # one effect: under `bash -e` a keyscan that times out (5 s default,
+          # zero stderr) kills the deploy. That is the signature of the
+          # intermittent "Sync files to VPS" failures in TODO.md. Removing it
+          # deletes that failure mode and changes nothing about the security
+          # posture, which is (and was) no host-key verification: the
+          # appleboy/ssh-action steps below don't set `fingerprint` either.
+          # Real pinning would be a VPS_HOST_KEY secret written into
+          # known_hosts with StrictHostKeyChecking=yes — a separate change
+          # that needs the key supplied, not a cleanup.
 
           rsync -az --delete \
             --exclude='.env' \
