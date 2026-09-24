@@ -998,6 +998,25 @@ class TestVerifyCredentials:
         assert outcome["result"] == "valid"
 
     @pytest.mark.asyncio
+    async def test_body_level_acesso_negado_is_invalid(self):
+        """Review of #47: a credential rejection can travel in the BODY
+        (sucesso=false + mensagem="Acesso negado") instead of as a SOAP fault.
+        The fault branch already classified that text as auth_failed; the body
+        branch mapped everything to mni_error, which the probe reads as
+        "valid" — so a deploy with dead credentials would have passed."""
+        client = _make_client()
+        soap_resp = _make_soap_response(sucesso=False, mensagem="Acesso negado")
+
+        with (
+            patch.object(client, "_get_client", return_value=MagicMock()),
+            patch.object(client, "_call_consultar_processo", return_value=soap_resp),
+        ):
+            outcome = await client.verify_credentials()
+
+        assert outcome["result"] == "invalid", outcome
+        assert "Acesso negado" in outcome["reason"]
+
+    @pytest.mark.asyncio
     async def test_success_reply_is_valid(self):
         """The extremely unlikely case where the dummy CNJ resolves is still
         a 'valid' credential signal."""

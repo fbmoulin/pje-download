@@ -282,22 +282,38 @@ class MNIClient:
             mensagem = getattr(result, "mensagem", "")
 
             if not sucesso:
-                log.warning(
-                    "mni.consultar_processo.mni_error",
-                    processo=numero_processo,
-                    mensagem=mensagem,
-                )
+                # A credential rejection can travel in the BODY (sucesso=false +
+                # mensagem) rather than as a SOAP fault. The fault branch below
+                # already maps "Acesso negado"/"Unauthorized" to auth_failed;
+                # apply the same rule here, or verify_credentials() would read a
+                # body-level rejection as "mni_error" -> "valid" and a deploy
+                # with dead credentials would pass. Same classifier, one rule.
+                msg_text = str(mensagem or "")
+                if "Acesso negado" in msg_text or "Unauthorized" in msg_text:
+                    log.error(
+                        "mni.consultar_processo.auth_failed", processo=numero_processo
+                    )
+                    _body_status = "auth_failed"
+                    user_error = "MNI: credenciais inválidas (Acesso negado)"
+                else:
+                    log.warning(
+                        "mni.consultar_processo.mni_error",
+                        processo=numero_processo,
+                        mensagem=mensagem,
+                    )
+                    _body_status = "mni_error"
+                    user_error = mensagem
                 metrics.mni_latency_seconds.labels(operation=_op).observe(
                     time.monotonic() - t0
                 )
                 metrics.mni_requests_total.labels(
-                    operation=_op, status="mni_error"
+                    operation=_op, status=_body_status
                 ).inc()
                 return MNIResult(
                     success=False,
-                    error=mensagem,
+                    error=user_error,
                     raw_response=result,
-                    status="mni_error",
+                    status=_body_status,
                 )
 
             try:
