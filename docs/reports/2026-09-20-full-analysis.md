@@ -6,7 +6,7 @@ and where a step could not be executed it says so explicitly instead of assertin
 Fixes have since landed in two PRs: **F1** and **F2** in #46 (`e4ca0b2`, deployed), and **F3–F6**,
 the Codex lag-baseline follow-up, plus a seventh finding **F7** surfaced during that work, in #47.
 The baseline and the findings are recorded as they were *at analysis time* — the 471-test baseline
-is the pre-fix number; #47 carries 580.
+is the pre-fix number; #47 carries 590.
 
 ---
 
@@ -498,6 +498,11 @@ both-directions tests because each sat *between* two fixes:
   relaunched in the same job); nine near-identical `audit.log_access` blocks; `_current_tribunal()`
   without `.upper()` diverging from `mni_client` — fixed by the worker specialist (`c0e876b`,
   `73ae648`); the relaunch test proves `chromium.launch` was awaited 0 times under the old order.
+
+Codex (the repo's own PR reviewer) then added two P2s on the merged review round, both real and
+fixed: canonicalising the Drive URL from the id alone dropped `resourcekey`, which older
+link-shared folders require (`44459e9` — kept, but only a validated one); and the lag probe read
+only `parsed[0]`, so a first row without a timestamp hid an older second row (`c3e8541`).
 
 `security-review` (identify → false-positive filter → report): **no HIGH/MEDIUM finding at ≥0.8
 confidence.** The branch tightens the only third-party-URL → `page.goto` path and its new audit
