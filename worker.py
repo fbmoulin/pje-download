@@ -387,8 +387,16 @@ class PJeSessionWorker:
         elapsed = (datetime.now(UTC) - self.session_started_at).total_seconds() / 60
         return elapsed > SESSION_TIMEOUT_MINUTES
 
-    async def invalidate_session(self) -> None:
-        """Remove sessão salva e fecha recursos do browser."""
+    async def _close_browser(self) -> None:
+        """Close the browser and forget it — WITHOUT touching the session file.
+
+        The distinction from `invalidate_session` matters in MNI mode (F7): the
+        operational timeout (`SESSION_TIMEOUT_MINUTES`) says a helper browser
+        has been open too long, not that the operator's saved cookies are dead.
+        Deleting the file would force a manual re-login for a timeout; keeping
+        it lets `_ensure_browser` re-open from it next time and verify against
+        login.seam, which is what actually detects a dead session.
+        """
         for resource in (self.page, self.context, self._browser):
             if resource:
                 try:
@@ -399,10 +407,14 @@ class PJeSessionWorker:
         self.context = None
         self._browser = None
         self._release_session_lock()
-        if SESSION_STATE_PATH.exists():
-            SESSION_STATE_PATH.unlink()
         self.session_valid = False
         self.fallback_ready = False
+
+    async def invalidate_session(self) -> None:
+        """Remove sessão salva e fecha recursos do browser."""
+        await self._close_browser()
+        if SESSION_STATE_PATH.exists():
+            SESSION_STATE_PATH.unlink()
         self.session_started_at = None
         log.info("pje.session.invalidated")
 
@@ -447,17 +459,7 @@ class PJeSessionWorker:
                 # Nothing to recover here without a human — surface it as
                 # unavailable, same as the "no session file" case.
                 log.warning("pje.session.lazy_expired")
-                for resource in (self.page, self.context, self._browser):
-                    if resource:
-                        try:
-                            await resource.close()
-                        except Exception:
-                            pass
-                self.page = None
-                self.context = None
-                self._browser = None
-                self._release_session_lock()
-                self.session_valid = False
+                await self._close_browser()
                 return False
 
             self.session_valid = True
@@ -470,16 +472,7 @@ class PJeSessionWorker:
             # error_type only — never str(exc). A launch/navigation failure
             # can echo cookies or storage_state contents (Sprint 9 note).
             log.warning("pje.session.lazy_failed", error_type=type(exc).__name__)
-            for resource in (self.page, self.context, self._browser):
-                if resource:
-                    try:
-                        await resource.close()
-                    except Exception:
-                        pass
-            self.page = None
-            self.context = None
-            self._browser = None
-            self._release_session_lock()
+            await self._close_browser()
             return False
 
     # ──────────────────────
@@ -831,6 +824,41 @@ class PJeSessionWorker:
                 await self._ensure_browser()
 
             # ── Estratégias 2 e 3 precisam de sessão Playwright ──
+            #
+            # F7: the operational timeout is about a browser session. In
+            # browser-primary mode (no MNI) it keeps its original, unconditional
+            # meaning: expired -> `session_expired`, which the dashboard treats
+            # as fatal for the batch because nothing else can succeed.
+            #
+            # In MNI mode that same check used to run against a browser that
+            # never existed: `load_session`'s MNI branch stamps
+            # `session_started_at` at boot, so after SESSION_TIMEOUT_MINUTES of
+            # *worker uptime* — production uptime is days — every processo
+            # where MNI found nothing came back `session_expired`, and the
+            # dashboard LREM-ed the rest of the batch. One wrong CNJ, one empty
+            # processo or one transient MNI error aborted every job behind it.
+            # Measured on e4ca0b2: uptime 59 min -> `failed`; 61 min ->
+            # `session_expired`, batch aborted.
+            #
+            # MNI is the pipeline there; the browser is a helper. So in MNI mode
+            # the timeout applies only if a helper browser actually exists, and
+            # then it is closed (not the session file — see _close_browser) so
+            # the partial/unavailable paths below report honestly. With no
+            # browser there is nothing to expire and we fall straight through.
+            expired = self.is_session_expired()
+            if expired and self.mni_client is None:
+                log.warning("pje.download.session_expired", job_id=ctx.job_id)
+                self._health_status = "session_expired"
+                return self._result(ctx.job_id, ctx.numero_processo, "session_expired")
+            if expired and self.page is not None:
+                log.warning(
+                    "pje.download.helper_session_expired",
+                    job_id=ctx.job_id,
+                    note="MNI mode: helper browser past SESSION_TIMEOUT_MINUTES; "
+                    "closed, session file kept, continuing without it",
+                )
+                await self._close_browser()
+
             if ctx.anexos_pendentes and (self.page is None or self.context is None):
                 warning = (
                     f"MNI baixou documentos principais, mas {ctx.anexos_pendentes} anexo(s) "
@@ -861,11 +889,6 @@ class PJeSessionWorker:
                     ctx.downloaded_files,
                     error=warning,
                 )
-
-            if self.is_session_expired():
-                log.warning("pje.download.session_expired", job_id=ctx.job_id)
-                self._health_status = "session_expired"
-                return self._result(ctx.job_id, ctx.numero_processo, "session_expired")
 
             api_found = await self._phase_api_fallback(ctx)
             if not api_found:
