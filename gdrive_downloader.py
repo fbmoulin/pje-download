@@ -48,6 +48,36 @@ _GDRIVE_FOLDER_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 _GDRIVE_FOLDER_PATH_RE = re.compile(r"/drive(?:/u/\d+)?/folders/([A-Za-z0-9_-]+)/?")
 # Query-only forms: /open?id=<id>, /folderview?id=<id>
 _GDRIVE_QUERY_ID_PATHS = frozenset({"/open", "/folderview"})
+# Drive's resource-key security update (2021): link-shared folders created
+# before it need `?resourcekey=<key>` or Drive answers access-denied. The key
+# is opaque base64url-ish text — the same charset as a folder id — and is
+# the ONLY query parameter carried into the canonical URL.
+_GDRIVE_RESOURCEKEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def canonical_folder_url(url: str) -> str | None:
+    """Rebuild a Drive folder URL from its VALIDATED parts, or ``None``.
+
+    Host and path come from the validated folder id (see ``extract_folder_id``,
+    which is the anti-SSRF guard); the query carries at most one parameter,
+    ``resourcekey``, and only when the caller's URL had exactly one value
+    matching ``_GDRIVE_RESOURCEKEY_RE``. Anything else in the query is dropped.
+
+    Why keep it at all (review of #47): folders protected by Drive's resource-key
+    update are unreachable without it — a URL that passes validation would then
+    fail every strategy with an access-denied page. Before this branch the raw
+    URL reached ``page.goto`` with the key intact; canonicalising from the id
+    alone silently broke those folders for strategy 3. (gdown never honoured it:
+    it re-derives the id and fetches ``embeddedfolderview?id=`` — measured.)
+    """
+    folder_id = extract_folder_id(url)
+    if folder_id is None:
+        return None
+    canonical = f"https://{_GDRIVE_HOST}/drive/folders/{folder_id}"
+    keys = parse_qs(urlsplit(url.strip()).query).get("resourcekey") or []
+    if len(keys) == 1 and _GDRIVE_RESOURCEKEY_RE.fullmatch(keys[0]):
+        canonical += f"?resourcekey={keys[0]}"
+    return canonical
 
 
 def extract_folder_id(url: str) -> str | None:
@@ -535,9 +565,14 @@ async def download_gdrive_folder(
         return []
 
     # Daqui em diante NENHUMA estratégia vê a URL crua do chamador: a URL é
-    # reconstruída a partir do id validado, então ``page.goto`` (estratégia 3)
-    # nunca recebe um host fornecido por terceiros, mesmo se o guard regredir.
-    canonical_url = f"https://{_GDRIVE_HOST}/drive/folders/{folder_id}"
+    # reconstruída a partir do id validado (+ um `resourcekey` validado, se o
+    # chamador trouxe um — ver canonical_folder_url), então ``page.goto``
+    # (estratégia 3) nunca recebe um host fornecido por terceiros, mesmo se o
+    # guard regredir.
+    canonical_url = canonical_folder_url(folder_url)
+    if canonical_url is None:  # unreachable: folder_id above came from the same guard
+        log.error("gdrive.invalid_url", url=folder_url)
+        return []
 
     log.info(
         "gdrive.download.start",

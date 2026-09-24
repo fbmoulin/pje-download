@@ -345,6 +345,88 @@ class TestDownloadGdriveFolderOrchestration:
 # ─────────────────────────────────────────────
 
 
+class TestCanonicalFolderUrl:
+    """Codex on #47: canonicalising from the id alone dropped `resourcekey`,
+    which Drive's resource-key security update requires for older link-shared
+    folders — a URL that passed validation then failed every strategy with an
+    access-denied page. Keep it, but only a VALIDATED one, and nothing else."""
+
+    def test_keeps_a_valid_resourcekey_and_nothing_else(self):
+        from gdrive_downloader import canonical_folder_url
+
+        url = (
+            "https://drive.google.com/drive/u/0/folders/1AbC_dEf"
+            "?usp=sharing&resourcekey=0-abcDEF_12-xyz&foo=bar"
+        )
+        assert (
+            canonical_folder_url(url)
+            == "https://drive.google.com/drive/folders/1AbC_dEf?resourcekey=0-abcDEF_12-xyz"
+        )
+
+    def test_no_resourcekey_means_no_query_at_all(self):
+        from gdrive_downloader import canonical_folder_url
+
+        assert (
+            canonical_folder_url("https://drive.google.com/open?id=1AbC&usp=sharing")
+            == "https://drive.google.com/drive/folders/1AbC"
+        )
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "resourcekey=abc%2F..%2Fetc",  # decodes to a slash
+            "resourcekey=abc%20def",  # space
+            "resourcekey=abc%23frag",  # '#'
+            "resourcekey=a&resourcekey=b",  # two values
+            "resourcekey=",  # empty
+        ],
+    )
+    def test_hostile_or_ambiguous_resourcekey_is_dropped(self, query):
+        from gdrive_downloader import canonical_folder_url
+
+        out = canonical_folder_url(
+            f"https://drive.google.com/drive/folders/1AbC?{query}"
+        )
+        assert out == "https://drive.google.com/drive/folders/1AbC", out
+
+    def test_invalid_url_is_none(self):
+        from gdrive_downloader import canonical_folder_url
+
+        assert (
+            canonical_folder_url("https://evil.test/drive/folders/1AbC?resourcekey=x")
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_sink_strategies_receive_the_resourcekey(self, tmp_path):
+        """The regression: before this fix strategy 3 got the id-only URL."""
+        from unittest.mock import patch
+
+        import gdrive_downloader as g
+
+        captured: dict[str, str] = {}
+
+        async def fake_gdown(folder_url, output_dir):
+            captured["gdown"] = folder_url
+            return None
+
+        async def fake_playwright(folder_url, output_dir):
+            captured["playwright"] = folder_url
+            return None
+
+        with (
+            patch.object(g, "_try_gdown", fake_gdown),
+            patch.object(g, "_try_requests_parse", return_value=None),
+            patch.object(g, "_try_playwright_download", fake_playwright),
+        ):
+            await g.download_gdrive_folder(
+                "https://drive.google.com/drive/folders/1AbC?resourcekey=0-KEY_1&usp=sharing",
+                tmp_path,
+            )
+        expected = "https://drive.google.com/drive/folders/1AbC?resourcekey=0-KEY_1"
+        assert captured == {"gdown": expected, "playwright": expected}
+
+
 class TestTryGdown:
     @pytest.mark.asyncio
     async def test_gdown_success(self, tmp_path):
