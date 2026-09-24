@@ -2222,7 +2222,7 @@ class PJeSessionWorker:
         if self._browser:
             await self._browser.close()
         if self.redis:
-            await self.redis.close()
+            await self.redis.aclose()
         self._release_session_lock()
 
 

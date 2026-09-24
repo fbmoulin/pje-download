@@ -343,7 +343,7 @@ class TestWorkerClose:
         mock_page.close.assert_awaited_once()
         mock_ctx.close.assert_awaited_once()
         mock_browser.close.assert_awaited_once()
-        mock_redis.close.assert_awaited_once()
+        mock_redis.aclose.assert_awaited_once()  # aclose(): close() deprecated since redis-py 5.0.1
         assert worker._health_runner is None
 
     @pytest.mark.asyncio

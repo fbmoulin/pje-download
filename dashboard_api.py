@@ -225,7 +225,7 @@ class DashboardState:
             await self._worker_http.close()
         self._worker_http = None
         if self._redis is not None:
-            await self._redis.close()
+            await self._redis.aclose()
         self._redis = None
 
     def _load_history(self):
