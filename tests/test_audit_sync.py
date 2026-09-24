@@ -802,6 +802,37 @@ class TestLagGauge:
             f"the newer file's 3 h backlog must be measured, gauge reported {lag}"
         )
 
+    @pytest.mark.asyncio
+    async def test_scans_past_timestampless_rows_in_the_same_file(
+        self, tmp_path: Path, caplog
+    ):
+        """Codex on #47: the probe looked only at `parsed[0]`. A first pending
+        row without a timestamp followed by a 3-hour-old row made the probe skip
+        the file (or fall back to process start) — a real backlog read as new
+        after a restart. The oldest pending entry WITH a usable timestamp is the
+        answer, whichever row it is."""
+        from datetime import UTC, datetime, timedelta
+
+        caplog.set_level(logging.WARNING, logger="kratos.audit_sync")
+        three_h_ago = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+        _make_jsonl(
+            tmp_path / f"audit-{date.today()}.jsonl",
+            [_audit_entry(timestamp=None), _audit_entry(timestamp=three_h_ago)],
+        )
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        syncer._started_at = datetime.now(UTC) - timedelta(minutes=5)
+
+        syncer._publish_lag()
+
+        lag = self._gauge()
+        assert lag is not None and 10795 < lag < 10810, (
+            f"the second row's 3 h must be measured, gauge reported {lag}"
+        )
+        assert not [
+            r for r in caplog.records if r.message == "audit_sync.lag_baseline_fallback"
+        ], "a usable row was found; this is not a fallback"
+
 
 class TestPasswordNeverLogged:
     @pytest.mark.asyncio

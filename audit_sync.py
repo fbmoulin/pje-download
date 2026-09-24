@@ -518,18 +518,24 @@ class AuditSyncer:
                 )
                 saw_partial_tail = True
                 continue
+            # The oldest pending entry WITH a usable timestamp, not merely the
+            # first parsed row (Codex on #47): a first row lacking `timestamp`
+            # followed by a 3-hour-old row must yield the 3 hours, or the file
+            # is skipped and a real backlog reads as new after a restart.
             reason = "no_complete_line"
-            if parsed:
-                ts_raw = parsed[0].get("timestamp")
-                reason = "missing_timestamp"
-                if ts_raw:
-                    try:
-                        return _coerce_utc(datetime.fromisoformat(ts_raw))
-                    except (TypeError, ValueError):
-                        reason = "unparsable_timestamp"
-            # Unusable pending bytes here (malformed / no timestamp). The next
-            # tick consumes them (cursor advances past malformed lines), so the
-            # honest backlog, if any, is in a later file — keep looking.
+            for row in parsed:
+                ts_raw = row.get("timestamp") if isinstance(row, dict) else None
+                if not ts_raw:
+                    reason = "missing_timestamp"
+                    continue
+                try:
+                    return _coerce_utc(datetime.fromisoformat(ts_raw))
+                except (TypeError, ValueError):
+                    reason = "unparsable_timestamp"
+            # No usable timestamp anywhere in the probed chunk (malformed / no
+            # timestamp). The next tick consumes those rows (cursor advances
+            # past malformed lines), so the honest backlog, if any, is in a
+            # later file — keep looking.
             logger.warning(
                 "audit_sync.lag_baseline_fallback",
                 extra={"path": str(path), "offset": offset, "reason": reason},
