@@ -6,7 +6,7 @@ and where a step could not be executed it says so explicitly instead of assertin
 Fixes have since landed in two PRs: **F1** and **F2** in #46 (`e4ca0b2`, deployed), and **F3–F6**,
 the Codex lag-baseline follow-up, plus a seventh finding **F7** surfaced during that work, in #47.
 The baseline and the findings are recorded as they were *at analysis time* — the 471-test baseline
-is the pre-fix number; #47 carries 574.
+is the pre-fix number; #47 carries 580.
 
 ---
 
@@ -496,7 +496,8 @@ both-directions tests because each sat *between* two fixes:
   — fixed (`55362d3`): the probe keeps looking past a partial tail.
 - In `worker.py`: F7's expiry block ran *after* `_ensure_browser()` (expired helper closed but not
   relaunched in the same job); nine near-identical `audit.log_access` blocks; `_current_tribunal()`
-  without `.upper()` diverging from `mni_client` — fixed by the worker specialist (see #47).
+  without `.upper()` diverging from `mni_client` — fixed by the worker specialist (`c0e876b`,
+  `73ae648`); the relaunch test proves `chromium.launch` was awaited 0 times under the old order.
 
 `security-review` (identify → false-positive filter → report): **no HIGH/MEDIUM finding at ≥0.8
 confidence.** The branch tightens the only third-party-URL → `page.goto` path and its new audit
@@ -513,5 +514,9 @@ rated ~2/10 for an actual leak and left as is.
 - **Deploy host-key pinning:** `deploy.yml` never verified the VPS host key (neither rsync nor the
   `appleboy/ssh-action` steps); the dead `ssh-keyscan` was removed rather than promoted. Real pinning
   is a `VPS_HOST_KEY` secret written to `known_hosts` with `StrictHostKeyChecking=yes` — needs the key.
+- **Test-isolation quirk (pre-existing):** `tests/test_worker.py::TestDocumentSavedAudit` is flaky when
+  run *in isolation* with `-k`, on `e4ca0b2` too — `_load_worker_module()`'s `patch.dict("sys.modules")`
+  clears `sys.modules` on exit, so whether `audit` survives the reload depends on global import
+  order. Passes in the full file/suite. Worth a fixture that reloads only `worker`.
 - **Lag alert threshold vs. tick:** the gauge is deliberately tick-granular; a continuous per-scrape
   lag would need `PjeAuditSyncLagHigh`'s threshold raised above `AUDIT_SYNC_INTERVAL_SECS` first.
