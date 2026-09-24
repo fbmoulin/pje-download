@@ -733,6 +733,44 @@ class TestLagGauge:
 
         syncer._publish_lag()  # must not raise
 
+    @pytest.mark.asyncio
+    async def test_partial_line_in_flight_reads_as_zero_not_as_uptime(
+        self, tmp_path: Path, caplog
+    ):
+        """The only pending bytes are an unterminated tail audit.py is still
+        writing. That entry is ~0 s old and must be reported as such.
+
+        Falling back to the in-memory baseline here is the one way the probe
+        could over-report: after a restart that baseline is process start, so
+        a healthy system would read hours of lag for one tick — and with the
+        alert's ``for: 2m`` shorter than the 300 s tick, one tick is enough to
+        fire PjeAuditSyncLagHigh spuriously.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        syncer._started_at = datetime.now(UTC) - timedelta(hours=3)
+        # No trailing newline: a write in flight, exactly what _parse_complete_lines
+        # refuses to consume and what the cursor rule must never advance past.
+        (tmp_path / f"audit-{date.today()}.jsonl").write_bytes(
+            b'{"event_type": "document_saved", "timestamp": "2026-09-2'
+        )
+        caplog.set_level(logging.WARNING, logger="kratos.audit_sync")
+
+        syncer._publish_lag()
+
+        assert syncer._pending_bytes() > 0, "the tail must still count as pending"
+        lag = self._gauge()
+        assert lag is not None and lag < 1.0, (
+            f"in-flight tail must read as ~0 s, not as uptime; gauge reported {lag}"
+        )
+        assert not [
+            r
+            for r in caplog.records
+            if r.getMessage() == "audit_sync.lag_baseline_fallback"
+        ], "an in-flight tail is not a fallback condition and must not warn"
+
 
 class TestPasswordNeverLogged:
     @pytest.mark.asyncio

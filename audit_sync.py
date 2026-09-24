@@ -497,6 +497,23 @@ class AuditSyncer:
             except OSError:
                 continue  # vanished/unreadable between stat and read: next file
             parsed, _consumed, _malformed = _parse_complete_lines(data)
+            if not parsed and b"\n" not in data and len(data) < self._LAG_PROBE_BYTES:
+                # The only pending bytes are an unterminated tail: the line
+                # audit.py is writing at this instant. That IS the oldest
+                # pending entry, and it is ~0 s old — so say so. Falling back
+                # to the in-memory baseline here would, right after a restart,
+                # report the age of *process start* (hours), and because the
+                # alert's `for: 2m` is shorter than the 300 s tick, one such
+                # tick fires PjeAuditSyncLagHigh on a healthy system. The
+                # cursor rule agrees: _parse_complete_lines never consumes an
+                # unterminated line, so there is nothing syncable yet.
+                # (A full 64 KiB probe with no newline is not this case — that
+                # is pathological and keeps the warning fallback below.)
+                logger.debug(
+                    "audit_sync.lag_partial_line_in_flight",
+                    extra={"path": str(path), "offset": offset, "bytes": len(data)},
+                )
+                return datetime.now(UTC)
             reason = "no_complete_line"
             if parsed:
                 ts_raw = parsed[0].get("timestamp")
