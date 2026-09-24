@@ -4,7 +4,17 @@ All metrics use a dedicated CollectorRegistry (not the default global) so
 that tests can import this module without triggering duplicate-registration
 errors when the module is re-imported across test sessions.
 
-Exposed at GET /metrics (text/plain Prometheus format) by dashboard_api.py.
+Exposed at GET /metrics (text/plain Prometheus format) — by TWO processes,
+each serving only its own registry, because a CollectorRegistry is
+per-process and the dashboard and the worker are separate containers:
+
+    dashboard_api.py  handle_metrics     -> :8007/metrics  (dashboard + audit_sync
+                                                             counters below)
+    worker.py         _metrics_handler   -> :8006/metrics  (worker counters below)
+
+Prometheus scrapes both (ops/monitoring/stack/prometheus.yml). A worker
+counter never appears on :8007 and vice versa — if a panel is empty, check
+it is reading the right job.
 
 Instrumentation points
 ----------------------
@@ -39,6 +49,12 @@ dashboard_api.py
     submit/_run_batch()    -> dashboard_active_batches
                            -> dashboard_batches_total(status=...)
                            -> dashboard_batch_timeouts_total
+
+audit_sync.py (runs inside the dashboard process)
+    run_forever()          -> audit_sync_latency_seconds, audit_sync_batches_total
+    _publish_lag()         -> audit_sync_lag_seconds (once per tick; 0 when caught up)
+    _sync_file()           -> audit_sync_rows_total, audit_sync_malformed_lines_total,
+                              audit_sync_files_vanished_total
 
 To add instrumentation to a new module
 ---------------------------------------
