@@ -192,7 +192,9 @@ audit_sync_batches_total = Counter(
 
 audit_sync_lag_seconds = Gauge(
     "pje_audit_sync_lag_seconds",
-    "Event-time lag between newest local JSON-L entry and newest synced row",
+    "Age in seconds of the oldest local JSON-L audit entry not yet synced to "
+    "Postgres (now minus its timestamp), published once per sync tick; "
+    "0 when caught up",
     registry=REGISTRY,
 )
 

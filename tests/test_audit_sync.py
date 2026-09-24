@@ -508,14 +508,21 @@ class TestLagGauge:
 
     @pytest.mark.asyncio
     async def test_gauge_climbs_while_a_backlog_is_unsynced(self, tmp_path: Path):
-        """The case the alert exists for: local entries Postgres never got."""
+        """The case the alert exists for: local entries Postgres never got.
+
+        Lag is the age of the oldest unsynced entry, read from disk — not
+        "time since the syncer started", which is what a freshly-restarted
+        process would otherwise report for an hours-old backlog.
+        """
         from datetime import UTC, datetime, timedelta
 
         syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
         assert syncer is not None
-        # Nothing has ever synced, so the baseline is syncer start.
-        syncer._started_at = datetime.now(UTC) - timedelta(minutes=10)
-        _make_jsonl(tmp_path / f"audit-{date.today()}.jsonl", [_audit_entry()])
+        ten_min_ago = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
+        _make_jsonl(
+            tmp_path / f"audit-{date.today()}.jsonl",
+            [_audit_entry(timestamp=ten_min_ago)],
+        )
 
         syncer._publish_lag()
 
@@ -523,6 +530,123 @@ class TestLagGauge:
         assert lag is not None
         assert 595 < lag < 610, f"expected ~600s of lag, gauge reported {lag}"
         assert lag > 60, "must exceed the PjeAuditSyncLagHigh threshold"
+
+    @pytest.mark.asyncio
+    async def test_restart_measures_old_backlog_from_the_entry_not_process_start(
+        self, tmp_path: Path
+    ):
+        """Codex scenario 1: dashboard restarts with a 3h-old unsynced backlog.
+
+        ``_last_synced_event_ts`` is ``None`` after a restart, so a baseline of
+        ``_started_at`` would report the backlog as seconds old. The panel must
+        show ~3h, because that is how stale the audit sink really is.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        three_h_ago = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+        _make_jsonl(
+            tmp_path / f"audit-{date.today()}.jsonl",
+            [_audit_entry(timestamp=three_h_ago)],
+        )
+        # Fresh process: _started_at == now, nothing ever synced.
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        assert syncer._last_synced_event_ts is None
+
+        syncer._publish_lag()
+
+        lag = self._gauge()
+        assert lag is not None
+        assert 10_795 < lag < 10_810, (
+            f"expected ~10800s (age of the oldest pending entry), gauge reported {lag}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_partially_synced_file_measures_from_first_line_after_cursor(
+        self, tmp_path: Path
+    ):
+        """Codex scenario 2: a long-idle process, then one entry that fails.
+
+        Entry A (5h ago) is already behind the cursor; entry B (2h ago) is
+        pending. The gauge must be B's age (~2h) — not A's age and not the
+        syncer's uptime.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        now = datetime.now(UTC)
+        entry_a = _audit_entry(timestamp=(now - timedelta(hours=5)).isoformat())
+        entry_b = _audit_entry(timestamp=(now - timedelta(hours=2)).isoformat())
+        path = tmp_path / f"audit-{date.today()}.jsonl"
+        _make_jsonl(path, [entry_a, entry_b])
+        # Cursor positioned exactly at the end of A's line.
+        audit_sync._save_cursor(path, len((json.dumps(entry_a) + "\n").encode()))
+
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        # Long-idle process: uptime is 9h, which the old baseline would report.
+        syncer._started_at = now - timedelta(hours=9)
+        assert syncer._pending_bytes() == len((json.dumps(entry_b) + "\n").encode())
+
+        syncer._publish_lag()
+
+        lag = self._gauge()
+        assert lag is not None
+        assert 7_195 < lag < 7_210, (
+            f"expected ~7200s (age of entry B), gauge reported {lag}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_oldest_pending_entry_is_chosen_across_files(self, tmp_path: Path):
+        """Two in-window files with backlog: the older file's first pending
+        line sets the lag, not today's."""
+        from datetime import UTC, datetime, timedelta
+
+        now = datetime.now(UTC)
+        older_day = date.today() - timedelta(days=2)
+        _make_jsonl(
+            tmp_path / f"audit-{older_day}.jsonl",
+            [_audit_entry(timestamp=(now - timedelta(hours=5)).isoformat())],
+        )
+        _make_jsonl(
+            tmp_path / f"audit-{date.today()}.jsonl",
+            [_audit_entry(timestamp=(now - timedelta(hours=1)).isoformat())],
+        )
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+
+        syncer._publish_lag()
+
+        lag = self._gauge()
+        assert lag is not None
+        assert 17_995 < lag < 18_010, (
+            f"expected ~18000s (older file's entry), gauge reported {lag}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_baseline_with_warning_when_line_has_no_timestamp(
+        self, tmp_path: Path, caplog
+    ):
+        """An unusable oldest pending line must not zero the gauge or crash:
+        fall back to the in-memory baseline and say so in the log."""
+        from datetime import UTC, datetime, timedelta
+
+        caplog.set_level(logging.WARNING, logger="kratos.audit_sync")
+        _make_jsonl(
+            tmp_path / f"audit-{date.today()}.jsonl",
+            [_audit_entry(timestamp=None)],
+        )
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        syncer._started_at = datetime.now(UTC) - timedelta(minutes=5)
+
+        syncer._publish_lag()
+
+        lag = self._gauge()
+        assert lag is not None
+        assert 295 < lag < 310, f"expected ~300s from the fallback baseline, got {lag}"
+        assert any(
+            r.message == "audit_sync.lag_baseline_fallback" for r in caplog.records
+        ), [r.message for r in caplog.records]
 
     @pytest.mark.asyncio
     async def test_gauge_is_zero_once_caught_up(self, tmp_path: Path):
