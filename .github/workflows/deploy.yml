@@ -237,15 +237,22 @@ jobs:
             # if/else (not a bare command + $?) so this is safe to capture even
             # if the shell has `set -e` in effect — a bare nonzero exit here
             # must NOT abort the script before we get to classify it below.
-            if docker compose exec -T dashboard python tools/verify_mni_credentials.py; then
+            #
+            # Output is captured too, because an exit code alone is ambiguous:
+            # `docker compose exec` ITSELF exits 1 when the service is not running
+            # (crash-loop, OOM at 256m) or the file is missing — none of which is a
+            # credential verdict. Only the script's own sentinel line turns an
+            # exit 1 into "invalid"; any other non-zero outcome is inconclusive.
+            if mni_out=$(docker compose exec -T dashboard python tools/verify_mni_credentials.py 2>&1); then
               mni_exit=0
             else
               mni_exit=$?
             fi
+            printf '%s\n' "$mni_out"
             if [ "$mni_exit" -eq 0 ]; then
               echo "MNI credentials are valid"
-            elif [ "$mni_exit" -eq 1 ]; then
-              echo "FAIL: MNI rejected the deployed credentials (auth_failed)."
+            elif [ "$mni_exit" -eq 1 ] && printf '%s' "$mni_out" | grep -q "MNI credentials are INVALID"; then
+              echo "FAIL: MNI rejected the deployed credentials (SOAP fault 'Acesso negado')."
               exit 1
             else
               # Containers were already replaced by the previous step — failing
