@@ -144,6 +144,36 @@ class TestImagesInstallFromRequirements:
             )
 
 
+class TestDashboardHealthcheckIsPublic:
+    """The image's own HEALTHCHECK must probe a path the API-key middleware
+    leaves open, or the container can never report healthy in production.
+
+    Sprint 8 put every ``/api/*`` route behind ``X-API-Key``; the Dockerfile
+    kept probing ``/api/status`` and 401-looped. ``docker-compose.yml`` was
+    fixed (461a789) but the bare image was not. This ties the probe to the
+    middleware's *own* public-path lists, so the two cannot drift again.
+    """
+
+    _CURL_URL = re.compile(r"HEALTHCHECK[^\n]*\\\n\s*CMD\s+curl\s+\S+\s+(\S+)")
+
+    def test_dashboard_probe_path_is_exempt_from_api_key(self):
+        import dashboard_api
+
+        body = _strip_comments(_target_body("dashboard"))
+        m = self._CURL_URL.search(body)
+        assert m, "dashboard target has no `HEALTHCHECK ... CMD curl <url>`"
+        path = re.sub(r"^https?://[^/]+", "", m.group(1))
+        public = path in dashboard_api._AUTH_PUBLIC_EXACT or path.startswith(
+            dashboard_api._AUTH_PUBLIC_PREFIXES
+        )
+        assert public, (
+            f"dashboard HEALTHCHECK probes {path!r}, which api_key_middleware "
+            f"gates behind X-API-Key — the container would 401-loop and never "
+            f"turn healthy. Public paths: {dashboard_api._AUTH_PUBLIC_EXACT} "
+            f"+ prefixes {dashboard_api._AUTH_PUBLIC_PREFIXES}"
+        )
+
+
 class TestDashboardExclusionLosesNoPin:
     def test_only_playwright_is_excluded(self):
         """The dashboard drops playwright (139 MB, never imported there) and
