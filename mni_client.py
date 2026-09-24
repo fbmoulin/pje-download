@@ -64,11 +64,17 @@ _MNI_VERIFY_TEST_PROCESSO = "0000000-00.0000.8.08.0000"
 # server authenticated the request — the probed process merely doesn't
 # exist, which is expected and desired.
 _MNI_VERIFY_VALID_STATUSES = frozenset({"success", "mni_error", "not_found"})
-# Status value that means the server explicitly rejected our credentials.
-# Reuses consultar_processo's OWN classification — it already folds both
-# "Acesso negado/Unauthorized" SOAP faults AND "403 Forbidden" responses
-# into "auth_failed"; verify_credentials does not re-derive this.
+# Status value that means the server explicitly rejected our credentials —
+# a SOAP fault "Acesso negado"/"Unauthorized". Reuses consultar_processo's OWN
+# classification; verify_credentials does not re-derive this.
 _MNI_VERIFY_INVALID_STATUSES = frozenset({"auth_failed"})
+# A bare HTTP 403 ("blocked") is deliberately NOT here. The MNI never answers
+# bad credentials with 403; CloudFront's geo-restriction does (see the
+# classifier branch in consultar_processo). Calling that "invalid" would fail
+# a deploy with "credentials rejected" during a geo incident and send the
+# operator after the wrong cause — so the probe reports it as inconclusive,
+# with the likely cause named.
+_MNI_VERIFY_BLOCKED_STATUSES = frozenset({"blocked"})
 
 
 # ─────────────────────────────────────────────
@@ -365,7 +371,15 @@ class MNIClient:
                     processo=numero_processo,
                     tribunal=self.tribunal,
                 )
-                _status = "auth_failed"
+                # NOT "auth_failed". A bare HTTP 403 arrives before any SOAP
+                # envelope — the MNI rejects credentials with a SOAP fault
+                # ("Acesso negado", branch above), never with 403. What does
+                # answer 403 is AWS CloudFront's country geo-restriction in
+                # front of PJe/TJES (documented incident, 2026-07-18: a non-BR
+                # IP gets 403 from POP BOS50). The user_error below already
+                # said "bloqueado pelo servidor"; the label now agrees with it,
+                # so verify_credentials() can refuse to call this "invalid".
+                _status = "blocked"
                 user_error = f"MNI indisponível: acesso bloqueado pelo servidor (403 Forbidden) — tribunal={self.tribunal}"
             else:
                 log.error(
@@ -943,6 +957,14 @@ class MNIClient:
         if status in _MNI_VERIFY_INVALID_STATUSES:
             outcome = "invalid"
             reason = result.error or "MNI rejected the credentials"
+        elif status in _MNI_VERIFY_BLOCKED_STATUSES:
+            outcome = "inconclusive"
+            reason = (
+                f"{result.error or 'HTTP 403 before any SOAP reply'} — this is "
+                "not a credential verdict: the MNI rejects credentials with a "
+                "SOAP fault, while a bare 403 is what CloudFront's geo-restriction "
+                "returns to a non-BR IP. Check the egress IP/region first."
+            )
         elif status in _MNI_VERIFY_VALID_STATUSES:
             outcome = "valid"
             reason = (

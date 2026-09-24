@@ -57,9 +57,11 @@ def _make_client():
 
 
 @pytest.mark.asyncio
-async def test_consultar_processo_403_classified_as_auth_failed():
-    """HTTP 403 from the SOAP endpoint should be classified as auth_failed,
-    not 'error', and the error message should not expose the raw URL."""
+async def test_consultar_processo_403_classified_as_blocked():
+    """HTTP 403 from the SOAP endpoint is classified as `blocked` — not
+    `auth_failed` (the MNI rejects credentials with a SOAP fault, never 403;
+    a bare 403 is CloudFront geo-restriction) and not `error` — and the
+    message must not expose the raw URL."""
     import requests.exceptions
 
     client = _make_client()
@@ -73,6 +75,7 @@ async def test_consultar_processo_403_classified_as_auth_failed():
         result = await client.consultar_processo("5000001-00.2024.8.08.0001")
 
     assert result.success is False
+    assert result.status == "blocked"
     assert "403" not in result.error or "Forbidden" in result.error
     # Must not expose raw URL
     assert "pje.tjes.jus.br" not in result.error
@@ -83,14 +86,15 @@ async def test_consultar_processo_403_classified_as_auth_failed():
 
 
 @pytest.mark.asyncio
-async def test_consultar_processo_forbidden_string_classified_as_auth_failed():
-    """'Forbidden' in error message (non-requests exception) also maps to auth_failed."""
+async def test_consultar_processo_forbidden_string_classified_as_blocked():
+    """'Forbidden' in error message (non-requests exception) also maps to `blocked`."""
     client = _make_client()
 
     with patch.object(client, "_get_client", side_effect=Exception("Forbidden access")):
         result = await client.consultar_processo("5000002-00.2024.8.08.0001")
 
     assert result.success is False
+    assert result.status == "blocked"
     assert "TJES" in result.error
 
 
@@ -1021,16 +1025,26 @@ class TestVerifyCredentials:
         assert outcome["reason"]
 
     @pytest.mark.asyncio
-    async def test_403_forbidden_is_invalid(self):
-        """403/Forbidden also folds into auth_failed in consultar_processo —
-        verify_credentials must reuse that, not treat it separately."""
+    async def test_403_forbidden_is_inconclusive_not_invalid(self):
+        """A bare HTTP 403 is NOT a credential verdict.
+
+        The MNI rejects credentials with a SOAP fault ("Acesso negado"); a 403
+        arrives before any SOAP envelope, and the documented source of it in
+        this deployment is CloudFront's geo-restriction (2026-07-18 incident:
+        non-BR IP -> 403 from POP BOS50). Reporting it as "invalid" would fail
+        a deploy with "credentials rejected" during a geo incident and send
+        the operator after the wrong cause. The probe must say inconclusive
+        and name the likely cause.
+        """
         client = _make_client()
         with patch.object(
             client, "_get_client", side_effect=Exception("403 Forbidden")
         ):
             outcome = await client.verify_credentials()
 
-        assert outcome["result"] == "invalid"
+        assert outcome["result"] == "inconclusive"
+        assert "not a credential verdict" in outcome["reason"]
+        assert "geo" in outcome["reason"]
 
     @pytest.mark.asyncio
     async def test_timeout_is_inconclusive(self):
