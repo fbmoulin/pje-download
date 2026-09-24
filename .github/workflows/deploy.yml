@@ -206,7 +206,15 @@ jobs:
             test "${after_dead:-$before_dead}" -gt "$before_dead"
             echo "Deploy OK"
 
-      - name: Validate MNI credentials
+      # Was "Validate MNI credentials", but the old check
+      # (`python -c "from mni_client import MNIClient; MNIClient()"`) only
+      # constructs the client — a TRIBUNAL_ENDPOINTS lookup + two strings
+      # stored, zeep is lazy. Measured: it exited 0 with EMPTY credentials
+      # AND with WRONG credentials; it only ever caught an import error.
+      # Credentials are transmitted in exactly one place in the whole
+      # codebase (`_call_consultar_processo`), which that check never
+      # reached. See docs/reports/2026-09-20-full-analysis.md section F3.
+      - name: Smoke-test MNI credentials (non-blocking on network blips)
         uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -214,10 +222,25 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             cd /opt/pje-download
-            echo "Validating MNI credentials on VPS..."
-            if docker compose exec -T dashboard python -c "from mni_client import MNIClient; MNIClient()"; then
-              echo "MNI credentials are valid"
+            echo "Smoke-testing MNI credentials on VPS (one real consultarProcesso call)..."
+            # if/else (not a bare command + $?) so this is safe to capture even
+            # if the shell has `set -e` in effect — a bare nonzero exit here
+            # must NOT abort the script before we get to classify it below.
+            if docker compose exec -T dashboard python tools/verify_mni_credentials.py; then
+              mni_exit=0
             else
-              echo "MNI validation failed"
+              mni_exit=$?
+            fi
+            if [ "$mni_exit" -eq 0 ]; then
+              echo "MNI credentials are valid"
+            elif [ "$mni_exit" -eq 1 ]; then
+              echo "FAIL: MNI rejected the deployed credentials (auth_failed)."
               exit 1
+            else
+              # Containers were already replaced by the previous step — failing
+              # a deploy here on a transient timeout/transport error cannot roll
+              # anything back, it would only paint a good deploy red. Warn loudly
+              # and let the deploy pass; the first real run's log is the thing to
+              # check (see report F3 in the commit that added this step).
+              echo "::warning::MNI credential check was INCONCLUSIVE (exit $mni_exit) — not failing the deploy. Check the log above for the reason (timeout/transport error/unexpected fault)."
             fi

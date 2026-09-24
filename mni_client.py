@@ -54,6 +54,22 @@ TRIBUNAL_ENDPOINTS: dict[str, str] = {
 from config import MNI_USERNAME, MNI_PASSWORD, MNI_TRIBUNAL, MNI_TIMEOUT, MNI_PROXY
 from config import sanitize_filename as _sanitize_filename
 
+# Syntactically valid CNJ number (matches config.CNJ_PATTERN) that is
+# deliberately non-existent — used only by verify_credentials() to probe
+# authentication without touching a real case number. Do NOT replace with a
+# real CNJ: this repo redacts real case numbers everywhere else.
+_MNI_VERIFY_TEST_PROCESSO = "0000000-00.0000.8.08.0000"
+
+# consultar_processo() status values (see MNIResult.status) that mean the
+# server authenticated the request — the probed process merely doesn't
+# exist, which is expected and desired.
+_MNI_VERIFY_VALID_STATUSES = frozenset({"success", "mni_error", "not_found"})
+# Status value that means the server explicitly rejected our credentials.
+# Reuses consultar_processo's OWN classification — it already folds both
+# "Acesso negado/Unauthorized" SOAP faults AND "403 Forbidden" responses
+# into "auth_failed"; verify_credentials does not re-derive this.
+_MNI_VERIFY_INVALID_STATUSES = frozenset({"auth_failed"})
+
 
 # ─────────────────────────────────────────────
 # DATA CLASSES
@@ -104,6 +120,12 @@ class MNIResult:
     processo: MNIProcesso | None = None
     error: str | None = None
     raw_response: Any = None
+    # Internal classification computed by consultar_processo (e.g. "success",
+    # "mni_error", "not_found", "auth_failed", "timeout", "parse_error",
+    # "error"). Additive field — existing callers that only read `.success`/
+    # `.error`/`.processo` are unaffected. Exposed so verify_credentials()
+    # can reuse this SAME classification instead of inventing a parallel one.
+    status: str | None = None
 
 
 # ─────────────────────────────────────────────
@@ -265,7 +287,12 @@ class MNIClient:
                 metrics.mni_requests_total.labels(
                     operation=_op, status="mni_error"
                 ).inc()
-                return MNIResult(success=False, error=mensagem, raw_response=result)
+                return MNIResult(
+                    success=False,
+                    error=mensagem,
+                    raw_response=result,
+                    status="mni_error",
+                )
 
             try:
                 processo = self._parse_processo(result, numero_processo)
@@ -280,6 +307,7 @@ class MNIClient:
                     success=False,
                     error=f"Erro ao parsear resposta MNI: {parse_exc}",
                     raw_response=result,
+                    status="parse_error",
                 )
 
             log.info(
@@ -292,7 +320,12 @@ class MNIClient:
                 time.monotonic() - t0
             )
             metrics.mni_requests_total.labels(operation=_op, status="success").inc()
-            return MNIResult(success=True, processo=processo, raw_response=result)
+            return MNIResult(
+                success=True,
+                processo=processo,
+                raw_response=result,
+                status="success",
+            )
 
         except asyncio.TimeoutError:
             log.error(
@@ -304,7 +337,11 @@ class MNIClient:
                 time.monotonic() - t0
             )
             metrics.mni_requests_total.labels(operation=_op, status="timeout").inc()
-            return MNIResult(success=False, error=f"SOAP timeout ({self.timeout}s)")
+            return MNIResult(
+                success=False,
+                error=f"SOAP timeout ({self.timeout}s)",
+                status="timeout",
+            )
 
         except Exception as exc:
             error_msg = str(exc)
@@ -343,7 +380,7 @@ class MNIClient:
                 time.monotonic() - t0
             )
             metrics.mni_requests_total.labels(operation=_op, status=_status).inc()
-            return MNIResult(success=False, error=user_error)
+            return MNIResult(success=False, error=user_error, status=_status)
 
     def _call_consultar_processo(
         self,
@@ -867,6 +904,63 @@ class MNIClient:
                 "wsdl": self.wsdl_url,
                 "error": str(exc),
             }
+
+    # ──────────────────────
+    # VALIDAÇÃO DE CREDENCIAIS
+    # ──────────────────────
+
+    async def verify_credentials(self) -> dict:
+        """
+        Issues exactly ONE `consultarProcesso`-style SOAP call, using a
+        syntactically valid but deliberately non-existent CNJ number, and
+        classifies the outcome using `consultar_processo`'s OWN status
+        classification (see `MNIResult.status`) — never a parallel one.
+
+        Unlike `health_check()`, which only fetches the WSDL and never sends
+        `idConsultante`/`senhaConsultante`, this actually exercises the one
+        code path that transmits credentials (`_call_consultar_processo`).
+
+        Returns:
+            {"result": "valid" | "invalid" | "inconclusive",
+             "reason": str, "latency_ms": float}
+
+        Never logs or returns the password: `consultar_processo` never puts
+        it into `MNIResult.error`, and this method never touches
+        `self.password` directly.
+        """
+        t0 = time.monotonic()
+        result = await self.consultar_processo(
+            _MNI_VERIFY_TEST_PROCESSO,
+            incluir_documentos=False,
+            incluir_cabecalho=False,
+            incluir_movimentacoes=False,
+        )
+        latency_ms = round((time.monotonic() - t0) * 1000, 1)
+        # status is always set by consultar_processo's return points; the
+        # fallback only guards against a future code path that forgets to.
+        status = result.status or ("success" if result.success else "error")
+
+        if status in _MNI_VERIFY_INVALID_STATUSES:
+            outcome = "invalid"
+            reason = result.error or "MNI rejected the credentials"
+        elif status in _MNI_VERIFY_VALID_STATUSES:
+            outcome = "valid"
+            reason = (
+                result.error
+                or "MNI authenticated the request (process not found, as expected)"
+            )
+        else:
+            outcome = "inconclusive"
+            reason = result.error or f"unclassified consultar_processo status: {status}"
+
+        log.info(
+            "mni.verify_credentials.result",
+            tribunal=self.tribunal,
+            result=outcome,
+            status=status,
+            latency_ms=latency_ms,
+        )
+        return {"result": outcome, "reason": reason, "latency_ms": latency_ms}
 
 
 # ─────────────────────────────────────────────

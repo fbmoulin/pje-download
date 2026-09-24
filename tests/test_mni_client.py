@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -950,3 +951,270 @@ class TestSoapTimeoutRetry:
             f"Got: success={result.success!r}, error={result.error!r}"
         )
         assert call_count == 3, f"Expected exactly 3 SOAP attempts, got {call_count}"
+
+
+# ---------------------------------------------------------------------------
+# verify_credentials() — F3: post-deploy MNI credential smoke test
+#
+# These tests reuse consultar_processo's OWN classification (MNIResult.status)
+# via the same mocking seams as TestConsultarProcesso above — no parallel
+# classifier is introduced in production code, so none is exercised here
+# either.
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyCredentials:
+    @pytest.mark.asyncio
+    async def test_not_found_reply_is_valid(self):
+        """A 'Processo não encontrado' exception (status=not_found) means the
+        server authenticated us — the probed CNJ simply doesn't exist."""
+        client = _make_client()
+        with patch.object(
+            client, "_get_client", side_effect=Exception("Processo não encontrado")
+        ):
+            outcome = await client.verify_credentials()
+
+        assert outcome["result"] == "valid"
+        assert "latency_ms" in outcome
+        assert isinstance(outcome["latency_ms"], float)
+
+    @pytest.mark.asyncio
+    async def test_mni_error_reply_is_valid(self):
+        """sucesso=False business reply (no exception) also means the server
+        authenticated the request — status=mni_error is a 'valid' shape."""
+        client = _make_client()
+        soap_resp = _make_soap_response(sucesso=False, mensagem="Processo inexistente")
+
+        with (
+            patch.object(client, "_get_client", return_value=MagicMock()),
+            patch.object(client, "_call_consultar_processo", return_value=soap_resp),
+        ):
+            outcome = await client.verify_credentials()
+
+        assert outcome["result"] == "valid"
+
+    @pytest.mark.asyncio
+    async def test_success_reply_is_valid(self):
+        """The extremely unlikely case where the dummy CNJ resolves is still
+        a 'valid' credential signal."""
+        client = _make_client()
+        soap_resp = _make_soap_response(sucesso=True)
+
+        with (
+            patch.object(client, "_get_client", return_value=MagicMock()),
+            patch.object(client, "_call_consultar_processo", return_value=soap_resp),
+        ):
+            outcome = await client.verify_credentials()
+
+        assert outcome["result"] == "valid"
+
+    @pytest.mark.asyncio
+    async def test_acesso_negado_is_invalid(self):
+        """'Acesso negado' exception (status=auth_failed) → invalid."""
+        client = _make_client()
+        with patch.object(
+            client, "_get_client", side_effect=Exception("Acesso negado")
+        ):
+            outcome = await client.verify_credentials()
+
+        assert outcome["result"] == "invalid"
+        assert outcome["reason"]
+
+    @pytest.mark.asyncio
+    async def test_403_forbidden_is_invalid(self):
+        """403/Forbidden also folds into auth_failed in consultar_processo —
+        verify_credentials must reuse that, not treat it separately."""
+        client = _make_client()
+        with patch.object(
+            client, "_get_client", side_effect=Exception("403 Forbidden")
+        ):
+            outcome = await client.verify_credentials()
+
+        assert outcome["result"] == "invalid"
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_inconclusive(self):
+        client = _make_client()
+        with (
+            patch.object(client, "_get_client", return_value=MagicMock()),
+            patch.object(
+                client, "_call_consultar_processo", side_effect=asyncio.TimeoutError()
+            ),
+        ):
+            outcome = await client.verify_credentials()
+
+        assert outcome["result"] == "inconclusive"
+        assert "timeout" in outcome["reason"].lower()
+
+    @pytest.mark.asyncio
+    async def test_generic_transport_error_is_inconclusive(self):
+        """An unrecognized exception message (e.g. connection refused) must
+        NOT be classified as invalid — that would fail a deploy on a network
+        blip. It must fall through to consultar_processo's generic 'error'
+        status, which verify_credentials treats as inconclusive."""
+        client = _make_client()
+        with patch.object(
+            client, "_get_client", side_effect=Exception("Connection refused")
+        ):
+            outcome = await client.verify_credentials()
+
+        assert outcome["result"] == "inconclusive"
+
+    @pytest.mark.asyncio
+    async def test_unexpected_parse_fault_is_inconclusive(self):
+        """A malformed-but-authenticated SOAP reply (parse_error) is an
+        unexpected fault, not proof of bad credentials."""
+        client = _make_client()
+        soap_resp = _make_soap_response(sucesso=True)
+
+        with (
+            patch.object(client, "_get_client", return_value=MagicMock()),
+            patch.object(client, "_call_consultar_processo", return_value=soap_resp),
+            patch.object(client, "_parse_processo", side_effect=Exception("boom")),
+        ):
+            outcome = await client.verify_credentials()
+
+        assert outcome["result"] == "inconclusive"
+
+    @pytest.mark.asyncio
+    async def test_password_never_in_returned_dict(self):
+        client = _make_client()
+        client.password = "SUPER_SECRET_PW"
+        with patch.object(
+            client, "_get_client", side_effect=Exception("Acesso negado")
+        ):
+            outcome = await client.verify_credentials()
+
+        assert "SUPER_SECRET_PW" not in json.dumps(outcome)
+
+    @pytest.mark.asyncio
+    async def test_password_never_logged(self, monkeypatch):
+        """structlog output in this codebase is NOT bridged to stdlib
+        logging (no structlog.configure() at module scope in mni_client.py),
+        so `caplog` cannot observe it here — verified directly: a bare
+        `structlog.get_logger().info(...)` in this environment produces zero
+        `caplog.records`. Spy on the module logger instead."""
+        client = _make_client()
+        client.password = "SUPER_SECRET_PW"
+        spy_log = MagicMock()
+        monkeypatch.setattr("mni_client.log", spy_log)
+
+        with patch.object(
+            client, "_get_client", side_effect=Exception("Acesso negado")
+        ):
+            await client.verify_credentials()
+
+        for call in spy_log.mock_calls:
+            assert "SUPER_SECRET_PW" not in str(call)
+
+    @pytest.mark.asyncio
+    async def test_uses_syntactically_valid_but_nonexistent_cnj(self):
+        """The probe number must match config.CNJ_PATTERN (so the tribunal
+        doesn't reject it as malformed input) but must not be a real case
+        number — this repo redacts real CNJs everywhere."""
+        import config
+        import mni_client as _mni_client_mod
+
+        assert config.is_valid_processo(_mni_client_mod._MNI_VERIFY_TEST_PROCESSO)
+
+        client = _make_client()
+        with (
+            patch.object(client, "_get_client", return_value=MagicMock()),
+            patch.object(
+                client, "_call_consultar_processo", return_value=_make_soap_response()
+            ) as mock_call,
+        ):
+            await client.verify_credentials()
+
+        # _call_consultar_processo(client, numero_processo, incluir_documentos,
+        # incluir_cabecalho, incluir_movimentacoes, documento_ids) — index 1
+        # is the CNJ number.
+        called_numero = mock_call.call_args[0][1]
+        assert called_numero == _mni_client_mod._MNI_VERIFY_TEST_PROCESSO
+
+
+# ---------------------------------------------------------------------------
+# tools/verify_mni_credentials.py — CLI exit-code mapping
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyMniCredentialsCli:
+    def _fake_client(self, outcome: dict, tribunal: str = "TJES"):
+        fake = MagicMock()
+        fake.tribunal = tribunal
+        fake.verify_credentials = AsyncMock(return_value=outcome)
+        return fake
+
+    def test_exit_0_on_valid(self, capsys):
+        from tools.verify_mni_credentials import main
+
+        fake = self._fake_client(
+            {"result": "valid", "reason": "ok", "latency_ms": 12.3}
+        )
+        with (
+            patch("mni_client.MNIClient", return_value=fake),
+            patch("config.load_env"),
+        ):
+            code = main()
+
+        assert code == 0
+        assert "VALID" in capsys.readouterr().out
+
+    def test_exit_1_on_invalid(self, capsys):
+        from tools.verify_mni_credentials import main
+
+        fake = self._fake_client(
+            {"result": "invalid", "reason": "auth rejected", "latency_ms": 12.3}
+        )
+        with (
+            patch("mni_client.MNIClient", return_value=fake),
+            patch("config.load_env"),
+        ):
+            code = main()
+
+        assert code == 1
+        assert "INVALID" in capsys.readouterr().out
+
+    def test_exit_2_on_inconclusive(self, capsys):
+        from tools.verify_mni_credentials import main
+
+        fake = self._fake_client(
+            {"result": "inconclusive", "reason": "timeout", "latency_ms": 12.3}
+        )
+        with (
+            patch("mni_client.MNIClient", return_value=fake),
+            patch("config.load_env"),
+        ):
+            code = main()
+
+        assert code == 2
+        assert "INCONCLUSIVE" in capsys.readouterr().out
+
+    def test_exit_2_on_construction_error(self, capsys):
+        """An unsupported MNI_TRIBUNAL (or any construction failure) must
+        not crash the deploy step — it maps to inconclusive, not invalid."""
+        from tools.verify_mni_credentials import main
+
+        with (
+            patch("mni_client.MNIClient", side_effect=ValueError("bad tribunal")),
+            patch("config.load_env"),
+        ):
+            code = main()
+
+        assert code == 2
+        assert "inconclusive" in capsys.readouterr().out.lower()
+
+    def test_exit_2_on_unexpected_exception_from_verify(self, capsys):
+        from tools.verify_mni_credentials import main
+
+        fake = MagicMock()
+        fake.tribunal = "TJES"
+        fake.verify_credentials = AsyncMock(side_effect=RuntimeError("boom"))
+        with (
+            patch("mni_client.MNIClient", return_value=fake),
+            patch("config.load_env"),
+        ):
+            code = main()
+
+        assert code == 2
+        assert "inconclusive" in capsys.readouterr().out.lower()
