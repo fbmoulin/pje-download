@@ -1393,6 +1393,64 @@ class TestDocumentSavedAudit:
         assert entry.processo_numero == "5000006-00.2024.8.08.0001"
 
 
+class TestAuditTribunal:
+    """Code-review Finding 3: the worker's audit rows must agree with
+    `mni_client._save_document`'s (`self.tribunal`, uppercased in
+    `MNIClient.__init__`) instead of re-implementing the env lookup without
+    `.upper()` — a lowercase `MNI_TRIBUNAL=tjes` used to make `mni_soap` rows
+    say "TJES" while this worker's `pje_api`/`pje_browser` rows said "tjes",
+    breaking `GROUP BY tribunal` in the audit sink.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_mni_client_uses_uppercased_env_tribunal(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("MNI_TRIBUNAL", "tjes")
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.mni_client = None
+        response = AsyncMock()
+        response.status = 200
+        response.body = AsyncMock(return_value=b"pdf-bytes")
+        worker.page = AsyncMock()
+        worker.page.request.get = AsyncMock(return_value=response)
+
+        with patch("audit.log_access") as mock_audit:
+            result = await worker._download_document_api(
+                {"id": "d7", "nome": "sentenca.pdf"},
+                tmp_path,
+                "5000007-00.2024.8.08.0001",
+            )
+
+        assert result is not None
+        entry = mock_audit.call_args[0][0]
+        assert entry.tribunal == "TJES"
+
+    @pytest.mark.asyncio
+    async def test_mni_client_tribunal_is_authoritative(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MNI_TRIBUNAL", "tjes")  # deliberately disagrees
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.mni_client = MagicMock(tribunal="TJBA")
+        response = AsyncMock()
+        response.status = 200
+        response.body = AsyncMock(return_value=b"pdf-bytes")
+        worker.page = AsyncMock()
+        worker.page.request.get = AsyncMock(return_value=response)
+
+        with patch("audit.log_access") as mock_audit:
+            result = await worker._download_document_api(
+                {"id": "d8", "nome": "sentenca.pdf"},
+                tmp_path,
+                "5000008-00.2024.8.08.0001",
+            )
+
+        assert result is not None
+        entry = mock_audit.call_args[0][0]
+        assert entry.tribunal == "TJBA"
+
+
 class TestMniOptimization:
     @pytest.mark.asyncio
     async def test_filtered_types_do_not_trigger_annex_tracking(self, tmp_path):
