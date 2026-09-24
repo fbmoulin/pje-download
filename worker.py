@@ -32,6 +32,7 @@ import redis.asyncio as redis
 import structlog
 from playwright.async_api import BrowserContext, Page, async_playwright
 
+import audit
 import metrics
 from async_retry import AsyncRetry
 from file_utils import merge_file_lists, total_bytes
@@ -56,6 +57,7 @@ from config import (
     HEALTH_BIND_HOST,
     CONCURRENT_DOWNLOADS,
     MNI_ENABLED,
+    MNI_TRIBUNAL,
     MNI_HEALTH_CACHE_TTL_SECS,
     PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS,
     PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS,
@@ -76,6 +78,16 @@ DEAD_LETTER_QUEUE = "kratos:pje:dead-letter"
 def _unique_filename(directory: Path, filename: str) -> str:
     """Return a non-colliding filename in directory."""
     return unique_path(directory / filename).name
+
+
+def _current_tribunal() -> str:
+    """Read MNI_TRIBUNAL at call time, not the value `config` captured at
+    import. See CLAUDE.md's "Env Loading (critical gotcha)": `config.py`
+    constants may be stale if `.env` was loaded after this module was first
+    imported (e.g. under `importlib.reload` in tests)."""
+    import os
+
+    return os.getenv("MNI_TRIBUNAL", MNI_TRIBUNAL)
 
 
 # _merge_downloaded_files moved to file_utils.merge_file_lists (Sprint 2 Q2).
@@ -1010,7 +1022,9 @@ class PJeSessionWorker:
 
                 total_docs = len(filtered_docs)
                 for doc in filtered_docs:
-                    file_info = await self._download_document_api(doc, output_dir)
+                    file_info = await self._download_document_api(
+                        doc, output_dir, numero_processo
+                    )
                     if file_info:
                         files.append(file_info)
                         local_bytes += int(file_info.get("tamanhoBytes", 0) or 0)
@@ -1033,10 +1047,17 @@ class PJeSessionWorker:
             )
         return None
 
-    async def _download_document_api(self, doc: dict, output_dir: Path) -> dict | None:
-        """Download de documento individual via API REST do PJe."""
+    async def _download_document_api(
+        self, doc: dict, output_dir: Path, numero_processo: str
+    ) -> dict | None:
+        """Download de documento individual via API REST do PJe.
+
+        F6: audits every save (CNJ 615/2025) — `audit.log_access` never
+        raises (it swallows and logs internally; see `audit.py`), so this
+        call cannot change any download outcome below.
+        """
+        doc_id = doc.get("id")
         try:
-            doc_id = doc.get("id")
             response = await self.page.request.get(
                 f"{PJE_BASE_URL}/api/documentos/{doc_id}/download",
             )
@@ -1047,6 +1068,20 @@ class PJeSessionWorker:
                 content = await response.body()
                 dest.write_bytes(content)
                 checksum = hashlib.sha256(content).hexdigest()
+                audit.log_access(
+                    audit.AuditEntry(
+                        event_type="document_saved",
+                        processo_numero=numero_processo,
+                        documento_id=str(doc_id) if doc_id is not None else None,
+                        documento_tipo=doc.get("tipo", "pdf"),
+                        documento_nome=filename,
+                        fonte="pje_api",
+                        tribunal=_current_tribunal(),
+                        tamanho_bytes=len(content),
+                        checksum_sha256=checksum,
+                        status="success",
+                    )
+                )
                 return {
                     "nome": filename,
                     "tipo": doc.get("tipo", "pdf"),
@@ -1055,10 +1090,21 @@ class PJeSessionWorker:
                     "checksum": checksum,
                     "fonte": "api_rest",
                 }
-        except Exception as exc:
-            log.warning(
-                "pje.document_download_failed", doc_id=doc.get("id"), error=str(exc)
+        except OSError as exc:
+            log.warning("pje.document_download_failed", doc_id=doc_id, error=str(exc))
+            audit.log_access(
+                audit.AuditEntry(
+                    event_type="document_saved",
+                    processo_numero=numero_processo,
+                    documento_id=str(doc_id) if doc_id is not None else None,
+                    fonte="pje_api",
+                    tribunal=_current_tribunal(),
+                    status="error",
+                    erro=str(exc),
+                )
             )
+        except Exception as exc:
+            log.warning("pje.document_download_failed", doc_id=doc_id, error=str(exc))
         return None
 
     # ──────────────────────
@@ -1220,7 +1266,20 @@ class PJeSessionWorker:
                 filename = _unique_filename(output_dir, raw_name)
                 dest = output_dir / filename
 
-                await download.save_as(str(dest))
+                try:
+                    await download.save_as(str(dest))
+                except OSError as os_exc:
+                    audit.log_access(
+                        audit.AuditEntry(
+                            event_type="document_saved",
+                            processo_numero=numero_processo,
+                            fonte="pje_browser",
+                            tribunal=_current_tribunal(),
+                            status="error",
+                            erro=str(os_exc),
+                        )
+                    )
+                    raise
                 checksum, size = sha256_file(dest)
 
                 log.info(
@@ -1231,6 +1290,19 @@ class PJeSessionWorker:
                 )
 
                 self.docs_downloaded_count += 1
+                audit.log_access(
+                    audit.AuditEntry(
+                        event_type="document_saved",
+                        processo_numero=numero_processo,
+                        documento_tipo="completo",
+                        documento_nome=filename,
+                        fonte="pje_browser",
+                        tribunal=_current_tribunal(),
+                        tamanho_bytes=size,
+                        checksum_sha256=checksum,
+                        status="success",
+                    )
+                )
 
                 return [
                     {
@@ -1273,7 +1345,20 @@ class PJeSessionWorker:
                             )
                             filename2 = _unique_filename(output_dir, raw_name2)
                             dest2 = output_dir / filename2
-                            await download2.save_as(str(dest2))
+                            try:
+                                await download2.save_as(str(dest2))
+                            except OSError as os_exc2:
+                                audit.log_access(
+                                    audit.AuditEntry(
+                                        event_type="document_saved",
+                                        processo_numero=numero_processo,
+                                        fonte="pje_browser",
+                                        tribunal=_current_tribunal(),
+                                        status="error",
+                                        erro=str(os_exc2),
+                                    )
+                                )
+                                raise
                             checksum2, size2 = sha256_file(dest2)
 
                             log.info(
@@ -1282,6 +1367,19 @@ class PJeSessionWorker:
                                 size=size2,
                             )
                             self.docs_downloaded_count += 1
+                            audit.log_access(
+                                audit.AuditEntry(
+                                    event_type="document_saved",
+                                    processo_numero=numero_processo,
+                                    documento_tipo="completo",
+                                    documento_nome=filename2,
+                                    fonte="pje_browser",
+                                    tribunal=_current_tribunal(),
+                                    tamanho_bytes=size2,
+                                    checksum_sha256=checksum2,
+                                    status="success",
+                                )
+                            )
                             return [
                                 {
                                     "nome": filename2,
@@ -1361,6 +1459,7 @@ class PJeSessionWorker:
         if not hrefs:
             # Fallback: sequential click-based download
             return await self._download_docs_sequential(
+                numero_processo,
                 doc_links,
                 output_dir,
                 progress_cb=progress_cb,
@@ -1402,6 +1501,19 @@ class PJeSessionWorker:
                             "checksum": checksum,
                             "fonte": "browser_individual",
                         }
+                        audit.log_access(
+                            audit.AuditEntry(
+                                event_type="document_saved",
+                                processo_numero=numero_processo,
+                                documento_tipo="pdf",
+                                documento_nome=dest.name,
+                                fonte="pje_browser",
+                                tribunal=_current_tribunal(),
+                                tamanho_bytes=size,
+                                checksum_sha256=checksum,
+                                status="success",
+                            )
+                        )
                         if progress_cb is not None:
                             async with progress_lock:
                                 completed += 1
@@ -1415,6 +1527,21 @@ class PJeSessionWorker:
                         return file_info
                     finally:
                         await dl_page.close()
+                except OSError as e:
+                    log.warning(
+                        "pje.browser.individual.doc_failed", index=idx, error=str(e)
+                    )
+                    audit.log_access(
+                        audit.AuditEntry(
+                            event_type="document_saved",
+                            processo_numero=numero_processo,
+                            fonte="pje_browser",
+                            tribunal=_current_tribunal(),
+                            status="error",
+                            erro=str(e),
+                        )
+                    )
+                    return None
                 except Exception as e:
                     log.warning(
                         "pje.browser.individual.doc_failed", index=idx, error=str(e)
@@ -1427,6 +1554,7 @@ class PJeSessionWorker:
 
     async def _download_docs_sequential(
         self,
+        numero_processo: str,
         doc_links: list,
         output_dir: Path,
         progress_cb=None,
@@ -1461,6 +1589,19 @@ class PJeSessionWorker:
                         "fonte": "browser_individual",
                     }
                 )
+                audit.log_access(
+                    audit.AuditEntry(
+                        event_type="document_saved",
+                        processo_numero=numero_processo,
+                        documento_tipo="pdf",
+                        documento_nome=dest.name,
+                        fonte="pje_browser",
+                        tribunal=_current_tribunal(),
+                        tamanho_bytes=size,
+                        checksum_sha256=checksum,
+                        status="success",
+                    )
+                )
                 local_bytes += size
                 if progress_cb is not None:
                     await progress_cb(
@@ -1471,6 +1612,19 @@ class PJeSessionWorker:
                     )
                 self.docs_downloaded_count += 1
                 await asyncio.sleep(DOWNLOAD_DELAY_SECS)
+            except OSError as e:
+                log.warning("pje.browser.individual.doc_failed", index=i, error=str(e))
+                audit.log_access(
+                    audit.AuditEntry(
+                        event_type="document_saved",
+                        processo_numero=numero_processo,
+                        fonte="pje_browser",
+                        tribunal=_current_tribunal(),
+                        status="error",
+                        erro=str(e),
+                    )
+                )
+                continue
             except Exception as e:
                 log.warning("pje.browser.individual.doc_failed", index=i, error=str(e))
                 continue

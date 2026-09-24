@@ -1172,6 +1172,7 @@ class TestBrowserFallback:
         progress_cb = AsyncMock()
 
         files = await worker._download_docs_sequential(
+            "5000005-00.2024.8.08.0001",
             [link],
             tmp_path,
             progress_cb=progress_cb,
@@ -1183,6 +1184,213 @@ class TestBrowserFallback:
         assert kwargs["completed"] == 1
         assert kwargs["total"] == 1
         assert kwargs["local_bytes"] == 3
+
+
+class TestDocumentSavedAudit:
+    """F6 — every worker save site must emit a CNJ 615/2025 audit entry.
+
+    Before F6, `worker.py` had zero references to `audit` at all — see
+    docs/reports/2026-09-20-full-analysis.md#F6. These tests exercise the
+    real `_download_document_api` / `_download_docs_sequential` methods
+    (not mocked-out, unlike the fallback-cascade tests above) so the audit
+    call is actually reached.
+    """
+
+    @pytest.mark.asyncio
+    async def test_download_document_api_audits_success(self, tmp_path):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        response = AsyncMock()
+        response.status = 200
+        response.body = AsyncMock(return_value=b"pdf-bytes")
+        worker.page = AsyncMock()
+        worker.page.request.get = AsyncMock(return_value=response)
+
+        with patch("audit.log_access") as mock_audit:
+            result = await worker._download_document_api(
+                {"id": "d1", "nome": "sentenca.pdf", "tipo": "sentenca"},
+                tmp_path,
+                "5000001-00.2024.8.08.0001",
+            )
+
+        assert result is not None
+        mock_audit.assert_called_once()
+        entry = mock_audit.call_args[0][0]
+        assert entry.event_type == "document_saved"
+        assert entry.status == "success"
+        assert entry.fonte == "pje_api"
+        assert entry.processo_numero == "5000001-00.2024.8.08.0001"
+        assert entry.documento_id == "d1"
+        assert entry.documento_tipo == "sentenca"
+        assert entry.tamanho_bytes == len(b"pdf-bytes")
+        assert entry.checksum_sha256 is not None
+
+    @pytest.mark.asyncio
+    async def test_download_document_api_writes_real_audit_jsonl(
+        self, tmp_path, monkeypatch
+    ):
+        """Stronger proof: no mocking of `audit` — read the actual JSON-L file."""
+        import json as _json
+        from datetime import date
+
+        monkeypatch.setenv("AUDIT_LOG_DIR", str(tmp_path / "audit"))
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        response = AsyncMock()
+        response.status = 200
+        response.body = AsyncMock(return_value=b"pdf-bytes")
+        worker.page = AsyncMock()
+        worker.page.request.get = AsyncMock(return_value=response)
+
+        result = await worker._download_document_api(
+            {"id": "d2", "nome": "peticao.pdf", "tipo": "peticao"},
+            tmp_path,
+            "5000002-00.2024.8.08.0001",
+        )
+
+        assert result is not None
+        audit_file = tmp_path / "audit" / f"audit-{date.today()}.jsonl"
+        assert audit_file.exists(), "audit.log_access never wrote a JSON-L line"
+        lines = audit_file.read_text().strip().splitlines()
+        assert len(lines) == 1
+        entry = _json.loads(lines[0])
+        assert entry["event_type"] == "document_saved"
+        assert entry["fonte"] == "pje_api"
+        assert entry["status"] == "success"
+        assert entry["processo_numero"] == "5000002-00.2024.8.08.0001"
+
+    @pytest.mark.asyncio
+    async def test_download_document_api_audits_error_on_oserror(
+        self, tmp_path, monkeypatch
+    ):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        response = AsyncMock()
+        response.status = 200
+        response.body = AsyncMock(return_value=b"pdf-bytes")
+        worker.page = AsyncMock()
+        worker.page.request.get = AsyncMock(return_value=response)
+
+        def _raise_oserror(self, data):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(w.Path, "write_bytes", _raise_oserror)
+
+        with patch("audit.log_access") as mock_audit:
+            result = await worker._download_document_api(
+                {"id": "d3", "nome": "sentenca.pdf"},
+                tmp_path,
+                "5000003-00.2024.8.08.0001",
+            )
+
+        assert result is None
+        mock_audit.assert_called_once()
+        entry = mock_audit.call_args[0][0]
+        assert entry.event_type == "document_saved"
+        assert entry.status == "error"
+        assert entry.fonte == "pje_api"
+        assert entry.erro is not None
+
+    @pytest.mark.asyncio
+    async def test_download_docs_sequential_audits_success(self, tmp_path):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.page = MagicMock()
+        worker._detect_captcha = AsyncMock(return_value=False)
+
+        class DownloadCtx:
+            async def __aenter__(self):
+                class Holder:
+                    value = None
+
+                holder = Holder()
+                download = AsyncMock()
+                download.suggested_filename = "doc.pdf"
+
+                async def save_as(path):
+                    from pathlib import Path as _Path
+
+                    _Path(path).write_bytes(b"abc")
+
+                download.save_as.side_effect = save_as
+
+                async def _value():
+                    return download
+
+                holder.value = _value()
+                return holder
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        worker.page.expect_download = MagicMock(return_value=DownloadCtx())
+        link = AsyncMock()
+
+        with patch("audit.log_access") as mock_audit:
+            files = await worker._download_docs_sequential(
+                "5000005-00.2024.8.08.0001",
+                [link],
+                tmp_path,
+            )
+
+        assert len(files) == 1
+        mock_audit.assert_called_once()
+        entry = mock_audit.call_args[0][0]
+        assert entry.event_type == "document_saved"
+        assert entry.status == "success"
+        assert entry.fonte == "pje_browser"
+        assert entry.processo_numero == "5000005-00.2024.8.08.0001"
+
+    @pytest.mark.asyncio
+    async def test_download_docs_sequential_audits_error_on_oserror(
+        self, tmp_path, monkeypatch
+    ):
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.page = MagicMock()
+        worker._detect_captcha = AsyncMock(return_value=False)
+        monkeypatch.setattr(w.asyncio, "sleep", AsyncMock())
+
+        class DownloadCtx:
+            async def __aenter__(self):
+                class Holder:
+                    value = None
+
+                holder = Holder()
+                download = AsyncMock()
+                download.suggested_filename = "doc.pdf"
+
+                async def save_as(path):
+                    raise OSError("disk full")
+
+                download.save_as.side_effect = save_as
+
+                async def _value():
+                    return download
+
+                holder.value = _value()
+                return holder
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        worker.page.expect_download = MagicMock(return_value=DownloadCtx())
+        link = AsyncMock()
+
+        with patch("audit.log_access") as mock_audit:
+            files = await worker._download_docs_sequential(
+                "5000006-00.2024.8.08.0001",
+                [link],
+                tmp_path,
+            )
+
+        assert files == []
+        mock_audit.assert_called_once()
+        entry = mock_audit.call_args[0][0]
+        assert entry.event_type == "document_saved"
+        assert entry.status == "error"
+        assert entry.fonte == "pje_browser"
+        assert entry.processo_numero == "5000006-00.2024.8.08.0001"
 
 
 class TestMniOptimization:
