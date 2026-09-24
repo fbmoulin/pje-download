@@ -817,12 +817,6 @@ class PJeSessionWorker:
                 if (result := await self._phase_mni(ctx)) is not None:
                     return result
 
-                # F4: MNI didn't fully resolve the process (either it left
-                # anexos pending, or found nothing at all) — a fallback
-                # strategy is about to be needed. This is the only place a
-                # browser gets lazily un-deferred; see _ensure_browser.
-                await self._ensure_browser()
-
             # ── Estratégias 2 e 3 precisam de sessão Playwright ──
             #
             # F7: the operational timeout is about a browser session. In
@@ -842,9 +836,15 @@ class PJeSessionWorker:
             #
             # MNI is the pipeline there; the browser is a helper. So in MNI mode
             # the timeout applies only if a helper browser actually exists, and
-            # then it is closed (not the session file — see _close_browser) so
-            # the partial/unavailable paths below report honestly. With no
-            # browser there is nothing to expire and we fall straight through.
+            # then it is closed (not the session file — see _close_browser). This
+            # MUST run before `_ensure_browser()` below: `_ensure_browser` short-
+            # circuits to True when `self.page`/`self.context` are already set,
+            # so a stale-but-still-open helper would never be replaced. Closing
+            # it here — while keeping the session file — lets `_ensure_browser`
+            # relaunch headlessly from that same file and re-validate against
+            # login.seam, IN THE SAME JOB, right below. With no browser there is
+            # nothing to expire and we fall straight through to that same
+            # relaunch attempt.
             expired = self.is_session_expired()
             if expired and self.mni_client is None:
                 log.warning("pje.download.session_expired", job_id=ctx.job_id)
@@ -858,6 +858,17 @@ class PJeSessionWorker:
                     "closed, session file kept, continuing without it",
                 )
                 await self._close_browser()
+
+            if self.mni_client is not None:
+                # F4: MNI didn't fully resolve the process (either it left
+                # anexos pending, or found nothing at all) — a fallback
+                # strategy is about to be needed. This is the only place a
+                # browser gets lazily un-deferred; see _ensure_browser. Running
+                # this AFTER the F7 block above means a helper that just
+                # expired gets relaunched from the kept session file in this
+                # same call, instead of leaving `page` stuck at `None` for the
+                # rest of the job.
+                await self._ensure_browser()
 
             if ctx.anexos_pendentes and (self.page is None or self.context is None):
                 warning = (

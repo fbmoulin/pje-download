@@ -89,7 +89,13 @@ class TestMniModeExpiredHelperBrowserIsClosedNotFatal:
     ):
         """With F4 a helper browser can exist in MNI mode. Past the operational
         timeout it is closed — but the operator's session file survives, and the
-        processo reports the honest partial result instead of aborting the batch."""
+        processo reports the honest partial result instead of aborting the batch.
+
+        This is the "no relaunch possible" case: `_playwright` is `None` (see
+        `_mni_worker`), so after `_close_browser()` the code review fix's
+        `_ensure_browser()` call short-circuits to `False` without launching
+        anything. The "relaunch succeeds" case — a real `_playwright` handle
+        available — is `TestExpiredHelperIsRelaunchedInTheSameJob` below."""
         w = _load_worker_module()
         worker = _mni_worker(w, tmp_path, uptime_minutes=61)
         session_file = tmp_path / "pje-session.json"
@@ -118,6 +124,71 @@ class TestMniModeExpiredHelperBrowserIsClosedNotFatal:
         assert session_file.exists(), (
             "an operational timeout must not delete the operator's session file"
         )
+
+
+class TestExpiredHelperIsRelaunchedInTheSameJob:
+    @pytest.mark.asyncio
+    async def test_expired_helper_is_relaunched_from_the_kept_session_file_in_the_same_job(
+        self, tmp_path
+    ):
+        """Code-review finding: F7's expiry block used to run AFTER
+        `_ensure_browser()`, so a helper browser that just crossed
+        `SESSION_TIMEOUT_MINUTES` was closed but never relaunched in the same
+        job — the job fell into `partial_success` "sem sessão PJe" even though
+        a fresh headless launch from the kept session file would have worked.
+        With F7 moved above `_ensure_browser()`, the old helper is closed and
+        immediately relaunched, and the job reaches the fallback strategies in
+        this same call."""
+        w = _load_worker_module()
+        worker = _mni_worker(w, tmp_path, uptime_minutes=61)
+        session_file = tmp_path / "pje-session.json"
+        session_file.write_text("{}")
+        w.SESSION_STATE_PATH = session_file
+
+        # The OLD, expired helper — must be closed.
+        old_page, old_context, old_browser = AsyncMock(), AsyncMock(), AsyncMock()
+        worker.page, worker.context, worker._browser = (
+            old_page,
+            old_context,
+            old_browser,
+        )
+        worker.session_valid = worker.fallback_ready = True
+
+        # A working Playwright handle — the relaunch this test is pinning.
+        # Copied from test_worker_lazy_browser.py::TestEnsureBrowserSuccess.
+        worker._detect_captcha = AsyncMock(return_value=False)
+        fake_page = AsyncMock()
+        fake_page.url = "https://pje.tjes.jus.br/pje/Painel/painel_usuario/list.seam"
+        fake_context = AsyncMock()
+        fake_context.new_page = AsyncMock(return_value=fake_page)
+        fake_browser = AsyncMock()
+        fake_browser.new_context = AsyncMock(return_value=fake_context)
+        fake_playwright = MagicMock()
+        fake_playwright.chromium.launch = AsyncMock(return_value=fake_browser)
+        worker._playwright = fake_playwright
+
+        worker._try_mni_download = AsyncMock(
+            return_value=(
+                [{"nome": "principal.pdf", "checksum": "p1", "tamanhoBytes": 10}],
+                1,  # anexos pending -> a fallback is wanted
+            )
+        )
+        worker._try_official_api = AsyncMock(return_value=None)
+        worker._download_via_browser = AsyncMock(return_value=None)
+
+        result = await worker.download_process(dict(_JOB))
+
+        old_page.close.assert_awaited_once()
+        old_context.close.assert_awaited_once()
+        old_browser.close.assert_awaited_once()
+        fake_playwright.chromium.launch.assert_awaited_once()
+        worker._try_official_api.assert_awaited_once()
+        assert not (
+            result["status"] == "partial_success"
+            and "sem sessão" in (result.get("errorMessage") or "")
+        )
+        assert result["status"] not in dashboard_api._FATAL_WORKER_STATUSES
+        assert session_file.exists()
 
 
 class TestBrowserPrimaryModeUnchanged:
