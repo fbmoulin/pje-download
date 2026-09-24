@@ -193,6 +193,10 @@ class PJeSessionWorker:
         self._health_cache: dict | None = None
         self._health_cache_time: float = 0.0
         self._health_runner: Any | None = None
+        # F4: the Playwright handle, stashed by load_session so a browser can
+        # be lazily launched later (see _ensure_browser) when MNI is primary
+        # and strategies 2/3 turn out to be needed. None until load_session runs.
+        self._playwright: Any | None = None
 
     def _acquire_session_lock(self) -> bool:
         """Acquire advisory lock on session state file (prevents multi-instance corruption)."""
@@ -302,6 +306,11 @@ class PJeSessionWorker:
         if self.mni_client is not None:
             # MNI disponível: não iniciar Chromium no boot. Isso evita depender
             # de browser visível quando o caminho principal já resolve o fluxo.
+            # F4: guardamos o handle do Playwright para permitir um lançamento
+            # tardio e headless via _ensure_browser(), quando um fallback
+            # (estratégia 2/3) realmente for necessário — nunca aqui, e nunca
+            # bloqueando em login manual.
+            self._playwright = playwright
             self.session_valid = False
             self.fallback_ready = False
             self.session_started_at = datetime.now(UTC)
@@ -396,6 +405,82 @@ class PJeSessionWorker:
         self.fallback_ready = False
         self.session_started_at = None
         log.info("pje.session.invalidated")
+
+    async def _ensure_browser(self) -> bool:
+        """Lazily un-defer the Playwright browser (F4).
+
+        In MNI mode, `load_session` intentionally never launches Chromium —
+        it just stashes the handle in `self._playwright` (see there). This is
+        the ONLY place that un-defers it, and only when a fallback strategy
+        (2 or 3) is actually about to be needed — never on the hot path of a
+        pure-MNI success, and never blocking on manual login (headless reuse
+        of a session file saved earlier via `/api/session/login` or
+        `python pje_session.py login`).
+
+        Returns True iff `self.page`/`self.context` are usable afterwards.
+        """
+        if self.page is not None and self.context is not None:
+            return True
+
+        if self._playwright is None:
+            log.info("pje.session.lazy_unavailable", reason="no_playwright")
+            return False
+
+        if not SESSION_STATE_PATH.exists():
+            log.info("pje.session.lazy_unavailable", reason="no_session_file")
+            return False
+
+        if not self._acquire_session_lock():
+            log.info("pje.session.lazy_unavailable", reason="lock_held")
+            return False
+
+        try:
+            self._browser = await self._playwright.chromium.launch(headless=True)
+            self.context = await self._browser.new_context(
+                storage_state=str(SESSION_STATE_PATH)
+            )
+            self.page = await self.context.new_page()
+            await self.page.goto(f"{PJE_BASE_URL}/login.seam")
+
+            if await self._detect_captcha() or "login" in self.page.url.lower():
+                # Saved session is dead (expired / logged out / CAPTCHA).
+                # Nothing to recover here without a human — surface it as
+                # unavailable, same as the "no session file" case.
+                log.warning("pje.session.lazy_expired")
+                for resource in (self.page, self.context, self._browser):
+                    if resource:
+                        try:
+                            await resource.close()
+                        except Exception:
+                            pass
+                self.page = None
+                self.context = None
+                self._browser = None
+                self._release_session_lock()
+                self.session_valid = False
+                return False
+
+            self.session_valid = True
+            self.fallback_ready = True
+            self.session_started_at = datetime.now(UTC)
+            log.info("pje.session.lazy_ready")
+            return True
+
+        except Exception as exc:
+            # error_type only — never str(exc). A launch/navigation failure
+            # can echo cookies or storage_state contents (Sprint 9 note).
+            log.warning("pje.session.lazy_failed", error_type=type(exc).__name__)
+            for resource in (self.page, self.context, self._browser):
+                if resource:
+                    try:
+                        await resource.close()
+                    except Exception:
+                        pass
+            self.page = None
+            self.context = None
+            self._browser = None
+            self._release_session_lock()
+            return False
 
     # ──────────────────────
     # DETECÇÃO DE CAPTCHA
@@ -738,6 +823,12 @@ class PJeSessionWorker:
             if self.mni_client is not None:
                 if (result := await self._phase_mni(ctx)) is not None:
                     return result
+
+                # F4: MNI didn't fully resolve the process (either it left
+                # anexos pending, or found nothing at all) — a fallback
+                # strategy is about to be needed. This is the only place a
+                # browser gets lazily un-deferred; see _ensure_browser.
+                await self._ensure_browser()
 
             # ── Estratégias 2 e 3 precisam de sessão Playwright ──
             if ctx.anexos_pendentes and (self.page is None or self.context is None):
