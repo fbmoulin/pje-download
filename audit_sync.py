@@ -482,6 +482,8 @@ class AuditSyncer:
         caller then falls back to its in-memory baseline.
         """
         oldest_allowed = date.today() - timedelta(days=self.catchup_days)
+        saw_partial_tail = False
+        saw_unusable = False
         for path in sorted(self.audit_dir.glob("audit-*.jsonl")):
             file_date = _parse_file_date(path.name)
             if file_date is None or file_date < oldest_allowed:
@@ -498,22 +500,24 @@ class AuditSyncer:
                 continue  # vanished/unreadable between stat and read: next file
             parsed, _consumed, _malformed = _parse_complete_lines(data)
             if not parsed and b"\n" not in data and len(data) < self._LAG_PROBE_BYTES:
-                # The only pending bytes are an unterminated tail: the line
-                # audit.py is writing at this instant. That IS the oldest
-                # pending entry, and it is ~0 s old — so say so. Falling back
-                # to the in-memory baseline here would, right after a restart,
-                # report the age of *process start* (hours), and because the
-                # alert's `for: 2m` is shorter than the 300 s tick, one such
-                # tick fires PjeAuditSyncLagHigh on a healthy system. The
-                # cursor rule agrees: _parse_complete_lines never consumes an
-                # unterminated line, so there is nothing syncable yet.
-                # (A full 64 KiB probe with no newline is not this case — that
-                # is pathological and keeps the warning fallback below.)
+                # This file's only pending bytes are an unterminated tail. Two
+                # causes, same handling: the line audit.py is writing at this
+                # instant (harmless, ~0 s old), or the torn last write of an
+                # old day that nothing will ever terminate (permanent junk). In
+                # BOTH cases nothing syncable lives in THIS file — but a real
+                # backlog may live in a NEWER one, so keep looking rather than
+                # answer "now" from here (review of #47: a torn 09-20 tail hid
+                # 3 h of unsynced 09-21 lines as lag ≈ 0, forever). Only if no
+                # file yields a timestamp does a partial tail mean lag ≈ 0.
+                # The cursor rule agrees: _parse_complete_lines never consumes
+                # an unterminated line. (A full 64 KiB probe with no newline is
+                # not this case — pathological, falls through to the warning.)
                 logger.debug(
                     "audit_sync.lag_partial_line_in_flight",
                     extra={"path": str(path), "offset": offset, "bytes": len(data)},
                 )
-                return datetime.now(UTC)
+                saw_partial_tail = True
+                continue
             reason = "no_complete_line"
             if parsed:
                 ts_raw = parsed[0].get("timestamp")
@@ -523,14 +527,28 @@ class AuditSyncer:
                         return _coerce_utc(datetime.fromisoformat(ts_raw))
                     except (TypeError, ValueError):
                         reason = "unparsable_timestamp"
+            # Unusable pending bytes here (malformed / no timestamp). The next
+            # tick consumes them (cursor advances past malformed lines), so the
+            # honest backlog, if any, is in a later file — keep looking.
             logger.warning(
                 "audit_sync.lag_baseline_fallback",
                 extra={"path": str(path), "offset": offset, "reason": reason},
             )
-            return None
+            saw_unusable = True
+        if saw_partial_tail and not saw_unusable:
+            # Every pending byte is an in-flight/torn tail: nothing syncable,
+            # so the oldest pending entry is ~0 s old. Falling back to the
+            # in-memory baseline instead would, right after a restart, report
+            # process start (hours) and — with the alert's `for: 2m` shorter
+            # than the 300 s tick — fire PjeAuditSyncLagHigh on a healthy box.
+            return datetime.now(UTC)
         logger.warning(
             "audit_sync.lag_baseline_fallback",
-            extra={"path": None, "offset": None, "reason": "no_pending_file"},
+            extra={
+                "path": None,
+                "offset": None,
+                "reason": "no_usable_timestamp" if saw_unusable else "no_pending_file",
+            },
         )
         return None
 

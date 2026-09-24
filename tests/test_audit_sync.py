@@ -771,6 +771,37 @@ class TestLagGauge:
             if r.getMessage() == "audit_sync.lag_baseline_fallback"
         ], "an in-flight tail is not a fallback condition and must not warn"
 
+    @pytest.mark.asyncio
+    async def test_torn_tail_in_an_older_file_does_not_hide_a_newer_backlog(
+        self, tmp_path: Path
+    ):
+        """Review of #47: the probe stopped at the FIRST file with pending
+        bytes. If that file's only pending bytes were a permanently torn last
+        write (crash/ENOSPC on the day's final line — nothing ever terminates
+        it), the probe answered "now" and never looked at the newer file where
+        3 h of real, unsynced lines sat. Lag read ≈ 0 forever; the alert never
+        fired. The probe must keep looking past a partial tail."""
+        from datetime import UTC, datetime, timedelta
+
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        older = date.today() - timedelta(days=1)
+        (tmp_path / f"audit-{older}.jsonl").write_bytes(
+            b'{"event_type": "document_saved", "timestamp": "2026-09-2'  # torn
+        )
+        three_h_ago = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+        _make_jsonl(
+            tmp_path / f"audit-{date.today()}.jsonl",
+            [_audit_entry(timestamp=three_h_ago)],
+        )
+
+        syncer._publish_lag()
+
+        lag = self._gauge()
+        assert lag is not None and 10795 < lag < 10810, (
+            f"the newer file's 3 h backlog must be measured, gauge reported {lag}"
+        )
+
 
 class TestPasswordNeverLogged:
     @pytest.mark.asyncio
