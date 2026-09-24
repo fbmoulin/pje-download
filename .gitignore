@@ -13,3 +13,6 @@ downloads/
 
 # Local-dev override for ops/monitoring/stack (never committed)
 ops/monitoring/stack/docker-compose.override.yml
+
+# Agent worktrees (harness-managed, local-only; .claude/agents/ stays tracked)
+.claude/worktrees/
