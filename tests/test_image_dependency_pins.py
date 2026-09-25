@@ -144,6 +144,86 @@ class TestImagesInstallFromRequirements:
             )
 
 
+class TestDashboardHealthcheckIsPublic:
+    """The image's own HEALTHCHECK must probe a path the API-key middleware
+    leaves open, or the container can never report healthy in production.
+
+    Sprint 8 put every ``/api/*`` route behind ``X-API-Key``; the Dockerfile
+    kept probing ``/api/status`` and 401-looped. ``docker-compose.yml`` was
+    fixed (461a789) but the bare image was not. This ties the probe to the
+    middleware's *own* public-path lists, so the two cannot drift again.
+    """
+
+    _CURL_URL = re.compile(r"HEALTHCHECK[^\n]*\\\n\s*CMD\s+curl\s+\S+\s+(\S+)")
+
+    def test_dashboard_probe_path_is_exempt_from_api_key(self):
+        import dashboard_api
+
+        body = _strip_comments(_target_body("dashboard"))
+        m = self._CURL_URL.search(body)
+        assert m, "dashboard target has no `HEALTHCHECK ... CMD curl <url>`"
+        path = re.sub(r"^https?://[^/]+", "", m.group(1))
+        public = path in dashboard_api._AUTH_PUBLIC_EXACT or path.startswith(
+            dashboard_api._AUTH_PUBLIC_PREFIXES
+        )
+        assert public, (
+            f"dashboard HEALTHCHECK probes {path!r}, which api_key_middleware "
+            f"gates behind X-API-Key — the container would 401-loop and never "
+            f"turn healthy. Public paths: {dashboard_api._AUTH_PUBLIC_EXACT} "
+            f"+ prefixes {dashboard_api._AUTH_PUBLIC_PREFIXES}"
+        )
+
+
+class TestDashboardImageHasWhatDeployExecs:
+    """Every path `deploy.yml` runs inside the dashboard container must exist
+    in the dashboard image.
+
+    Found by code review of #47: the F3 credential smoke test execs
+    `tools/verify_mni_credentials.py` in the dashboard container, but the
+    dashboard target copied only `*.py`, `static/` and `migrations/`. The exec
+    would fail with "can't open file" -> exit 2 -> the step downgrades that to
+    a warning -> a deploy with wrong credentials passes. That is the same
+    false assurance F3 existed to remove, reintroduced one layer down.
+    """
+
+    _EXEC_RE = re.compile(
+        r"docker compose exec\s+(?:-\S+\s+)*dashboard\s+python\s+(\S+\.py)"
+    )
+
+    @staticmethod
+    def _dashboard_copy_sources() -> list[str]:
+        sources: list[str] = []
+        body = _strip_comments(_target_body("dashboard"))
+        for line in body.splitlines():
+            if not line.startswith("COPY"):
+                continue
+            tokens = [t for t in line.split()[1:] if not t.startswith("--")]
+            sources.extend(tokens[:-1])  # last token is the destination
+        return sources
+
+    def test_every_path_execd_in_dashboard_is_in_the_image(self):
+        deploy = (_REPO_ROOT / ".github" / "workflows" / "deploy.yml").read_text(
+            encoding="utf-8"
+        )
+        execd = self._EXEC_RE.findall(deploy)
+        assert execd, "deploy.yml no longer execs any python file in the dashboard"
+        sources = self._dashboard_copy_sources()
+        for path in execd:
+            top = path.split("/")[0]
+            if "/" in path:
+                assert f"{top}/" in sources, (
+                    f"deploy.yml execs {path!r} inside the dashboard container, but "
+                    f"the dashboard target never copies {top}/ (COPY sources: "
+                    f"{sources}). The exec would fail with 'can't open file' and "
+                    f"the step would downgrade that to a warning."
+                )
+            else:
+                assert "*.py" in sources or path in sources, (
+                    f"{path!r} is not copied into the dashboard image"
+                )
+            assert (_REPO_ROOT / path).is_file(), f"{path} does not exist in the repo"
+
+
 class TestDashboardExclusionLosesNoPin:
     def test_only_playwright_is_excluded(self):
         """The dashboard drops playwright (139 MB, never imported there) and

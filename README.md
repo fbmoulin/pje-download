@@ -338,6 +338,7 @@ Ver `CLAUDE.md#audit-sync-railway-postgres-phase-2` para bootstrap, role insert-
 | `timeout` | `asyncio.wait_for` excedeu `MNI_TIMEOUT` |
 | `not_found` | Processo nao encontrado no tribunal |
 | `auth_failed` | Credenciais invalidas (`Acesso negado`/`Unauthorized`) |
+| `blocked` | HTTP 403 antes de qualquer envelope SOAP — o MNI rejeita credencial com fault, nao com 403; 403 e o que a geo-restricao do CloudFront devolve a IP fora do BR (era rotulado `auth_failed` ate 2026-09-24) |
 | `error` | Excecao generica (rede, parsing, etc.) |
 
 ### GET /health (Worker)

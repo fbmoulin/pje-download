@@ -508,14 +508,21 @@ class TestLagGauge:
 
     @pytest.mark.asyncio
     async def test_gauge_climbs_while_a_backlog_is_unsynced(self, tmp_path: Path):
-        """The case the alert exists for: local entries Postgres never got."""
+        """The case the alert exists for: local entries Postgres never got.
+
+        Lag is the age of the oldest unsynced entry, read from disk — not
+        "time since the syncer started", which is what a freshly-restarted
+        process would otherwise report for an hours-old backlog.
+        """
         from datetime import UTC, datetime, timedelta
 
         syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
         assert syncer is not None
-        # Nothing has ever synced, so the baseline is syncer start.
-        syncer._started_at = datetime.now(UTC) - timedelta(minutes=10)
-        _make_jsonl(tmp_path / f"audit-{date.today()}.jsonl", [_audit_entry()])
+        ten_min_ago = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
+        _make_jsonl(
+            tmp_path / f"audit-{date.today()}.jsonl",
+            [_audit_entry(timestamp=ten_min_ago)],
+        )
 
         syncer._publish_lag()
 
@@ -523,6 +530,123 @@ class TestLagGauge:
         assert lag is not None
         assert 595 < lag < 610, f"expected ~600s of lag, gauge reported {lag}"
         assert lag > 60, "must exceed the PjeAuditSyncLagHigh threshold"
+
+    @pytest.mark.asyncio
+    async def test_restart_measures_old_backlog_from_the_entry_not_process_start(
+        self, tmp_path: Path
+    ):
+        """Codex scenario 1: dashboard restarts with a 3h-old unsynced backlog.
+
+        ``_last_synced_event_ts`` is ``None`` after a restart, so a baseline of
+        ``_started_at`` would report the backlog as seconds old. The panel must
+        show ~3h, because that is how stale the audit sink really is.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        three_h_ago = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+        _make_jsonl(
+            tmp_path / f"audit-{date.today()}.jsonl",
+            [_audit_entry(timestamp=three_h_ago)],
+        )
+        # Fresh process: _started_at == now, nothing ever synced.
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        assert syncer._last_synced_event_ts is None
+
+        syncer._publish_lag()
+
+        lag = self._gauge()
+        assert lag is not None
+        assert 10_795 < lag < 10_810, (
+            f"expected ~10800s (age of the oldest pending entry), gauge reported {lag}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_partially_synced_file_measures_from_first_line_after_cursor(
+        self, tmp_path: Path
+    ):
+        """Codex scenario 2: a long-idle process, then one entry that fails.
+
+        Entry A (5h ago) is already behind the cursor; entry B (2h ago) is
+        pending. The gauge must be B's age (~2h) — not A's age and not the
+        syncer's uptime.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        now = datetime.now(UTC)
+        entry_a = _audit_entry(timestamp=(now - timedelta(hours=5)).isoformat())
+        entry_b = _audit_entry(timestamp=(now - timedelta(hours=2)).isoformat())
+        path = tmp_path / f"audit-{date.today()}.jsonl"
+        _make_jsonl(path, [entry_a, entry_b])
+        # Cursor positioned exactly at the end of A's line.
+        audit_sync._save_cursor(path, len((json.dumps(entry_a) + "\n").encode()))
+
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        # Long-idle process: uptime is 9h, which the old baseline would report.
+        syncer._started_at = now - timedelta(hours=9)
+        assert syncer._pending_bytes() == len((json.dumps(entry_b) + "\n").encode())
+
+        syncer._publish_lag()
+
+        lag = self._gauge()
+        assert lag is not None
+        assert 7_195 < lag < 7_210, (
+            f"expected ~7200s (age of entry B), gauge reported {lag}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_oldest_pending_entry_is_chosen_across_files(self, tmp_path: Path):
+        """Two in-window files with backlog: the older file's first pending
+        line sets the lag, not today's."""
+        from datetime import UTC, datetime, timedelta
+
+        now = datetime.now(UTC)
+        older_day = date.today() - timedelta(days=2)
+        _make_jsonl(
+            tmp_path / f"audit-{older_day}.jsonl",
+            [_audit_entry(timestamp=(now - timedelta(hours=5)).isoformat())],
+        )
+        _make_jsonl(
+            tmp_path / f"audit-{date.today()}.jsonl",
+            [_audit_entry(timestamp=(now - timedelta(hours=1)).isoformat())],
+        )
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+
+        syncer._publish_lag()
+
+        lag = self._gauge()
+        assert lag is not None
+        assert 17_995 < lag < 18_010, (
+            f"expected ~18000s (older file's entry), gauge reported {lag}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_baseline_with_warning_when_line_has_no_timestamp(
+        self, tmp_path: Path, caplog
+    ):
+        """An unusable oldest pending line must not zero the gauge or crash:
+        fall back to the in-memory baseline and say so in the log."""
+        from datetime import UTC, datetime, timedelta
+
+        caplog.set_level(logging.WARNING, logger="kratos.audit_sync")
+        _make_jsonl(
+            tmp_path / f"audit-{date.today()}.jsonl",
+            [_audit_entry(timestamp=None)],
+        )
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        syncer._started_at = datetime.now(UTC) - timedelta(minutes=5)
+
+        syncer._publish_lag()
+
+        lag = self._gauge()
+        assert lag is not None
+        assert 295 < lag < 310, f"expected ~300s from the fallback baseline, got {lag}"
+        assert any(
+            r.message == "audit_sync.lag_baseline_fallback" for r in caplog.records
+        ), [r.message for r in caplog.records]
 
     @pytest.mark.asyncio
     async def test_gauge_is_zero_once_caught_up(self, tmp_path: Path):
@@ -608,6 +732,106 @@ class TestLagGauge:
         syncer._pending_bytes = MagicMock(side_effect=OSError("audit dir gone"))
 
         syncer._publish_lag()  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_partial_line_in_flight_reads_as_zero_not_as_uptime(
+        self, tmp_path: Path, caplog
+    ):
+        """The only pending bytes are an unterminated tail audit.py is still
+        writing. That entry is ~0 s old and must be reported as such.
+
+        Falling back to the in-memory baseline here is the one way the probe
+        could over-report: after a restart that baseline is process start, so
+        a healthy system would read hours of lag for one tick — and with the
+        alert's ``for: 2m`` shorter than the 300 s tick, one tick is enough to
+        fire PjeAuditSyncLagHigh spuriously.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        syncer._started_at = datetime.now(UTC) - timedelta(hours=3)
+        # No trailing newline: a write in flight, exactly what _parse_complete_lines
+        # refuses to consume and what the cursor rule must never advance past.
+        (tmp_path / f"audit-{date.today()}.jsonl").write_bytes(
+            b'{"event_type": "document_saved", "timestamp": "2026-09-2'
+        )
+        caplog.set_level(logging.WARNING, logger="kratos.audit_sync")
+
+        syncer._publish_lag()
+
+        assert syncer._pending_bytes() > 0, "the tail must still count as pending"
+        lag = self._gauge()
+        assert lag is not None and lag < 1.0, (
+            f"in-flight tail must read as ~0 s, not as uptime; gauge reported {lag}"
+        )
+        assert not [
+            r
+            for r in caplog.records
+            if r.getMessage() == "audit_sync.lag_baseline_fallback"
+        ], "an in-flight tail is not a fallback condition and must not warn"
+
+    @pytest.mark.asyncio
+    async def test_torn_tail_in_an_older_file_does_not_hide_a_newer_backlog(
+        self, tmp_path: Path
+    ):
+        """Review of #47: the probe stopped at the FIRST file with pending
+        bytes. If that file's only pending bytes were a permanently torn last
+        write (crash/ENOSPC on the day's final line — nothing ever terminates
+        it), the probe answered "now" and never looked at the newer file where
+        3 h of real, unsynced lines sat. Lag read ≈ 0 forever; the alert never
+        fired. The probe must keep looking past a partial tail."""
+        from datetime import UTC, datetime, timedelta
+
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        older = date.today() - timedelta(days=1)
+        (tmp_path / f"audit-{older}.jsonl").write_bytes(
+            b'{"event_type": "document_saved", "timestamp": "2026-09-2'  # torn
+        )
+        three_h_ago = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+        _make_jsonl(
+            tmp_path / f"audit-{date.today()}.jsonl",
+            [_audit_entry(timestamp=three_h_ago)],
+        )
+
+        syncer._publish_lag()
+
+        lag = self._gauge()
+        assert lag is not None and 10795 < lag < 10810, (
+            f"the newer file's 3 h backlog must be measured, gauge reported {lag}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_scans_past_timestampless_rows_in_the_same_file(
+        self, tmp_path: Path, caplog
+    ):
+        """Codex on #47: the probe looked only at `parsed[0]`. A first pending
+        row without a timestamp followed by a 3-hour-old row made the probe skip
+        the file (or fall back to process start) — a real backlog read as new
+        after a restart. The oldest pending entry WITH a usable timestamp is the
+        answer, whichever row it is."""
+        from datetime import UTC, datetime, timedelta
+
+        caplog.set_level(logging.WARNING, logger="kratos.audit_sync")
+        three_h_ago = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+        _make_jsonl(
+            tmp_path / f"audit-{date.today()}.jsonl",
+            [_audit_entry(timestamp=None), _audit_entry(timestamp=three_h_ago)],
+        )
+        syncer = audit_sync.create_syncer(**_factory_kwargs(audit_dir=tmp_path))
+        assert syncer is not None
+        syncer._started_at = datetime.now(UTC) - timedelta(minutes=5)
+
+        syncer._publish_lag()
+
+        lag = self._gauge()
+        assert lag is not None and 10795 < lag < 10810, (
+            f"the second row's 3 h must be measured, gauge reported {lag}"
+        )
+        assert not [
+            r for r in caplog.records if r.message == "audit_sync.lag_baseline_fallback"
+        ], "a usable row was found; this is not a fallback"
 
 
 class TestPasswordNeverLogged:

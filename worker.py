@@ -32,6 +32,7 @@ import redis.asyncio as redis
 import structlog
 from playwright.async_api import BrowserContext, Page, async_playwright
 
+import audit
 import metrics
 from async_retry import AsyncRetry
 from file_utils import merge_file_lists, total_bytes
@@ -56,6 +57,7 @@ from config import (
     HEALTH_BIND_HOST,
     CONCURRENT_DOWNLOADS,
     MNI_ENABLED,
+    MNI_TRIBUNAL,
     MNI_HEALTH_CACHE_TTL_SECS,
     PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS,
     PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS,
@@ -181,6 +183,10 @@ class PJeSessionWorker:
         self._health_cache: dict | None = None
         self._health_cache_time: float = 0.0
         self._health_runner: Any | None = None
+        # F4: the Playwright handle, stashed by load_session so a browser can
+        # be lazily launched later (see _ensure_browser) when MNI is primary
+        # and strategies 2/3 turn out to be needed. None until load_session runs.
+        self._playwright: Any | None = None
 
     def _acquire_session_lock(self) -> bool:
         """Acquire advisory lock on session state file (prevents multi-instance corruption)."""
@@ -290,6 +296,11 @@ class PJeSessionWorker:
         if self.mni_client is not None:
             # MNI disponível: não iniciar Chromium no boot. Isso evita depender
             # de browser visível quando o caminho principal já resolve o fluxo.
+            # F4: guardamos o handle do Playwright para permitir um lançamento
+            # tardio e headless via _ensure_browser(), quando um fallback
+            # (estratégia 2/3) realmente for necessário — nunca aqui, e nunca
+            # bloqueando em login manual.
+            self._playwright = playwright
             self.session_valid = False
             self.fallback_ready = False
             self.session_started_at = datetime.now(UTC)
@@ -366,8 +377,16 @@ class PJeSessionWorker:
         elapsed = (datetime.now(UTC) - self.session_started_at).total_seconds() / 60
         return elapsed > SESSION_TIMEOUT_MINUTES
 
-    async def invalidate_session(self) -> None:
-        """Remove sessão salva e fecha recursos do browser."""
+    async def _close_browser(self) -> None:
+        """Close the browser and forget it — WITHOUT touching the session file.
+
+        The distinction from `invalidate_session` matters in MNI mode (F7): the
+        operational timeout (`SESSION_TIMEOUT_MINUTES`) says a helper browser
+        has been open too long, not that the operator's saved cookies are dead.
+        Deleting the file would force a manual re-login for a timeout; keeping
+        it lets `_ensure_browser` re-open from it next time and verify against
+        login.seam, which is what actually detects a dead session.
+        """
         for resource in (self.page, self.context, self._browser):
             if resource:
                 try:
@@ -378,12 +397,73 @@ class PJeSessionWorker:
         self.context = None
         self._browser = None
         self._release_session_lock()
-        if SESSION_STATE_PATH.exists():
-            SESSION_STATE_PATH.unlink()
         self.session_valid = False
         self.fallback_ready = False
+
+    async def invalidate_session(self) -> None:
+        """Remove sessão salva e fecha recursos do browser."""
+        await self._close_browser()
+        if SESSION_STATE_PATH.exists():
+            SESSION_STATE_PATH.unlink()
         self.session_started_at = None
         log.info("pje.session.invalidated")
+
+    async def _ensure_browser(self) -> bool:
+        """Lazily un-defer the Playwright browser (F4).
+
+        In MNI mode, `load_session` intentionally never launches Chromium —
+        it just stashes the handle in `self._playwright` (see there). This is
+        the ONLY place that un-defers it, and only when a fallback strategy
+        (2 or 3) is actually about to be needed — never on the hot path of a
+        pure-MNI success, and never blocking on manual login (headless reuse
+        of a session file saved earlier via `/api/session/login` or
+        `python pje_session.py login`).
+
+        Returns True iff `self.page`/`self.context` are usable afterwards.
+        """
+        if self.page is not None and self.context is not None:
+            return True
+
+        if self._playwright is None:
+            log.info("pje.session.lazy_unavailable", reason="no_playwright")
+            return False
+
+        if not SESSION_STATE_PATH.exists():
+            log.info("pje.session.lazy_unavailable", reason="no_session_file")
+            return False
+
+        if not self._acquire_session_lock():
+            log.info("pje.session.lazy_unavailable", reason="lock_held")
+            return False
+
+        try:
+            self._browser = await self._playwright.chromium.launch(headless=True)
+            self.context = await self._browser.new_context(
+                storage_state=str(SESSION_STATE_PATH)
+            )
+            self.page = await self.context.new_page()
+            await self.page.goto(f"{PJE_BASE_URL}/login.seam")
+
+            if await self._detect_captcha() or "login" in self.page.url.lower():
+                # Saved session is dead (expired / logged out / CAPTCHA).
+                # Nothing to recover here without a human — surface it as
+                # unavailable, same as the "no session file" case.
+                log.warning("pje.session.lazy_expired")
+                await self._close_browser()
+                return False
+
+            self.session_valid = True
+            self.fallback_ready = True
+            self.session_started_at = datetime.now(UTC)
+            log.info("pje.session.lazy_ready")
+            return True
+
+        except Exception as exc:
+            # error_type only — never str(exc). A launch/navigation failure
+            # can echo cookies or storage_state contents (Sprint 9 note).
+            log.warning("pje.session.lazy_failed", error_type=type(exc).__name__)
+            await self._close_browser()
+            return False
 
     # ──────────────────────
     # DETECÇÃO DE CAPTCHA
@@ -728,6 +808,58 @@ class PJeSessionWorker:
                     return result
 
             # ── Estratégias 2 e 3 precisam de sessão Playwright ──
+            #
+            # F7: the operational timeout is about a browser session. In
+            # browser-primary mode (no MNI) it keeps its original, unconditional
+            # meaning: expired -> `session_expired`, which the dashboard treats
+            # as fatal for the batch because nothing else can succeed.
+            #
+            # In MNI mode that same check used to run against a browser that
+            # never existed: `load_session`'s MNI branch stamps
+            # `session_started_at` at boot, so after SESSION_TIMEOUT_MINUTES of
+            # *worker uptime* — production uptime is days — every processo
+            # where MNI found nothing came back `session_expired`, and the
+            # dashboard LREM-ed the rest of the batch. One wrong CNJ, one empty
+            # processo or one transient MNI error aborted every job behind it.
+            # Measured on e4ca0b2: uptime 59 min -> `failed`; 61 min ->
+            # `session_expired`, batch aborted.
+            #
+            # MNI is the pipeline there; the browser is a helper. So in MNI mode
+            # the timeout applies only if a helper browser actually exists, and
+            # then it is closed (not the session file — see _close_browser). This
+            # MUST run before `_ensure_browser()` below: `_ensure_browser` short-
+            # circuits to True when `self.page`/`self.context` are already set,
+            # so a stale-but-still-open helper would never be replaced. Closing
+            # it here — while keeping the session file — lets `_ensure_browser`
+            # relaunch headlessly from that same file and re-validate against
+            # login.seam, IN THE SAME JOB, right below. With no browser there is
+            # nothing to expire and we fall straight through to that same
+            # relaunch attempt.
+            expired = self.is_session_expired()
+            if expired and self.mni_client is None:
+                log.warning("pje.download.session_expired", job_id=ctx.job_id)
+                self._health_status = "session_expired"
+                return self._result(ctx.job_id, ctx.numero_processo, "session_expired")
+            if expired and self.page is not None:
+                log.warning(
+                    "pje.download.helper_session_expired",
+                    job_id=ctx.job_id,
+                    note="MNI mode: helper browser past SESSION_TIMEOUT_MINUTES; "
+                    "closed, session file kept, continuing without it",
+                )
+                await self._close_browser()
+
+            if self.mni_client is not None:
+                # F4: MNI didn't fully resolve the process (either it left
+                # anexos pending, or found nothing at all) — a fallback
+                # strategy is about to be needed. This is the only place a
+                # browser gets lazily un-deferred; see _ensure_browser. Running
+                # this AFTER the F7 block above means a helper that just
+                # expired gets relaunched from the kept session file in this
+                # same call, instead of leaving `page` stuck at `None` for the
+                # rest of the job.
+                await self._ensure_browser()
+
             if ctx.anexos_pendentes and (self.page is None or self.context is None):
                 warning = (
                     f"MNI baixou documentos principais, mas {ctx.anexos_pendentes} anexo(s) "
@@ -758,11 +890,6 @@ class PJeSessionWorker:
                     ctx.downloaded_files,
                     error=warning,
                 )
-
-            if self.is_session_expired():
-                log.warning("pje.download.session_expired", job_id=ctx.job_id)
-                self._health_status = "session_expired"
-                return self._result(ctx.job_id, ctx.numero_processo, "session_expired")
 
             api_found = await self._phase_api_fallback(ctx)
             if not api_found:
@@ -919,6 +1046,52 @@ class PJeSessionWorker:
             return None, 0, 0
 
     # ──────────────────────
+    # AUDITORIA (CNJ 615/2025) — compartilhada pelas estratégias 2 e 3
+    # ──────────────────────
+
+    def _audit_tribunal(self) -> str:
+        """Tribunal to record in this worker's audit rows.
+
+        `self.mni_client` is the authority on which tribunal this worker
+        serves when it exists — mirrors `mni_client._save_document`, which
+        audits with `self.tribunal` (already uppercased in
+        `MNIClient.__init__`). Without an MNI client, fall back to
+        `MNI_TRIBUNAL` read from the environment AT CALL TIME (not the value
+        `config` captured at import — see CLAUDE.md's "Env Loading" gotcha),
+        uppercased the same way, so a lowercase `MNI_TRIBUNAL=tjes` can't make
+        this worker's `pje_api`/`pje_browser` rows disagree with MNI's
+        `mni_soap` rows and break `GROUP BY tribunal` in the audit sink.
+        """
+        import os
+
+        if self.mni_client is not None and hasattr(self.mni_client, "tribunal"):
+            return self.mni_client.tribunal
+        return os.getenv("MNI_TRIBUNAL", MNI_TRIBUNAL).upper()
+
+    def _audit_document_saved(
+        self,
+        numero_processo: str,
+        fonte: str,
+        *,
+        status: str,
+        erro: str | None = None,
+        **fields,
+    ) -> None:
+        """One CNJ 615/2025 entry per document write attempt from this worker
+        (F6). Never raises — `audit.log_access` swallows internally."""
+        audit.log_access(
+            audit.AuditEntry(
+                event_type="document_saved",
+                processo_numero=numero_processo,
+                fonte=fonte,
+                tribunal=self._audit_tribunal(),
+                status=status,
+                erro=erro,
+                **fields,
+            )
+        )
+
+    # ──────────────────────
     # ESTRATÉGIA 2: API REST
     # ──────────────────────
 
@@ -1010,7 +1183,9 @@ class PJeSessionWorker:
 
                 total_docs = len(filtered_docs)
                 for doc in filtered_docs:
-                    file_info = await self._download_document_api(doc, output_dir)
+                    file_info = await self._download_document_api(
+                        doc, output_dir, numero_processo
+                    )
                     if file_info:
                         files.append(file_info)
                         local_bytes += int(file_info.get("tamanhoBytes", 0) or 0)
@@ -1033,10 +1208,17 @@ class PJeSessionWorker:
             )
         return None
 
-    async def _download_document_api(self, doc: dict, output_dir: Path) -> dict | None:
-        """Download de documento individual via API REST do PJe."""
+    async def _download_document_api(
+        self, doc: dict, output_dir: Path, numero_processo: str
+    ) -> dict | None:
+        """Download de documento individual via API REST do PJe.
+
+        F6: audits every save (CNJ 615/2025) — `audit.log_access` never
+        raises (it swallows and logs internally; see `audit.py`), so this
+        call cannot change any download outcome below.
+        """
+        doc_id = doc.get("id")
         try:
-            doc_id = doc.get("id")
             response = await self.page.request.get(
                 f"{PJE_BASE_URL}/api/documentos/{doc_id}/download",
             )
@@ -1047,6 +1229,16 @@ class PJeSessionWorker:
                 content = await response.body()
                 dest.write_bytes(content)
                 checksum = hashlib.sha256(content).hexdigest()
+                self._audit_document_saved(
+                    numero_processo,
+                    "pje_api",
+                    status="success",
+                    documento_id=str(doc_id) if doc_id is not None else None,
+                    documento_tipo=doc.get("tipo", "pdf"),
+                    documento_nome=filename,
+                    tamanho_bytes=len(content),
+                    checksum_sha256=checksum,
+                )
                 return {
                     "nome": filename,
                     "tipo": doc.get("tipo", "pdf"),
@@ -1055,10 +1247,17 @@ class PJeSessionWorker:
                     "checksum": checksum,
                     "fonte": "api_rest",
                 }
-        except Exception as exc:
-            log.warning(
-                "pje.document_download_failed", doc_id=doc.get("id"), error=str(exc)
+        except OSError as exc:
+            log.warning("pje.document_download_failed", doc_id=doc_id, error=str(exc))
+            self._audit_document_saved(
+                numero_processo,
+                "pje_api",
+                status="error",
+                erro=str(exc),
+                documento_id=str(doc_id) if doc_id is not None else None,
             )
+        except Exception as exc:
+            log.warning("pje.document_download_failed", doc_id=doc_id, error=str(exc))
         return None
 
     # ──────────────────────
@@ -1220,7 +1419,16 @@ class PJeSessionWorker:
                 filename = _unique_filename(output_dir, raw_name)
                 dest = output_dir / filename
 
-                await download.save_as(str(dest))
+                try:
+                    await download.save_as(str(dest))
+                except OSError as os_exc:
+                    self._audit_document_saved(
+                        numero_processo,
+                        "pje_browser",
+                        status="error",
+                        erro=str(os_exc),
+                    )
+                    raise
                 checksum, size = sha256_file(dest)
 
                 log.info(
@@ -1231,6 +1439,15 @@ class PJeSessionWorker:
                 )
 
                 self.docs_downloaded_count += 1
+                self._audit_document_saved(
+                    numero_processo,
+                    "pje_browser",
+                    status="success",
+                    documento_tipo="completo",
+                    documento_nome=filename,
+                    tamanho_bytes=size,
+                    checksum_sha256=checksum,
+                )
 
                 return [
                     {
@@ -1273,7 +1490,16 @@ class PJeSessionWorker:
                             )
                             filename2 = _unique_filename(output_dir, raw_name2)
                             dest2 = output_dir / filename2
-                            await download2.save_as(str(dest2))
+                            try:
+                                await download2.save_as(str(dest2))
+                            except OSError as os_exc2:
+                                self._audit_document_saved(
+                                    numero_processo,
+                                    "pje_browser",
+                                    status="error",
+                                    erro=str(os_exc2),
+                                )
+                                raise
                             checksum2, size2 = sha256_file(dest2)
 
                             log.info(
@@ -1282,6 +1508,15 @@ class PJeSessionWorker:
                                 size=size2,
                             )
                             self.docs_downloaded_count += 1
+                            self._audit_document_saved(
+                                numero_processo,
+                                "pje_browser",
+                                status="success",
+                                documento_tipo="completo",
+                                documento_nome=filename2,
+                                tamanho_bytes=size2,
+                                checksum_sha256=checksum2,
+                            )
                             return [
                                 {
                                     "nome": filename2,
@@ -1361,6 +1596,7 @@ class PJeSessionWorker:
         if not hrefs:
             # Fallback: sequential click-based download
             return await self._download_docs_sequential(
+                numero_processo,
                 doc_links,
                 output_dir,
                 progress_cb=progress_cb,
@@ -1402,6 +1638,15 @@ class PJeSessionWorker:
                             "checksum": checksum,
                             "fonte": "browser_individual",
                         }
+                        self._audit_document_saved(
+                            numero_processo,
+                            "pje_browser",
+                            status="success",
+                            documento_tipo="pdf",
+                            documento_nome=dest.name,
+                            tamanho_bytes=size,
+                            checksum_sha256=checksum,
+                        )
                         if progress_cb is not None:
                             async with progress_lock:
                                 completed += 1
@@ -1415,6 +1660,17 @@ class PJeSessionWorker:
                         return file_info
                     finally:
                         await dl_page.close()
+                except OSError as e:
+                    log.warning(
+                        "pje.browser.individual.doc_failed", index=idx, error=str(e)
+                    )
+                    self._audit_document_saved(
+                        numero_processo,
+                        "pje_browser",
+                        status="error",
+                        erro=str(e),
+                    )
+                    return None
                 except Exception as e:
                     log.warning(
                         "pje.browser.individual.doc_failed", index=idx, error=str(e)
@@ -1427,6 +1683,7 @@ class PJeSessionWorker:
 
     async def _download_docs_sequential(
         self,
+        numero_processo: str,
         doc_links: list,
         output_dir: Path,
         progress_cb=None,
@@ -1461,6 +1718,15 @@ class PJeSessionWorker:
                         "fonte": "browser_individual",
                     }
                 )
+                self._audit_document_saved(
+                    numero_processo,
+                    "pje_browser",
+                    status="success",
+                    documento_tipo="pdf",
+                    documento_nome=dest.name,
+                    tamanho_bytes=size,
+                    checksum_sha256=checksum,
+                )
                 local_bytes += size
                 if progress_cb is not None:
                     await progress_cb(
@@ -1471,6 +1737,15 @@ class PJeSessionWorker:
                     )
                 self.docs_downloaded_count += 1
                 await asyncio.sleep(DOWNLOAD_DELAY_SECS)
+            except OSError as e:
+                log.warning("pje.browser.individual.doc_failed", index=i, error=str(e))
+                self._audit_document_saved(
+                    numero_processo,
+                    "pje_browser",
+                    status="error",
+                    erro=str(e),
+                )
+                continue
             except Exception as e:
                 log.warning("pje.browser.individual.doc_failed", index=i, error=str(e))
                 continue
@@ -1954,7 +2229,7 @@ class PJeSessionWorker:
         if self._browser:
             await self._browser.close()
         if self.redis:
-            await self.redis.close()
+            await self.redis.aclose()
         self._release_session_lock()
 
 

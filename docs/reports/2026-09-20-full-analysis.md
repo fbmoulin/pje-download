@@ -3,9 +3,10 @@
 Analysis performed read-only against `1bbcdde`; every claim below was measured in this session,
 and where a step could not be executed it says so explicitly instead of asserting the conclusion.
 
-The branch has since gained fixes for **F1** and **F2** (see the status note below). The baseline
-and the findings are recorded as they were *at analysis time* — the 471-test baseline is the
-pre-fix number; the branch now carries 485.
+Fixes have since landed in two PRs: **F1** and **F2** in #46 (`e4ca0b2`, deployed), and **F3–F6**,
+the Codex lag-baseline follow-up, plus a seventh finding **F7** surfaced during that work, in #47.
+The baseline and the findings are recorded as they were *at analysis time* — the 471-test baseline
+is the pre-fix number; #47 carries 590.
 
 ---
 
@@ -14,7 +15,10 @@ pre-fix number; the branch now carries 485.
 **The repo is in good health and its docs are unusually honest — the findings here are not
 regressions, they are four places where a stated guarantee is not the guarantee that exists.**
 
-> **Status:** F1 and F2 are fixed on this branch (`1e788f7`, `dfbd8a7`). F3–F6 remain open.
+> **Status (2026-09-24):** F1, F2 fixed and deployed (#46). F3, F4, F5, F6 and the Codex lag
+> follow-up fixed in #47, each as its own commit with tests verified in both directions.
+> **F7** (below) was found while reviewing F4 and is also fixed in #47. Nothing from this report
+> remains open; residual follow-ups are listed at the end.
 
 Lint, format, specs and tests are green (471 collected, matching `CLAUDE.md` exactly). The
 architecture, the containment work of PRs #32–#35, and the `build_sha` provenance chain all hold
@@ -191,6 +195,14 @@ hand-maintained list, which is the thing that already drifted once (the `COPY` l
 
 ## F3 — `Validate MNI credentials` cannot fail on bad credentials
 
+> ✅ **FIXED** in #47 — `7572ddd` (`MNIClient.verify_credentials()` + `tools/verify_mni_credentials.py` +
+> the deploy step, failing only on a genuine rejection) and `5884eee` (a bare HTTP 403 is now
+> `blocked`, not `auth_failed`: the MNI rejects credentials with a SOAP fault, a 403 is CloudFront
+> geo-restriction — the probe reports that as *inconclusive* with the cause named, instead of
+> "credentials INVALID" during a geo incident; proven live from this sandbox's geo-blocked egress).
+> ⚠️ Still unverified from here: the live classification of a *genuinely wrong password* against
+> TJES. Read the "Smoke-test MNI credentials" step on the first real deploy.
+
 **Severity: medium.** The final deploy gate:
 
 ```yaml
@@ -236,6 +248,12 @@ config`). The rename is honest and free; the smoke test is what `CLAUDE.md` actu
 
 ## F4 — With MNI enabled, strategies 2 and 3 are unreachable: the cascade is 1 strategy, not 3
 
+> ✅ **FIXED** in #47 — `b3159d9`, landed *after* F6 (`569d94d`) by design. `_ensure_browser()`
+> lazily launches a headless Chromium from the saved session file only when a fallback is actually
+> needed, never blocking on manual login; without `/data/pje-session.json` behaviour is byte-identical
+> to before. ⚠️ Operator action needed for it to be live: produce the session file once via
+> `/api/session/login` or `python pje_session.py login`. Not verifiable here against a real PJe session.
+
 **Severity: medium (design gap, not a silent failure).** `self.page` / `self.context` are assigned
 in exactly one place — the branch of `load_session` that is skipped whenever MNI is available:
 
@@ -273,6 +291,11 @@ cannot run. `playwright_deferred` is permanent, not deferred.
 ---
 
 ## F5 — The `gdrive_map` SSRF guard is substring-based and accepts arbitrary hosts
+
+> ✅ **FIXED** in #47 — `cfc7043`. `extract_folder_id` parses with `urlsplit` and requires `https` +
+> `netloc == "drive.google.com"` exactly; `download_gdrive_folder` hands strategies 1 and 3 a URL
+> rebuilt from the validated id, so `page.goto` can no longer receive a caller-supplied host. 22 new
+> tests failed against the old regex, including all four bypasses measured below.
 
 **Severity: medium** (authenticated-only; see threat model). `dashboard_api.py:1119` comments the
 check as *"(prevents SSRF)"*. It is `re.search` — unanchored, host-unaware:
@@ -327,6 +350,10 @@ the URL rebuilt from `folder_id` the way strategy 2 already does.
 
 ## F6 — `worker.py` emits zero CNJ 615/2025 audit entries (coupled to F4)
 
+> ✅ **FIXED** in #47 — `569d94d`, landed before F4 as this section demanded. All four sites now
+> emit `document_saved` entries (`fonte="pje_api"` / `"pje_browser"`, success and OSError paths),
+> mirroring `mni_client._save_document`; 6 tests read the JSON-L back.
+
 **Severity: low today, high the moment F4 is fixed.** Every other module that writes a judicial
 document audits it. `worker.py` does not reference `audit` at all:
 
@@ -359,6 +386,36 @@ Per `AGENTS.md`, `worker.py` is the execution plane for the dashboard, and it is
 Fixing F4 — giving the worker a browser so the `vinculados` anexos can finally be fetched — silently
 turns on a document-download path with no compliance trail. **F4 and F6 should be one change, in
 that order.**
+
+---
+
+## F7 — In MNI mode, worker uptime > 60 min turned every MNI miss into a batch-fatal `session_expired`
+
+> ✅ **FIXED** in #47 — `11c4955`. Found on 2026-09-24 while reviewing F4; **pre-existing on `e4ca0b2`,
+> i.e. in production at the time.**
+
+**Severity: high.** `load_session`'s MNI branch stamps `session_started_at` at boot for a browser that
+never exists. `download_process` then checked `is_session_expired()` before the fallback strategies,
+regardless of whether any browser existed. After `SESSION_TIMEOUT_MINUTES` (60) of *worker uptime* —
+days, in production — every processo where MNI returned nothing came back `session_expired`:
+
+```
+uptime=   59 min  MNI=no documents  ->  status=failed           dashboard aborts batch: False
+uptime=   61 min  MNI=no documents  ->  status=session_expired  dashboard aborts batch: True
+uptime= 1440 min  MNI=no documents  ->  status=session_expired  dashboard aborts batch: True
+```
+
+`session_expired` is in `dashboard_api._FATAL_WORKER_STATUSES`: the dashboard LREMs the remaining
+jobs from `kratos:pje:jobs` and fails the whole batch. **One wrong CNJ, one empty processo or one
+transient MNI error aborted every job queued behind it.**
+
+**Fix:** the operational timeout is about a browser session. Browser-primary mode (no MNI) keeps the
+original, unconditional semantics verbatim. In MNI mode it applies only if a helper browser (F4)
+actually exists, and then closes it *without* deleting the operator's session file (new
+`_close_browser`; the timeout is operational, not proof the cookie is dead — `_ensure_browser`
+re-validates against `login.seam`). With no browser there is nothing to expire, and the fallbacks
+report `failed` / `partial_success` — never a fatal status. 6 tests; 5 fail on the pre-fix code
+(all MNI-mode cases, up to 7-day uptime), the browser-primary guard passes either way.
 
 ---
 
@@ -414,9 +471,57 @@ Each is independently shippable; `AGENTS.md` asks that these not be mixed into o
 
 | # | Finding | Effort | Why this order |
 |---|---|---|---|
-| ~~1~~ | ~~**F2** dashboard `-r requirements.txt`~~ | ✅ `dfbd8a7` | Largest blast radius per character; makes CI mean something for both images |
-| ~~2~~ | ~~**F1** wire the lag gauge~~ | ✅ `1e788f7` | Must land *before* the Railway sink is enabled, not after |
-| 3 | **F3** rename or implement the credential gate | 1 line / ~10 | Rename is free and stops the false assurance immediately |
-| 4 | **F5** host-compare the gdrive URL | ~5 lines | Independent of everything else |
-| 5 | **F4 + F6** together | larger | Never F4 alone — that ships downloads with no CNJ trail |
-| 6 | Minor cleanups + strike the two stale TODOs | small | |
+| ~~1~~ | ~~**F2** dashboard `-r requirements.txt`~~ | ✅ `dfbd8a7` (#46) | Largest blast radius per character; makes CI mean something for both images |
+| ~~2~~ | ~~**F1** wire the lag gauge~~ | ✅ `1e788f7` (#46) | Must land *before* the Railway sink is enabled, not after |
+| ~~3~~ | ~~**F3** rename or implement the credential gate~~ | ✅ `7572ddd` + `5884eee` (#47) | Implemented, not renamed; 403 split out as `blocked` |
+| ~~4~~ | ~~**F5** host-compare the gdrive URL~~ | ✅ `cfc7043` (#47) | |
+| ~~5~~ | ~~**F4 + F6** together~~ | ✅ `569d94d` → `b3159d9` (#47) | F6 first, as required |
+| ~~6~~ | ~~Minor cleanups + strike the two stale TODOs~~ | ✅ #47 | healthcheck, `aclose()`, keyscan, metrics docstring, TODO |
+| — | **F7** (found during 5) | ✅ `11c4955` (#47) | |
+
+### Review round on #47 (2026-09-24) — `code-review` + `security-review` over the assembled branch
+
+`code-review` returned seven findings; all were real, none had been caught by the per-finding
+both-directions tests because each sat *between* two fixes:
+
+- **The dashboard image never contained `tools/`** — so F3's smoke test would have failed with
+  "can't open file" → exit 2 → warning → a deploy with wrong credentials would pass. The exact false
+  assurance F3 replaced, one layer down. Fixed (`6cc2912`) with a guard that reads `deploy.yml` and
+  demands every path exec'd in the dashboard container be in its COPY sources.
+- `docker compose exec`'s own exit 1 (service restarting) read as "credentials rejected" — fixed
+  (`6b9c0ac`): only the script's sentinel line makes exit 1 mean *invalid*.
+- "Acesso negado" carried in the SOAP *body* (`sucesso=false`) read as `mni_error` → *valid* — fixed
+  (`a9fff50`): same rule as the fault branch, one classifier.
+- A permanently torn tail in an older audit file hid a 3-hour backlog in a newer one as lag `2e-06 s`
+  — fixed (`55362d3`): the probe keeps looking past a partial tail.
+- In `worker.py`: F7's expiry block ran *after* `_ensure_browser()` (expired helper closed but not
+  relaunched in the same job); nine near-identical `audit.log_access` blocks; `_current_tribunal()`
+  without `.upper()` diverging from `mni_client` — fixed by the worker specialist (`c0e876b`,
+  `73ae648`); the relaunch test proves `chromium.launch` was awaited 0 times under the old order.
+
+Codex (the repo's own PR reviewer) then added two P2s on the merged review round, both real and
+fixed: canonicalising the Drive URL from the id alone dropped `resourcekey`, which older
+link-shared folders require (`44459e9` — kept, but only a validated one); and the lag probe read
+only `parsed[0]`, so a first row without a timestamp hid an older second row (`c3e8541`).
+
+`security-review` (identify → false-positive filter → report): **no HIGH/MEDIUM finding at ≥0.8
+confidence.** The branch tightens the only third-party-URL → `page.goto` path and its new audit
+records carry no secrets; the one hardening note (probe exception text reaching the CI log) was
+rated ~2/10 for an actual leak and left as is.
+
+### Residual follow-ups (not defects of this report; recorded so they are not lost)
+
+- **F3, live:** confirm on the first real deploy that a *wrong* password classifies as `INVALID`
+  (SOAP fault "Acesso negado"); a different fault text means `consultar_processo`'s classifier needs
+  one more case. Correct credentials should read `valid`.
+- **F4, operator:** the fallback stays dormant until `/data/pje-session.json` exists
+  (`/api/session/login` or `python pje_session.py login`).
+- **Deploy host-key pinning:** `deploy.yml` never verified the VPS host key (neither rsync nor the
+  `appleboy/ssh-action` steps); the dead `ssh-keyscan` was removed rather than promoted. Real pinning
+  is a `VPS_HOST_KEY` secret written to `known_hosts` with `StrictHostKeyChecking=yes` — needs the key.
+- **Test-isolation quirk (pre-existing):** `tests/test_worker.py::TestDocumentSavedAudit` is flaky when
+  run *in isolation* with `-k`, on `e4ca0b2` too — `_load_worker_module()`'s `patch.dict("sys.modules")`
+  clears `sys.modules` on exit, so whether `audit` survives the reload depends on global import
+  order. Passes in the full file/suite. Worth a fixture that reloads only `worker`.
+- **Lag alert threshold vs. tick:** the gauge is deliberately tick-granular; a continuous per-scrape
+  lag would need `PjeAuditSyncLagHigh`'s threshold raised above `AUDIT_SYNC_INTERVAL_SECS` first.

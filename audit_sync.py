@@ -194,6 +194,10 @@ class AuditSyncer:
     """
 
     _MAX_INSERT_ATTEMPTS = 5
+    # Upper bound on what _oldest_pending_event_ts reads past a cursor. One
+    # audit line is a few hundred bytes; 64 KiB is generous without ever
+    # turning the lag probe into a full-file read.
+    _LAG_PROBE_BYTES = 64 * 1024
 
     def __init__(
         self,
@@ -463,6 +467,97 @@ class AuditSyncer:
             pending += max(filesize - _load_cursor(path), 0)
         return pending
 
+    def _oldest_pending_event_ts(self) -> datetime | None:
+        """Timestamp of the oldest local audit entry Postgres has not got.
+
+        Walks the catchup window in the same order and with the same filter as
+        :meth:`_pending_bytes` and :meth:`_tick`, stops at the first file with
+        bytes past its cursor, and returns the ``timestamp`` of the first
+        complete line after that cursor. Reads at most ``_LAG_PROBE_BYTES``
+        from the cursor — one line is all that is needed, never the file.
+
+        Returns ``None`` (after a structured warning) when no usable timestamp
+        can be read: the pending bytes are only a partial line in flight, the
+        line is malformed, or its ``timestamp`` is missing or unparsable. The
+        caller then falls back to its in-memory baseline.
+        """
+        oldest_allowed = date.today() - timedelta(days=self.catchup_days)
+        saw_partial_tail = False
+        saw_unusable = False
+        for path in sorted(self.audit_dir.glob("audit-*.jsonl")):
+            file_date = _parse_file_date(path.name)
+            if file_date is None or file_date < oldest_allowed:
+                continue
+            offset = _load_cursor(path)
+            try:
+                filesize = path.stat().st_size
+                if filesize <= offset:
+                    continue
+                with path.open("rb") as fh:
+                    fh.seek(offset)
+                    data = fh.read(min(filesize - offset, self._LAG_PROBE_BYTES))
+            except OSError:
+                continue  # vanished/unreadable between stat and read: next file
+            parsed, _consumed, _malformed = _parse_complete_lines(data)
+            if not parsed and b"\n" not in data and len(data) < self._LAG_PROBE_BYTES:
+                # This file's only pending bytes are an unterminated tail. Two
+                # causes, same handling: the line audit.py is writing at this
+                # instant (harmless, ~0 s old), or the torn last write of an
+                # old day that nothing will ever terminate (permanent junk). In
+                # BOTH cases nothing syncable lives in THIS file — but a real
+                # backlog may live in a NEWER one, so keep looking rather than
+                # answer "now" from here (review of #47: a torn 09-20 tail hid
+                # 3 h of unsynced 09-21 lines as lag ≈ 0, forever). Only if no
+                # file yields a timestamp does a partial tail mean lag ≈ 0.
+                # The cursor rule agrees: _parse_complete_lines never consumes
+                # an unterminated line. (A full 64 KiB probe with no newline is
+                # not this case — pathological, falls through to the warning.)
+                logger.debug(
+                    "audit_sync.lag_partial_line_in_flight",
+                    extra={"path": str(path), "offset": offset, "bytes": len(data)},
+                )
+                saw_partial_tail = True
+                continue
+            # The oldest pending entry WITH a usable timestamp, not merely the
+            # first parsed row (Codex on #47): a first row lacking `timestamp`
+            # followed by a 3-hour-old row must yield the 3 hours, or the file
+            # is skipped and a real backlog reads as new after a restart.
+            reason = "no_complete_line"
+            for row in parsed:
+                ts_raw = row.get("timestamp") if isinstance(row, dict) else None
+                if not ts_raw:
+                    reason = "missing_timestamp"
+                    continue
+                try:
+                    return _coerce_utc(datetime.fromisoformat(ts_raw))
+                except (TypeError, ValueError):
+                    reason = "unparsable_timestamp"
+            # No usable timestamp anywhere in the probed chunk (malformed / no
+            # timestamp). The next tick consumes those rows (cursor advances
+            # past malformed lines), so the honest backlog, if any, is in a
+            # later file — keep looking.
+            logger.warning(
+                "audit_sync.lag_baseline_fallback",
+                extra={"path": str(path), "offset": offset, "reason": reason},
+            )
+            saw_unusable = True
+        if saw_partial_tail and not saw_unusable:
+            # Every pending byte is an in-flight/torn tail: nothing syncable,
+            # so the oldest pending entry is ~0 s old. Falling back to the
+            # in-memory baseline instead would, right after a restart, report
+            # process start (hours) and — with the alert's `for: 2m` shorter
+            # than the 300 s tick — fire PjeAuditSyncLagHigh on a healthy box.
+            return datetime.now(UTC)
+        logger.warning(
+            "audit_sync.lag_baseline_fallback",
+            extra={
+                "path": None,
+                "offset": None,
+                "reason": "no_usable_timestamp" if saw_unusable else "no_pending_file",
+            },
+        )
+        return None
+
     def _publish_lag(self) -> None:
         """Set ``pje_audit_sync_lag_seconds`` — the gauge the alert reads.
 
@@ -476,16 +571,30 @@ class AuditSyncer:
         Grafana panels read as perfect sync. A silent zero is worse than No
         Data: No Data breaks the panel visibly and leaves the alert unknown.
 
-        Definition follows the metric's own HELP string — "event-time lag
-        between newest local JSON-L entry and newest synced row" — *not*
-        ``health_snapshot``'s ``now - last_synced``. That distinction is what
-        keeps an idle, fully-synced deployment at zero instead of alerting
-        every night simply because no documents were downloaded.
+        Definition: the **age of the oldest local JSON-L entry not yet synced**
+        (``now - timestamp`` of the first complete line after the saved cursor
+        in the oldest in-window file with pending bytes), and ``0`` when there
+        are no pending bytes. It is read from disk, not from in-memory state,
+        so it survives restarts: the first wiring used
+        ``_last_synced_event_ts or _started_at`` as the baseline, which read an
+        hours-old backlog as seconds after a restart (``_last_synced_event_ts``
+        is ``None`` again) and read one fresh failing row as the whole uptime
+        after a long idle stretch. The alert still fired in both cases; the
+        magnitude on the panel was wrong. That in-memory pair is now only the
+        fallback when the oldest pending line yields no usable timestamp, and
+        the fallback is logged. Unlike ``health_snapshot``'s
+        ``now - last_synced``, this keeps an idle, fully-synced deployment at
+        zero instead of alerting every night simply because no documents were
+        downloaded.
+
+        Published once per tick, on purpose: with ``AUDIT_SYNC_INTERVAL`` at
+        300 s a continuous (per-scrape) age would climb past the ``> 60``
+        threshold between two healthy ticks and flap the alert.
 
         Failure modes this reports honestly:
         - caught up (no pending bytes) -> 0, whatever the wall clock says
         - backlog + stalled/raising sync -> climbs, so the alert fires
-        - backlog and nothing ever synced -> measured from syncer start, so a
+        - backlog and nothing ever synced -> age of the oldest entry, so a
           syncer that never worked still climbs instead of reading 0 forever
         - self-disabled on PG<15 -> ticks early-return, backlog stays, climbs
         """
@@ -499,7 +608,12 @@ class AuditSyncer:
         if pending == 0:
             _metrics.audit_sync_lag_seconds.set(0.0)
             return
-        baseline = self._last_synced_event_ts or self._started_at
+        try:
+            oldest = self._oldest_pending_event_ts()
+        except Exception:  # noqa: BLE001 — same rule: degrade, don't break
+            logger.warning("audit_sync.lag_probe_failed", exc_info=True)
+            oldest = None
+        baseline = oldest or self._last_synced_event_ts or self._started_at
         lag = (datetime.now(UTC) - baseline).total_seconds()
         _metrics.audit_sync_lag_seconds.set(max(lag, 0.0))
 

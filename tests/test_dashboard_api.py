@@ -483,6 +483,81 @@ async def test_handle_download_rejects_empty():
     assert resp.status == 400
 
 
+_HOSTILE_GDRIVE_URLS = [
+    # Each one PASSED the original substring guard (report F5); a valid
+    # Drive id is embedded in the path/query of an attacker-controlled host.
+    "https://evil.test/drive.google.com/drive/folders/1AbC",
+    "https://attacker.example/x?u=drive.google.com/drive/folders/1AbC",
+    "http://169.254.169.254/drive.google.com/drive/folders/1AbC",
+    "file:///etc/drive.google.com/drive/folders/1AbC",
+    "https://drive.google.com@evil.test/drive/folders/1AbC",
+    "https://drive.google.com.evil.test/drive/folders/1AbC",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hostile_url", _HOSTILE_GDRIVE_URLS)
+async def test_handle_download_rejects_gdrive_map_with_foreign_host(hostile_url):
+    """F5: `gdrive_map` URLs must be rejected unless the host IS drive.google.com.
+
+    The raw URL otherwise reaches the worker and ``page.goto`` in
+    ``gdrive_downloader._try_playwright_download`` (the SSRF sink).
+    """
+    cnj = "0000000-00.2024.8.08.0000"  # synthetic — passes is_valid_processo
+    mock_state = MagicMock()
+    mock_state.current_batch_id = None
+    mock_state.batches = {}
+    ctx = _make_ctx(state=mock_state)
+    resp = await dashboard_api.handle_download(
+        DummyRequest(
+            method="POST",
+            json_data={"processos": [cnj], "gdrive_map": {cnj: hostile_url}},
+            ctx=ctx,
+        )
+    )
+    assert resp.status == 400, hostile_url
+    body = json.loads(resp.body.decode())
+    assert body["invalid"] == [hostile_url]
+    assert "gdrive_map" in body["error"]
+    mock_state.submit_batch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_download_accepts_gdrive_map_with_real_drive_host():
+    """Control for the test above: a genuine Drive folder link still submits."""
+    cnj = "0000000-00.2024.8.08.0000"
+    gdrive_url = "https://drive.google.com/drive/u/0/folders/1AbC?usp=sharing"
+    captured: dict = {}
+
+    async def fake_submit(ps, include_anexos=True, gdrive_map=None):
+        import datetime
+
+        from dashboard_api import BatchJob
+
+        captured["gdrive_map"] = gdrive_map
+        return BatchJob(
+            id="fake",
+            processos=ps,
+            status="queued",
+            created_at=datetime.datetime.now().isoformat(),
+        )
+
+    mock_state = MagicMock()
+    mock_state.current_batch_id = None
+    mock_state.batches = {}
+    mock_state.submit_batch = fake_submit
+    ctx = _make_ctx(state=mock_state)
+    resp = await dashboard_api.handle_download(
+        DummyRequest(
+            method="POST",
+            json_data={"processos": [cnj], "gdrive_map": {cnj: gdrive_url}},
+            ctx=ctx,
+        )
+    )
+    assert resp.status == 201
+    assert captured["gdrive_map"] == {cnj: gdrive_url}
+
+
 @pytest.mark.asyncio
 async def test_handle_progress_when_idle():
     mock_state = MagicMock()

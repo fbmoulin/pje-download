@@ -38,9 +38,22 @@ RUN grep -vE '^playwright[=<>~!]' requirements.txt > /tmp/requirements-dashboard
 COPY --chown=appuser:appuser *.py dashboard.html ./
 COPY --chown=appuser:appuser static/ static/
 COPY --chown=appuser:appuser migrations/ migrations/
+COPY --chown=appuser:appuser tools/ tools/
+# tools/ is what deploy.yml execs INSIDE this container (the MNI credential
+# smoke test, tools/verify_mni_credentials.py). Without it the exec fails with
+# "can't open file" -> exit 2 -> the step downgrades to a warning and a deploy
+# with wrong credentials passes — the exact false assurance F3 replaced. Every
+# path deploy.yml execs in this container must be copied here; guarded by
+# tests/test_image_dependency_pins.py::TestDashboardImageHasWhatDeployExecs.
 RUN mkdir -p /data/downloads && chown -R appuser:appuser /data
+# /healthz, not /api/status: Sprint 8 put every /api/* route behind X-API-Key, so
+# the old probe answered 401 forever and the container could never turn healthy.
+# docker-compose.yml overrode it to /healthz (461a789) but this instruction was
+# left behind, so `docker run` of the bare image still got the 401 loop. The
+# probe must stay on a path in dashboard_api._AUTH_PUBLIC_* — guarded by
+# tests/test_image_dependency_pins.py::TestDashboardHealthcheckIsPublic.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -sf http://127.0.0.1:8007/api/status || exit 1
+    CMD curl -sf http://127.0.0.1:8007/healthz || exit 1
 EXPOSE 8007
 USER appuser
 # ── Build identity — MUST stay last ──

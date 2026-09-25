@@ -143,10 +143,24 @@ Contexto completo, com medições: `~/.claude/docs/handoff/2026-07-25-pje-downlo
 - [ ] **Sink de auditoria no Railway** — `AUDIT_SYNC_ENABLED=true` + `DATABASE_URL=<audit_writer>` (projeto `pje-audit`). A auditoria JSON-L local já grava no volume; o sink é redundância. Ver `CLAUDE.md` §"Audit Sync".
 - [ ] **zeep `forbid_external=True`** (`mni_client.py:178`) — defense-in-depth contra SSRF via `xsd:import`. **Testar antes:** WSDLs do MNI podem importar schemas externos legítimos → pode quebrar com `ExternalReferenceForbidden`. ✅ **Medido 2026-07-25 no TJES:** o WSDL vivo baixa com HTTP 200 (34,5 KB) de IP BR e tem **5 `xs:import`/`xs:include` com ZERO `schemaLocation`** — imports só de namespace, que não disparam fetch externo. ⚠️ Medido **só no TJES**; `TRIBUNAL_ENDPOINTS` tem 6 tribunais e basta um com `schemaLocation` externo para quebrar. Meça os outros 5 antes de ligar.
 
-## Follow-ups pequenos (dívida de tipos, do Sprint 15)
+## ✅ Auditoria completa de 2026-09-20 — 7 achados, todos corrigidos (PRs #46 e #47)
 
-- [ ] Migrar `worker._try_official_api` para construir `ResultMessage` via helper tipado em vez de dict inline (~5 linhas).
-- [ ] Adicionar `batchId: NotRequired[str | None]` ao `ProgressMessage` (`worker.py:1494` seta, o tipo não declara).
+Relatório com medições: `docs/reports/2026-09-20-full-analysis.md`. Classe comum: **controle com nome
+mais forte do que o que ele faz** — três dos primeiros quatro só eram invisíveis porque reportavam sucesso.
+
+- [x] **F1** gauge `pje_audit_sync_lag_seconds` nunca escrito (exportava `0.0`; alerta nunca disparava) — #46, refinado em #47 (baseline lida do disco = idade da entrada pendente mais antiga; linha em voo = ~0).
+- [x] **F2** imagem da dashboard ignorava todos os pins do `requirements.txt` (drift medido: redis 8.1.0, structlog 26) — #46, derivada do requirements.txt excluindo só o playwright (139 MB).
+- [x] **F3** `Validate MNI credentials` saía 0 com credencial vazia E errada — #47: `MNIClient.verify_credentials()` + CLI + step que só falha em rejeição real. **403 agora é `blocked`, não `auth_failed`** (é a geo-restrição do CloudFront, não senha). ⚠️ *Confirmar no primeiro deploy real:* senha errada de verdade deve ler `INVALID` com "Acesso negado".
+- [x] **F4** com MNI ligado, estratégias 2 e 3 eram inalcançáveis (`playwright_deferred` era permanente) — #47: browser lazy, headless, só quando um fallback é necessário e só se `/data/pje-session.json` existir. ⚠️ *Operação:* dormente até alguém gerar esse arquivo (`/api/session/login` ou `python pje_session.py login`).
+- [x] **F5** guard de SSRF do `gdrive_map` era substring — #47: host-aware + sink recebe URL canônica.
+- [x] **F6** `worker.py` gravava documento sem trilha CNJ 615/2025 em 4 sites — #47, pousou ANTES do F4.
+- [x] **F7** (achado ao revisar o F4; pré-existente em produção) **uptime > 60 min em modo MNI transformava qualquer processo sem documentos em `session_expired`, e a dashboard abortava o batch inteiro** (LREM dos jobs restantes). Medido: 59 min → `failed`; 61 min → batch abortado. #47: o timeout operacional só vale para um browser que exista; em modo MNI nunca é fatal.
+- Follow-ups que sobraram (não são defeitos do relatório): pinagem real de host key no deploy (secret `VPS_HOST_KEY`; o `ssh-keyscan` morto foi removido); threshold do alerta de lag vs. tick, se um dia o gauge virar contínuo.
+
+## ~~Follow-ups pequenos (dívida de tipos, do Sprint 15)~~ — já estavam feitos (verificado 2026-09-20)
+
+- [x] ~~Migrar `worker._try_official_api` para construir `ResultMessage` via helper tipado em vez de dict inline (~5 linhas).~~ **Obsoleto:** `_try_official_api` devolve `list[dict]` de metadados de arquivo e não constrói `ResultMessage` nenhum; o único site de construção, `_result()`, já é tipado.
+- [x] ~~Adicionar `batchId: NotRequired[str | None]` ao `ProgressMessage` (`worker.py:1494` seta, o tipo não declara).~~ **Já declarado** em `protocol.py` desde `518c31a`; a referência de linha tinha derivado.
 
 ## Operação — bom saber
 

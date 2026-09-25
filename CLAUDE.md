@@ -40,8 +40,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **485 tests** (measured 2026-09-20; CI reports `485 passed`) — run with `pytest tests/ -q` before any commit
-  - ⚠️ **Without a reachable redis you get "483 passed, 2 skipped", and the 2 skips are silent.**
+- Test suite: pytest — **590 tests** (measured 2026-09-24 on #47; CI reports `590 passed`) — run with `pytest tests/ -q` before any commit
+  - ⚠️ **Without a reachable redis you get "588 passed, 2 skipped", and the 2 skips are silent.**
     They are `tests/test_redis_socket_timeout.py` and `tests/test_result_queue_ttl.py` — the only
     real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
     publishes redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379

@@ -54,6 +54,28 @@ TRIBUNAL_ENDPOINTS: dict[str, str] = {
 from config import MNI_USERNAME, MNI_PASSWORD, MNI_TRIBUNAL, MNI_TIMEOUT, MNI_PROXY
 from config import sanitize_filename as _sanitize_filename
 
+# Syntactically valid CNJ number (matches config.CNJ_PATTERN) that is
+# deliberately non-existent — used only by verify_credentials() to probe
+# authentication without touching a real case number. Do NOT replace with a
+# real CNJ: this repo redacts real case numbers everywhere else.
+_MNI_VERIFY_TEST_PROCESSO = "0000000-00.0000.8.08.0000"
+
+# consultar_processo() status values (see MNIResult.status) that mean the
+# server authenticated the request — the probed process merely doesn't
+# exist, which is expected and desired.
+_MNI_VERIFY_VALID_STATUSES = frozenset({"success", "mni_error", "not_found"})
+# Status value that means the server explicitly rejected our credentials —
+# a SOAP fault "Acesso negado"/"Unauthorized". Reuses consultar_processo's OWN
+# classification; verify_credentials does not re-derive this.
+_MNI_VERIFY_INVALID_STATUSES = frozenset({"auth_failed"})
+# A bare HTTP 403 ("blocked") is deliberately NOT here. The MNI never answers
+# bad credentials with 403; CloudFront's geo-restriction does (see the
+# classifier branch in consultar_processo). Calling that "invalid" would fail
+# a deploy with "credentials rejected" during a geo incident and send the
+# operator after the wrong cause — so the probe reports it as inconclusive,
+# with the likely cause named.
+_MNI_VERIFY_BLOCKED_STATUSES = frozenset({"blocked"})
+
 
 # ─────────────────────────────────────────────
 # DATA CLASSES
@@ -104,6 +126,12 @@ class MNIResult:
     processo: MNIProcesso | None = None
     error: str | None = None
     raw_response: Any = None
+    # Internal classification computed by consultar_processo (e.g. "success",
+    # "mni_error", "not_found", "auth_failed", "timeout", "parse_error",
+    # "error"). Additive field — existing callers that only read `.success`/
+    # `.error`/`.processo` are unaffected. Exposed so verify_credentials()
+    # can reuse this SAME classification instead of inventing a parallel one.
+    status: str | None = None
 
 
 # ─────────────────────────────────────────────
@@ -254,18 +282,39 @@ class MNIClient:
             mensagem = getattr(result, "mensagem", "")
 
             if not sucesso:
-                log.warning(
-                    "mni.consultar_processo.mni_error",
-                    processo=numero_processo,
-                    mensagem=mensagem,
-                )
+                # A credential rejection can travel in the BODY (sucesso=false +
+                # mensagem) rather than as a SOAP fault. The fault branch below
+                # already maps "Acesso negado"/"Unauthorized" to auth_failed;
+                # apply the same rule here, or verify_credentials() would read a
+                # body-level rejection as "mni_error" -> "valid" and a deploy
+                # with dead credentials would pass. Same classifier, one rule.
+                msg_text = str(mensagem or "")
+                if "Acesso negado" in msg_text or "Unauthorized" in msg_text:
+                    log.error(
+                        "mni.consultar_processo.auth_failed", processo=numero_processo
+                    )
+                    _body_status = "auth_failed"
+                    user_error = "MNI: credenciais inválidas (Acesso negado)"
+                else:
+                    log.warning(
+                        "mni.consultar_processo.mni_error",
+                        processo=numero_processo,
+                        mensagem=mensagem,
+                    )
+                    _body_status = "mni_error"
+                    user_error = mensagem
                 metrics.mni_latency_seconds.labels(operation=_op).observe(
                     time.monotonic() - t0
                 )
                 metrics.mni_requests_total.labels(
-                    operation=_op, status="mni_error"
+                    operation=_op, status=_body_status
                 ).inc()
-                return MNIResult(success=False, error=mensagem, raw_response=result)
+                return MNIResult(
+                    success=False,
+                    error=user_error,
+                    raw_response=result,
+                    status=_body_status,
+                )
 
             try:
                 processo = self._parse_processo(result, numero_processo)
@@ -280,6 +329,7 @@ class MNIClient:
                     success=False,
                     error=f"Erro ao parsear resposta MNI: {parse_exc}",
                     raw_response=result,
+                    status="parse_error",
                 )
 
             log.info(
@@ -292,7 +342,12 @@ class MNIClient:
                 time.monotonic() - t0
             )
             metrics.mni_requests_total.labels(operation=_op, status="success").inc()
-            return MNIResult(success=True, processo=processo, raw_response=result)
+            return MNIResult(
+                success=True,
+                processo=processo,
+                raw_response=result,
+                status="success",
+            )
 
         except asyncio.TimeoutError:
             log.error(
@@ -304,7 +359,11 @@ class MNIClient:
                 time.monotonic() - t0
             )
             metrics.mni_requests_total.labels(operation=_op, status="timeout").inc()
-            return MNIResult(success=False, error=f"SOAP timeout ({self.timeout}s)")
+            return MNIResult(
+                success=False,
+                error=f"SOAP timeout ({self.timeout}s)",
+                status="timeout",
+            )
 
         except Exception as exc:
             error_msg = str(exc)
@@ -328,7 +387,15 @@ class MNIClient:
                     processo=numero_processo,
                     tribunal=self.tribunal,
                 )
-                _status = "auth_failed"
+                # NOT "auth_failed". A bare HTTP 403 arrives before any SOAP
+                # envelope — the MNI rejects credentials with a SOAP fault
+                # ("Acesso negado", branch above), never with 403. What does
+                # answer 403 is AWS CloudFront's country geo-restriction in
+                # front of PJe/TJES (documented incident, 2026-07-18: a non-BR
+                # IP gets 403 from POP BOS50). The user_error below already
+                # said "bloqueado pelo servidor"; the label now agrees with it,
+                # so verify_credentials() can refuse to call this "invalid".
+                _status = "blocked"
                 user_error = f"MNI indisponível: acesso bloqueado pelo servidor (403 Forbidden) — tribunal={self.tribunal}"
             else:
                 log.error(
@@ -343,7 +410,7 @@ class MNIClient:
                 time.monotonic() - t0
             )
             metrics.mni_requests_total.labels(operation=_op, status=_status).inc()
-            return MNIResult(success=False, error=user_error)
+            return MNIResult(success=False, error=user_error, status=_status)
 
     def _call_consultar_processo(
         self,
@@ -867,6 +934,71 @@ class MNIClient:
                 "wsdl": self.wsdl_url,
                 "error": str(exc),
             }
+
+    # ──────────────────────
+    # VALIDAÇÃO DE CREDENCIAIS
+    # ──────────────────────
+
+    async def verify_credentials(self) -> dict:
+        """
+        Issues exactly ONE `consultarProcesso`-style SOAP call, using a
+        syntactically valid but deliberately non-existent CNJ number, and
+        classifies the outcome using `consultar_processo`'s OWN status
+        classification (see `MNIResult.status`) — never a parallel one.
+
+        Unlike `health_check()`, which only fetches the WSDL and never sends
+        `idConsultante`/`senhaConsultante`, this actually exercises the one
+        code path that transmits credentials (`_call_consultar_processo`).
+
+        Returns:
+            {"result": "valid" | "invalid" | "inconclusive",
+             "reason": str, "latency_ms": float}
+
+        Never logs or returns the password: `consultar_processo` never puts
+        it into `MNIResult.error`, and this method never touches
+        `self.password` directly.
+        """
+        t0 = time.monotonic()
+        result = await self.consultar_processo(
+            _MNI_VERIFY_TEST_PROCESSO,
+            incluir_documentos=False,
+            incluir_cabecalho=False,
+            incluir_movimentacoes=False,
+        )
+        latency_ms = round((time.monotonic() - t0) * 1000, 1)
+        # status is always set by consultar_processo's return points; the
+        # fallback only guards against a future code path that forgets to.
+        status = result.status or ("success" if result.success else "error")
+
+        if status in _MNI_VERIFY_INVALID_STATUSES:
+            outcome = "invalid"
+            reason = result.error or "MNI rejected the credentials"
+        elif status in _MNI_VERIFY_BLOCKED_STATUSES:
+            outcome = "inconclusive"
+            reason = (
+                f"{result.error or 'HTTP 403 before any SOAP reply'} — this is "
+                "not a credential verdict: the MNI rejects credentials with a "
+                "SOAP fault, while a bare 403 is what CloudFront's geo-restriction "
+                "returns to a non-BR IP. Check the egress IP/region first."
+            )
+        elif status in _MNI_VERIFY_VALID_STATUSES:
+            outcome = "valid"
+            reason = (
+                result.error
+                or "MNI authenticated the request (process not found, as expected)"
+            )
+        else:
+            outcome = "inconclusive"
+            reason = result.error or f"unclassified consultar_processo status: {status}"
+
+        log.info(
+            "mni.verify_credentials.result",
+            tribunal=self.tribunal,
+            result=outcome,
+            status=status,
+            latency_ms=latency_ms,
+        )
+        return {"result": outcome, "reason": reason, "latency_ms": latency_ms}
 
 
 # ─────────────────────────────────────────────
