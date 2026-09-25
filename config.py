@@ -123,6 +123,15 @@ MNI_TIMEOUT = int(os.getenv("MNI_TIMEOUT", "60"))
 # Proxy for MNI SOAP calls (optional — needed when VPS IP is blocked by tribunal)
 # Format: http://user:pass@host:port  or  socks5://user:pass@host:port
 MNI_PROXY = os.getenv("MNI_PROXY", "")
+# SSRF hardening: tribunals whose WSDL has been measured to contain zero external
+# schemaLocation references (see docs/specs/2026-09-25-zeep-forbid-external.md), so their
+# zeep Client is safe to construct with Settings(forbid_external=True). Expand this set only
+# after measuring a tribunal's WSDL from a BR-IP host — see that spec's "Future expansion".
+MNI_FORBID_EXTERNAL_TRIBUNALS: frozenset[str] = frozenset(
+    t.strip().upper()
+    for t in os.getenv("MNI_FORBID_EXTERNAL_TRIBUNALS", "TJES").split(",")
+    if t.strip()
+)
 
 # Batch Downloader
 BATCH_SIZE_DEFAULT = int(os.getenv("MNI_BATCH_SIZE", "5"))

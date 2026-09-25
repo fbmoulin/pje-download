@@ -1,6 +1,7 @@
 # SPEC — zeep SSRF hardening: `Settings(forbid_external=True)` in the MNI client
 
-**Status:** draft, awaiting final user validation (scope narrowed 2026-09-25)
+**Status:** Tasks 1–3 DONE (2026-09-25, commit pending). Task 4 (live post-deploy check)
+pending — needs a real deploy first. Task 5 (this doc + CLAUDE.md) in progress.
 **Author:** sessão 2026-09-25
 **Target:** `mni_client.py` (`_get_client`, `TRIBUNAL_ENDPOINTS`), `config.py`
 **Research:** CLAUDE.md backlog item 5; live WSDL measurement of TJES (2026-07-25, recorded
@@ -103,10 +104,11 @@ must be a true no-op for the other 5 tribunals, not just "probably fine."
 
 `forbid_external=True` blocks zeep/lxml from dereferencing any `schemaLocation` (or WSDL
 `import`/`include`) that points outside the document's own origin, raising
-`zeep.exceptions.TransportError` wrapping lxml's `XMLSyntaxError` / `ExternalReferenceForbidden`
-at parse time — i.e., at `MNIClient._get_client()` time, not mid-SOAP-call. This matters for
-Task 2's regression test: the failure mode to prove is "client construction fails loudly," not
-a silent SSRF fetch.
+**`zeep.exceptions.ExternalReferenceForbidden`** directly — confirmed empirically against the
+installed `zeep==4.3.3` (`zeep/loader.py`'s `ImportResolver.resolve()` raises it *before*
+calling `transport.load()`, i.e. before any network attempt). This is a plain `zeep.exceptions.Error`
+subclass, **not** wrapped in `TransportError`/`XMLSyntaxError` as originally guessed here —
+corrected once Task 1/2 actually ran it.
 
 ---
 
@@ -116,60 +118,49 @@ Executed with **TDD** and **frequent commits** — one commit per task, tests wr
 implementation, suite green before moving on. Per `superpowers:writing-plans`, each task is
 independently verifiable; execution follows `superpowers:subagent-driven-development`.
 
-### Task 1 — Prove the corpus can detect the SSRF window (RED)
+### Task 1 — Prove the corpus can detect the SSRF window (RED) — ✅ DONE
 
-Before touching `mni_client.py`, add a **deterministic, offline** regression test that does not
-depend on live tribunal WSDLs: build a small local fixture WSDL/XSD
-(`tests/fixtures/wsdl_external_schema_location.wsdl`) containing one `xsd:import` with a
-`schemaLocation` pointing at an unreachable external host
-(e.g. `http://169.254.169.254/malicious.xsd`, the classic SSRF cloud-metadata target — chosen
-deliberately as the canonical example, never actually reachable in CI). Load it through real
-`zeep.Client` (not mocked — this must exercise the real lxml resolver) with **no**
-`forbid_external` setting and assert it attempts the external fetch (raises a connection error
-to the bogus host, proving the fetch was attempted — i.e., today's code is exploitable in
-principle). This test documents the vulnerability window and must be written and shown
-failing/behaving-as-vulnerable against current `master` before Task 2.
+Added `tests/fixtures/wsdl_external_schema_location.wsdl`: a minimal valid WSDL whose `<types>`
+carries one `xsd:import` with `schemaLocation="http://192.0.2.1/malicious.xsd"` — RFC 5737
+TEST-NET-1, never routable, chosen over the originally-suggested `169.254.169.254` once this
+session confirmed that address risks hitting a real cloud metadata service on some CI
+providers (Azure IMDS). Real, unmocked `zeep.Client`/lxml load this fixture; only
+`requests.Session.get` is mocked (to a sentinel-raising `MagicMock`, via
+`unittest.mock.patch.object`), so the resolver's own logic is exercised for real, without any
+actual network I/O or CI-provider dependence.
 
-⚠️ If CI runs on Azure-hosted runners (GitHub Actions' default), `169.254.169.254` is Azure's
-real IMDS endpoint and may return an actual HTTP response instead of a connection error —
-confirm the CI runner's cloud provider first; if it's Azure (or any provider serving that IP),
-use a different unreachable target instead (e.g. an address in `TEST-NET-1`, `192.0.2.0/24`,
-reserved by RFC 5737 for documentation and never routable).
+`tests/test_mni_client.py::TestForbidExternalSSRFFixture::test_without_forbid_external_the_fetch_is_attempted`
+confirms the vulnerability window: with no `Settings`, `zeep.Client(wsdl=FIXTURE)` reaches the
+mocked `session.get` (i.e., attempts the external fetch) — proven empirically, not assumed.
 
-Harness: follow the existing zeep-mocking idiom in `tests/test_mni_client.py:526-531`
-(`patch("zeep.Client", ...)`, `patch("zeep.transports.Transport", ...)`) for the *unit* tests in
-Task 2, but this Task 1 fixture test is intentionally **not** mocked at the zeep layer — mocking
-away lxml's resolver would make it incapable of proving anything.
+### Task 2 — Implement per-tribunal `Settings(forbid_external=...)` (GREEN) — ✅ DONE
 
-### Task 2 — Implement per-tribunal `Settings(forbid_external=...)` (GREEN)
+Added `MNI_FORBID_EXTERNAL_TRIBUNALS` to `config.py` and the `settings=` kwarg to the
+`Client(...)` call in `mni_client.py:_get_client` (now `mni_client.py:213-217`), per the Design
+section — `Settings` imported alongside `Client` from `zeep`.
 
-Add the `MNI_FORBID_EXTERNAL_TRIBUNALS` constant to `config.py` and the `settings=` kwarg to
-the `Client(...)` call in `mni_client.py:_get_client` (currently `mni_client.py:206-209`), per
-the Design section.
+Tests (all in `tests/test_mni_client.py`):
+- `TestForbidExternalSettings::test_hardened_tribunal_gets_forbid_external_true` — mocked
+  `zeep.Client`, constructs `MNIClient(tribunal="TJES", ...)`, asserts the `settings` kwarg's
+  `forbid_external` is `True`.
+- `TestForbidExternalSettings::test_unhardened_tribunal_gets_forbid_external_false` — same,
+  `tribunal="TJBA"`, asserts `False` — the negative case proving this is scoped, not global.
+- `TestForbidExternalSSRFFixture::test_forbid_external_blocks_the_fetch_before_any_network_attempt`
+  — re-runs Task 1's fixture with `Settings(forbid_external=True)`: asserts
+  `zeep.exceptions.ExternalReferenceForbidden` is raised **and** the mocked `session.get` was
+  never called (`mock_get.assert_not_called()`) — the load-bearing assertion, empirically
+  confirmed against the real `zeep==4.3.3`/lxml resolver (see Design section's correction).
 
-Tests:
-- Unit test (mocked, extending the pattern at `tests/test_mni_client.py:526-531`): construct an
-  `MNIClient(tribunal="TJES", ...)` and assert `zeep.Client` is called with a `settings` kwarg
-  whose `forbid_external` is `True`.
-- Companion test: construct an `MNIClient(tribunal="TJBA", ...)` (or any tribunal not in the
-  default set) and assert `forbid_external` is `False` — the negative case that proves this is
-  actually scoped, not accidentally global.
-- Re-run Task 1's fixture test with the new code path, using a tribunal in
-  `MNI_FORBID_EXTERNAL_TRIBUNALS`: assert it now raises `zeep.exceptions.TransportError` /
-  lxml's `XMLSyntaxError` (whichever `forbid_external` surfaces as, per the installed zeep/lxml
-  versions — pin the exact exception class found during implementation) **before** any network
-  attempt reaches the bogus host. This is the load-bearing assertion — the SSRF window from
-  Task 1 must now be closed for TJES.
+### Task 3 — Confirm no regression on existing MNI client tests — ✅ DONE
 
-### Task 3 — Confirm no regression on existing MNI client tests
-
-Run the full `test_mni_client.py` suite. The existing `Client(...)` mocks
-(`tests/test_mni_client.py:526-531` and similar) construct `MagicMock` return values, so they
-are expected to keep passing untouched — but confirm explicitly, since a `settings=` kwarg
-added to a call under test can silently break a mock's `assert_called_with` if one exists. Grep
-for any existing `assert_called_with(wsdl=...)`-style assertion that would need updating to
-include `settings=`. Also confirm the other 5 tribunals' existing tests (constructed with
-`tribunal="TJBA"` etc.) show zero behavior change.
+Full `tests/test_mni_client.py` run: 69 passed (73 with the 4 new tests), the same 2
+pre-existing failures as on `master` (`test_propagates_oserror`,
+`test_audit_called_on_disk_error` — both fail because this sandbox runs as root, so `chmod
+0o444` doesn't block a root write; confirmed by reproducing them against unmodified `master`
+via `git stash`). No `assert_called_with(wsdl=...)`-style assertion existed to break. Full repo
+suite (`pytest tests/ -q`, redis reachable): 592 passed, same 2 pre-existing failures, 594
+total (was 590 per CLAUDE.md; +4 from this spec's new tests). `ruff check`/`format --check`
+clean on the pinned `0.14.14`.
 
 ### Task 4 — Live verification against TJES, post-deploy
 
@@ -196,10 +187,10 @@ there.
 
 | Risk | Mitigation |
 |---|---|
-| `Settings(forbid_external=False)` isn't actually a no-op vs. no `settings` argument at all | Task 3 explicitly asserts zero behavior change for a non-hardened tribunal's existing tests. |
-| Task 1's fixture test is mocked away and proves nothing | Task 1 explicitly uses the real `zeep.Client` / lxml resolver, unmocked, against a local fixture file. |
-| The `169.254.169.254` fixture target is a real, answering cloud-metadata IP on the CI runner's provider (e.g. Azure) | Task 1 explicitly calls out checking the runner's provider and swapping to an RFC 5737 `TEST-NET` address if needed. |
-| `forbid_external` breaks TJES WSDL loading in a way only visible in production, not in Task 2's mocked unit tests | Task 4 is a mandatory live post-deploy check against TJES, not optional. |
+| `Settings(forbid_external=False)` isn't actually a no-op vs. no `settings` argument at all | ✅ Confirmed by Task 3: existing `tribunal="TJBA"`-style tests pass unchanged. |
+| Task 1's fixture test is mocked away and proves nothing | ✅ Real `zeep.Client`/lxml resolver used, unmocked; only `requests.Session.get` (the actual network call) is a sentinel. |
+| The SSRF fixture target is a real, answering cloud-metadata IP on the CI runner's provider (e.g. Azure IMDS) | ✅ Used RFC 5737 `192.0.2.1` (TEST-NET-1) instead of `169.254.169.254`, and the network call itself is mocked, so this is moot regardless of CI provider. |
+| `forbid_external` breaks TJES WSDL loading in a way only visible in production, not in Task 2's mocked unit tests | Task 4 (pending) is a mandatory live post-deploy check against TJES, not optional. |
 | Casing mismatch between `self.tribunal` and `MNI_FORBID_EXTERNAL_TRIBUNALS` | Both sides are `.upper()`d — `self.tribunal` already in `__init__` (`mni_client.py:161`), the config constant's comprehension explicitly too. |
 | Confusing this flag with authentication/authorization hardening | Non-goals table states plainly this is transport-layer SSRF defense only; it does not touch credentials, the allowlist, or response validation. |
 | Someone later "helpfully" expands `MNI_FORBID_EXTERNAL_TRIBUNALS`'s default without measuring that tribunal first | "Future expansion" section states the measurement step explicitly; Task 5's CLAUDE.md update records it as a prerequisite, not just a suggestion. |

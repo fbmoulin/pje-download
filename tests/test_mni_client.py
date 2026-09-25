@@ -556,6 +556,89 @@ class TestGetClient:
 
 
 # ---------------------------------------------------------------------------
+# forbid_external SSRF hardening
+# (docs/specs/2026-09-25-zeep-forbid-external.md)
+# ---------------------------------------------------------------------------
+
+
+class TestForbidExternalSettings:
+    """_get_client must pass Settings(forbid_external=...) scoped per tribunal."""
+
+    def test_hardened_tribunal_gets_forbid_external_true(self):
+        """TJES is in MNI_FORBID_EXTERNAL_TRIBUNALS (the default hardened set)."""
+        client = _make_client()
+        assert client.tribunal == "TJES"
+
+        with (
+            patch("zeep.Client", return_value=MagicMock()) as mock_client_cls,
+            patch("zeep.transports.Transport", return_value=MagicMock()),
+            patch("requests.Session", return_value=MagicMock()),
+        ):
+            client._get_client()
+
+        settings = mock_client_cls.call_args.kwargs["settings"]
+        assert settings.forbid_external is True
+
+    def test_unhardened_tribunal_gets_forbid_external_false(self):
+        """A tribunal not yet measured (e.g. TJBA) must see zero behavior
+        change — forbid_external stays False, matching zeep's own default."""
+        from mni_client import MNIClient
+
+        client = MNIClient(tribunal="TJBA", username="u", password="p")
+
+        with (
+            patch("zeep.Client", return_value=MagicMock()) as mock_client_cls,
+            patch("zeep.transports.Transport", return_value=MagicMock()),
+            patch("requests.Session", return_value=MagicMock()),
+        ):
+            client._get_client()
+
+        settings = mock_client_cls.call_args.kwargs["settings"]
+        assert settings.forbid_external is False
+
+
+class TestForbidExternalSSRFFixture:
+    """Offline, deterministic proof (real zeep/lxml, no live network) that
+    forbid_external actually closes the SSRF window an external
+    schemaLocation opens — not just that the kwarg gets threaded through."""
+
+    FIXTURE = str(
+        Path(__file__).parent / "fixtures" / "wsdl_external_schema_location.wsdl"
+    )
+
+    class _FetchAttempted(Exception):
+        """Raised by the mocked transport in place of a real network call —
+        proves the resolver reached the point of fetching the external URL."""
+
+    def test_without_forbid_external_the_fetch_is_attempted(self):
+        """Documents the vulnerability window: zeep's own default
+        (forbid_external=False) dereferences the external schemaLocation."""
+        import requests
+        from zeep import Client
+
+        with patch.object(
+            requests.Session, "get", side_effect=self._FetchAttempted("fetched")
+        ):
+            with pytest.raises(self._FetchAttempted):
+                Client(wsdl=self.FIXTURE)
+
+    def test_forbid_external_blocks_the_fetch_before_any_network_attempt(self):
+        """The load-bearing assertion: with forbid_external=True, zeep must
+        refuse the import before session.get is ever called."""
+        import requests
+        from zeep import Client, Settings
+        from zeep.exceptions import ExternalReferenceForbidden
+
+        with patch.object(
+            requests.Session, "get", side_effect=self._FetchAttempted("fetched")
+        ) as mock_get:
+            with pytest.raises(ExternalReferenceForbidden):
+                Client(wsdl=self.FIXTURE, settings=Settings(forbid_external=True))
+
+        mock_get.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # consultar_processo (async SOAP)
 # ---------------------------------------------------------------------------
 

@@ -51,7 +51,14 @@ TRIBUNAL_ENDPOINTS: dict[str, str] = {
     "TRT17": "https://pje.trt17.jus.br/pje/intercomunicacao?wsdl",
 }
 
-from config import MNI_USERNAME, MNI_PASSWORD, MNI_TRIBUNAL, MNI_TIMEOUT, MNI_PROXY
+from config import (
+    MNI_USERNAME,
+    MNI_PASSWORD,
+    MNI_TRIBUNAL,
+    MNI_TIMEOUT,
+    MNI_PROXY,
+    MNI_FORBID_EXTERNAL_TRIBUNALS,
+)
 from config import sanitize_filename as _sanitize_filename
 
 # Syntactically valid CNJ number (matches config.CNJ_PATTERN) that is
@@ -186,7 +193,7 @@ class MNIClient:
             # Double-checked locking: another thread may have initialized while waiting
             if self._client is not None:
                 return self._client
-            from zeep import Client
+            from zeep import Client, Settings
             from zeep.transports import Transport
             from requests import Session
 
@@ -197,15 +204,20 @@ class MNIClient:
                 log.info("mni.client.proxy", proxy=proxy.split("@")[-1])
             transport = Transport(session=session, timeout=self.timeout)
 
+            forbid_external = self.tribunal in MNI_FORBID_EXTERNAL_TRIBUNALS
+            settings = Settings(forbid_external=forbid_external)
+
             log.info(
                 "mni.client.init",
                 tribunal=self.tribunal,
                 wsdl=self.wsdl_url,
+                forbid_external=forbid_external,
             )
 
             self._client = Client(
                 wsdl=self.wsdl_url,
                 transport=transport,
+                settings=settings,
             )
         return self._client
 
