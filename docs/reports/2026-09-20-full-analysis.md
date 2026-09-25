@@ -511,9 +511,12 @@ rated ~2/10 for an actual leak and left as is.
 
 ### Residual follow-ups (not defects of this report; recorded so they are not lost)
 
-- **F3, live:** confirm on the first real deploy that a *wrong* password classifies as `INVALID`
-  (SOAP fault "Acesso negado"); a different fault text means `consultar_processo`'s classifier needs
-  one more case. Correct credentials should read `valid`.
+- **F3, live:** the *correct*-credentials half is confirmed. The deploy of `684b920` (#47, run
+  `36077990351`, 2026-09-25) ran the step inside the rebuilt dashboard image and printed
+  `result=valid status=mni_error` ("Processo … não encontrado" for the synthetic probe, i.e.
+  authenticated). Still unexercised: a *wrong* password classifying as `INVALID` (SOAP fault
+  "Acesso negado"); a different fault text means `consultar_processo`'s classifier needs one more
+  case. Deploying bad secrets on purpose is the only way to test it, so it stays open by design.
 - **F4, operator:** the fallback stays dormant until `/data/pje-session.json` exists
   (`/api/session/login` or `python pje_session.py login`).
 - **Deploy host-key pinning:** `deploy.yml` never verified the VPS host key (neither rsync nor the
