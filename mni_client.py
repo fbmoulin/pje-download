@@ -69,8 +69,15 @@ _MNI_VERIFY_TEST_PROCESSO = "0000000-00.0000.8.08.0000"
 
 # consultar_processo() status values (see MNIResult.status) that mean the
 # server authenticated the request — the probed process merely doesn't
-# exist, which is expected and desired.
-_MNI_VERIFY_VALID_STATUSES = frozenset({"success", "mni_error", "not_found"})
+# exist, which is expected and desired. Deliberately does NOT include bare
+# "mni_error": that status is a catch-all for any body-level rejection whose
+# wording doesn't positively match "não encontrado" (see the body-level
+# classifier) — for verify_credentials()'s synthetic, deliberately-nonexistent
+# CNJ, an unrecognized rejection reason is unknown, not confirmed-safe, and
+# must fall through to "inconclusive" rather than a false "valid" (found by
+# code review of #46/#47: a tribunal wording its rejection differently than
+# expected, for ANY reason including bad credentials, used to read as valid).
+_MNI_VERIFY_VALID_STATUSES = frozenset({"success", "not_found"})
 # Status value that means the server explicitly rejected our credentials —
 # a SOAP fault "Acesso negado"/"Unauthorized". Reuses consultar_processo's OWN
 # classification; verify_credentials does not re-derive this.
@@ -307,6 +314,24 @@ class MNIClient:
                     )
                     _body_status = "auth_failed"
                     user_error = "MNI: credenciais inválidas (Acesso negado)"
+                elif "não encontrado" in msg_text:
+                    # Mirrors the exception-branch "Processo não encontrado"
+                    # check below — but that literal substring doesn't match
+                    # every tribunal's real body-level wording (TJES in
+                    # production says "Processo de número X não encontrado!",
+                    # different word order). Matched narrowly on "não
+                    # encontrado" so this stays the ONE positively-recognized
+                    # good outcome for verify_credentials()'s synthetic,
+                    # deliberately-nonexistent CNJ, instead of the previous
+                    # "anything not auth_failed" bucket — that bucket let a
+                    # body-level rejection worded differently than expected
+                    # (any tribunal, any reason) silently read as "valid".
+                    # Found by code review of #46/#47.
+                    log.warning(
+                        "mni.consultar_processo.not_found", processo=numero_processo
+                    )
+                    _body_status = "not_found"
+                    user_error = "Processo não encontrado no tribunal"
                 else:
                     log.warning(
                         "mni.consultar_processo.mni_error",

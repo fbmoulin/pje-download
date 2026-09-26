@@ -1066,11 +1066,19 @@ class TestVerifyCredentials:
         assert isinstance(outcome["latency_ms"], float)
 
     @pytest.mark.asyncio
-    async def test_mni_error_reply_is_valid(self):
-        """sucesso=False business reply (no exception) also means the server
-        authenticated the request — status=mni_error is a 'valid' shape."""
+    async def test_body_level_not_found_reply_is_valid(self):
+        """sucesso=False business reply (no exception) worded as 'not found'
+        also means the server authenticated the request. Uses the REAL
+        production TJES wording ('Processo de número X não encontrado!'),
+        different word order than the exception branch's literal
+        'Processo não encontrado' — proves the narrower 'não encontrado'
+        match (not the old 'anything not auth_failed' bucket) still
+        recognizes it."""
         client = _make_client()
-        soap_resp = _make_soap_response(sucesso=False, mensagem="Processo inexistente")
+        soap_resp = _make_soap_response(
+            sucesso=False,
+            mensagem="Processo de número 00000000000008080000 não encontrado!",
+        )
 
         with (
             patch.object(client, "_get_client", return_value=MagicMock()),
@@ -1078,7 +1086,31 @@ class TestVerifyCredentials:
         ):
             outcome = await client.verify_credentials()
 
-        assert outcome["result"] == "valid"
+        assert outcome["result"] == "valid", outcome
+
+    @pytest.mark.asyncio
+    async def test_body_level_unrecognized_rejection_is_inconclusive_not_valid(self):
+        """Code-review finding on #46/#47: a body-level rejection worded as
+        neither 'não encontrado' nor an auth failure used to fall into the
+        bare 'mni_error' bucket, which verify_credentials treated as VALID —
+        so a tribunal wording its rejection differently than expected, for
+        ANY reason including actually-bad credentials, would misreport as
+        valid. It must be inconclusive instead: this synthetic, deliberately-
+        nonexistent CNJ has exactly one expected legitimate rejection
+        ('not found'); anything else worded differently is unknown, not
+        confirmed-safe."""
+        client = _make_client()
+        soap_resp = _make_soap_response(
+            sucesso=False, mensagem="Erro interno do servidor"
+        )
+
+        with (
+            patch.object(client, "_get_client", return_value=MagicMock()),
+            patch.object(client, "_call_consultar_processo", return_value=soap_resp),
+        ):
+            outcome = await client.verify_credentials()
+
+        assert outcome["result"] == "inconclusive", outcome
 
     @pytest.mark.asyncio
     async def test_body_level_acesso_negado_is_invalid(self):

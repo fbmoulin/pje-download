@@ -992,6 +992,47 @@ class TestExtractGdriveLinkFromPje:
         assert result == "https://drive.google.com/drive/folders/IFRAME_ID"
 
     @pytest.mark.asyncio
+    async def test_http_link_in_html_is_rejected_not_returned_raw(self, monkeypatch):
+        """Code-review finding on #46/#47: this function's own regex accepts
+        both http:// and https://, but extract_folder_id (the guard
+        download_gdrive_folder applies to whatever URL it returns) is
+        https-only by design. Returning the raw http:// link would just
+        have it rejected downstream as gdrive.invalid_url — it must be
+        skipped here instead, and extraction keeps looking."""
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        html = (
+            "<html>see folder "
+            "http://drive.google.com/drive/folders/HTTPONLY123 here, "
+            "nothing else"
+            "</html>"
+        )
+        page = _page_stub_with(content=html)
+
+        result = await extract_gdrive_link_from_pje(page, "0012345-67.2018.8.08.0001")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_link_with_resourcekey_is_canonicalized_not_returned_raw(
+        self, monkeypatch
+    ):
+        """A resourcekey-protected folder's link must come back through
+        canonical_folder_url — same guard download_gdrive_folder itself
+        applies — so a stray tracking query param can't ride along."""
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        html = (
+            "<html>see folder "
+            '<a href="https://drive.google.com/drive/folders/RKEY123'
+            '?resourcekey=abc-XYZ&usp=sharing">docs</a>'
+            "</html>"
+        )
+        page = _page_stub_with(content=html)
+
+        result = await extract_gdrive_link_from_pje(page, "0012345-67.2018.8.08.0001")
+        assert result == (
+            "https://drive.google.com/drive/folders/RKEY123?resourcekey=abc-XYZ"
+        )
+
+    @pytest.mark.asyncio
     async def test_returns_none_when_no_link_anywhere(self, monkeypatch):
         """All paths return empty — function must NOT raise, must return
         None so the caller can fall back to plain MNI."""

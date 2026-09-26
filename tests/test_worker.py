@@ -1292,6 +1292,62 @@ class TestDocumentSavedAudit:
         assert entry.erro is not None
 
     @pytest.mark.asyncio
+    async def test_download_document_api_audits_error_on_non_oserror_exception(
+        self, tmp_path
+    ):
+        """A non-OSError failure (e.g. a Playwright transport error) must
+        still be audited — found by code review of #46/#47: this branch
+        used to log-and-swallow with zero audit entry."""
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.page = AsyncMock()
+        worker.page.request.get = AsyncMock(
+            side_effect=TimeoutError("navigation timeout")
+        )
+
+        with patch("audit.log_access") as mock_audit:
+            result = await worker._download_document_api(
+                {"id": "d4", "nome": "sentenca.pdf"},
+                tmp_path,
+                "5000004-00.2024.8.08.0001",
+            )
+
+        assert result is None
+        mock_audit.assert_called_once()
+        entry = mock_audit.call_args[0][0]
+        assert entry.event_type == "document_saved"
+        assert entry.status == "error"
+        assert entry.fonte == "pje_api"
+        assert entry.erro is not None
+
+    @pytest.mark.asyncio
+    async def test_download_document_api_audits_error_on_non_200_status(self, tmp_path):
+        """A non-200 HTTP response raises no exception, so it must be
+        audited from the success path's own branch — found by code review
+        of #46/#47: previously silent, zero audit entry."""
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        response = AsyncMock()
+        response.status = 404
+        worker.page = AsyncMock()
+        worker.page.request.get = AsyncMock(return_value=response)
+
+        with patch("audit.log_access") as mock_audit:
+            result = await worker._download_document_api(
+                {"id": "d5", "nome": "sentenca.pdf"},
+                tmp_path,
+                "5000005-00.2024.8.08.0001",
+            )
+
+        assert result is None
+        mock_audit.assert_called_once()
+        entry = mock_audit.call_args[0][0]
+        assert entry.event_type == "document_saved"
+        assert entry.status == "error"
+        assert entry.fonte == "pje_api"
+        assert "404" in entry.erro
+
+    @pytest.mark.asyncio
     async def test_download_docs_sequential_audits_success(self, tmp_path):
         w = _load_worker_module()
         worker = w.PJeSessionWorker()
