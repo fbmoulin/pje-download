@@ -935,7 +935,18 @@ class PJeSessionWorker:
             except Exception:
                 session_lost = True
             if session_lost:
-                await self.invalidate_session()
+                if self.mni_client is not None:
+                    # F4 made this branch reachable in MNI mode (previously
+                    # self.page was always None there, per F7's history
+                    # above). A helper browser dying mid-job doesn't prove
+                    # the saved session file's cookies are dead — mirrors
+                    # _ensure_browser's own dead-session path (:452), which
+                    # also only closes, never deletes. Only a human re-login
+                    # should invalidate the file in MNI mode. Found by code
+                    # review of #46/#47.
+                    await self._close_browser()
+                else:
+                    await self.invalidate_session()
                 self._health_status = "session_expired"
                 await self._publish_progress(
                     job,
@@ -1247,7 +1258,25 @@ class PJeSessionWorker:
                     "checksum": checksum,
                     "fonte": "api_rest",
                 }
-        except OSError as exc:
+            # Non-200: no exception raised, so this branch (not an `except`)
+            # is the only place that ever sees it — must audit here too, or
+            # a failed download from a bad HTTP status leaves zero CNJ
+            # 615/2025 trail (found by code review of #46/#47).
+            log.warning(
+                "pje.document_download_failed", doc_id=doc_id, status=response.status
+            )
+            self._audit_document_saved(
+                numero_processo,
+                "pje_api",
+                status="error",
+                erro=f"HTTP {response.status}",
+                documento_id=str(doc_id) if doc_id is not None else None,
+            )
+        except Exception as exc:
+            # Any failure reaching/reading the response (timeout, transport
+            # error, disk write failure) — audited the same way regardless
+            # of exception type, so no failure class silently skips the
+            # trail (previously only OSError was audited here).
             log.warning("pje.document_download_failed", doc_id=doc_id, error=str(exc))
             self._audit_document_saved(
                 numero_processo,
@@ -1256,8 +1285,6 @@ class PJeSessionWorker:
                 erro=str(exc),
                 documento_id=str(doc_id) if doc_id is not None else None,
             )
-        except Exception as exc:
-            log.warning("pje.document_download_failed", doc_id=doc_id, error=str(exc))
         return None
 
     # ──────────────────────

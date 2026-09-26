@@ -692,9 +692,25 @@ async def extract_gdrive_link_from_pje(
         for pattern in gdrive_patterns:
             match = re.search(pattern, page_content)
             if match:
-                url = match.group(1)
-                log.info("gdrive.pje.link_found", url=url, processo=numero_processo)
-                return url
+                canonical = canonical_folder_url(match.group(1))
+                if canonical is None:
+                    # Found on the page but doesn't pass the same guard
+                    # download_gdrive_folder itself applies (extract_folder_id) —
+                    # e.g. an http:// link. Returning it raw would just have
+                    # download_gdrive_folder reject it later as gdrive.invalid_url;
+                    # skip and keep looking instead (matches the iframe fallback
+                    # below, which already canonicalizes). Found by code review
+                    # of #46/#47.
+                    log.warning(
+                        "gdrive.pje.link_rejected",
+                        url=match.group(1),
+                        processo=numero_processo,
+                    )
+                    continue
+                log.info(
+                    "gdrive.pje.link_found", url=canonical, processo=numero_processo
+                )
+                return canonical
 
         # Fallback: procurar em links clicáveis na página
         all_links = await page.locator('a[href*="drive.google.com"]').all()
@@ -703,10 +719,20 @@ async def extract_gdrive_link_from_pje(
             if href and (
                 "folders/" in href or "folderview" in href or "open?id=" in href
             ):
+                canonical = canonical_folder_url(href)
+                if canonical is None:
+                    log.warning(
+                        "gdrive.pje.link_rejected_via_href",
+                        url=href,
+                        processo=numero_processo,
+                    )
+                    continue
                 log.info(
-                    "gdrive.pje.link_found_via_href", url=href, processo=numero_processo
+                    "gdrive.pje.link_found_via_href",
+                    url=canonical,
+                    processo=numero_processo,
                 )
-                return href
+                return canonical
 
         # Fallback 2: procurar em iframes (às vezes o link está embeddado)
         iframes = await page.locator('iframe[src*="drive.google.com"]').all()
@@ -733,13 +759,20 @@ async def extract_gdrive_link_from_pje(
                 for pattern in gdrive_patterns:
                     match = re.search(pattern, inner_content)
                     if match:
-                        url = match.group(1)
+                        canonical = canonical_folder_url(match.group(1))
+                        if canonical is None:
+                            log.warning(
+                                "gdrive.pje.link_rejected_in_doc",
+                                url=match.group(1),
+                                processo=numero_processo,
+                            )
+                            continue
                         log.info(
                             "gdrive.pje.link_found_in_doc",
-                            url=url,
+                            url=canonical,
                             processo=numero_processo,
                         )
-                        return url
+                        return canonical
             except Exception:
                 continue
 
