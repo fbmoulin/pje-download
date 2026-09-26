@@ -1131,6 +1131,37 @@ class TestVerifyCredentials:
         assert outcome["result"] == "invalid", outcome
         assert "Acesso negado" in outcome["reason"]
 
+    # Wording measured live against TJES on 2026-09-26 with a deliberately
+    # fake CPF/password: the rejection arrives in the BODY (sucesso=false) as
+    # this exact text. Before this fix it read as "inconclusive", which the
+    # deploy step treats as a warning, so dead credentials still deployed.
+    TJES_LOGIN_FAILED = (
+        "Erro ao realizar login via MNI. exception invoking: loginFailed"
+    )
+
+    @pytest.mark.asyncio
+    async def test_body_level_tjes_login_failed_is_invalid(self):
+        client = _make_client()
+        soap_resp = _make_soap_response(sucesso=False, mensagem=self.TJES_LOGIN_FAILED)
+
+        with (
+            patch.object(client, "_get_client", return_value=MagicMock()),
+            patch.object(client, "_call_consultar_processo", return_value=soap_resp),
+        ):
+            outcome = await client.verify_credentials()
+
+        assert outcome["result"] == "invalid", outcome
+
+    @pytest.mark.asyncio
+    async def test_fault_level_tjes_login_failed_is_invalid(self):
+        client = _make_client()
+        with patch.object(
+            client, "_get_client", side_effect=Exception(self.TJES_LOGIN_FAILED)
+        ):
+            outcome = await client.verify_credentials()
+
+        assert outcome["result"] == "invalid", outcome
+
     @pytest.mark.asyncio
     async def test_success_reply_is_valid(self):
         """The extremely unlikely case where the dummy CNJ resolves is still

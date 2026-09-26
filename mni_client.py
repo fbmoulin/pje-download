@@ -82,6 +82,11 @@ _MNI_VERIFY_VALID_STATUSES = frozenset({"success", "not_found"})
 # a SOAP fault "Acesso negado"/"Unauthorized". Reuses consultar_processo's OWN
 # classification; verify_credentials does not re-derive this.
 _MNI_VERIFY_INVALID_STATUSES = frozenset({"auth_failed"})
+# Substrings that mean "the server rejected our credentials", checked in both
+# the body-level and the SOAP-fault branch. "loginFailed" is the wording TJES
+# actually returns for a wrong CPF/password (measured live 2026-09-26):
+# "Erro ao realizar login via MNI. exception invoking: loginFailed".
+_MNI_AUTH_FAILED_MARKERS = ("Acesso negado", "Unauthorized", "loginFailed")
 # A bare HTTP 403 ("blocked") is deliberately NOT here. The MNI never answers
 # bad credentials with 403; CloudFront's geo-restriction does (see the
 # classifier branch in consultar_processo). Calling that "invalid" would fail
@@ -308,7 +313,7 @@ class MNIClient:
                 # body-level rejection as "mni_error" -> "valid" and a deploy
                 # with dead credentials would pass. Same classifier, one rule.
                 msg_text = str(mensagem or "")
-                if "Acesso negado" in msg_text or "Unauthorized" in msg_text:
+                if any(m in msg_text for m in _MNI_AUTH_FAILED_MARKERS):
                     log.error(
                         "mni.consultar_processo.auth_failed", processo=numero_processo
                     )
@@ -412,7 +417,7 @@ class MNIClient:
                 )
                 _status = "not_found"
                 user_error = "Processo não encontrado no tribunal"
-            elif "Acesso negado" in error_msg or "Unauthorized" in error_msg:
+            elif any(m in error_msg for m in _MNI_AUTH_FAILED_MARKERS):
                 log.error(
                     "mni.consultar_processo.auth_failed", processo=numero_processo
                 )
