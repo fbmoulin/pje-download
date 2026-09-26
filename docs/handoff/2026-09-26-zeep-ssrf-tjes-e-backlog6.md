@@ -20,10 +20,9 @@
   escrita de root neste sandbox). `ruff check .`/`format --check .` limpos na 0.14.14 pinada.
 - **Deploy / produção:**
   - `dd21133` (PR #49) → run `36198261853`, **`conclusion: success`**, confirmado.
-  - `f2aeeec` (PR #50) → run `36210166619`, **estava `in_progress` no fim desta sessão** —
-    **não confirmado**. Primeira ação da próxima sessão: checar esse run
-    (`mcp__github__actions_list list_workflow_runs owner=fbmoulin repo=pje-download
-    resource_id=deploy.yml`) antes de assumir que foi.
+  - `f2aeeec` (PR #50) → run `36210166619`, **`conclusion: success`**, confirmado
+    (checado de novo depois de mesclar o PR #51 deste próprio handoff — estava
+    `in_progress` quando o handoff foi escrito, terminou verde minutos depois).
 - **PRs desta sessão** (todas as três já fechadas, mescladas):
   - #48 — já estava aberto ao início da sessão (herdado da sessão anterior); mesclado como
     primeira ação desta sessão.
@@ -91,8 +90,8 @@
 
 ## Backlog item 6 — estado exato (achados da revisão-com-ref-errada)
 
-4 dos 5 achados de correção foram corrigidos nesta sessão (PR #50, mesclado, run de deploy
-`36210166619` **ainda não confirmado** no fim da sessão):
+4 dos 5 achados de correção foram corrigidos nesta sessão (PR #50, mesclado e deployado —
+run `36210166619`, `success`):
 
 1. `worker.py` `_download_document_api` — auditoria CNJ 615/2025 agora cobre exceções
    genéricas e resposta HTTP não-200 (antes só `OSError`).
@@ -139,12 +138,9 @@ CLAUDE.md, item 6 do Backlog.
 
 ## ▶ Próxima ação concreta
 
-1. **Confirmar o deploy do `f2aeeec`** (run `36210166619`) — estava `in_progress` no fim
-   desta sessão. Se falhou, é a primeira coisa a investigar (nenhuma razão esperada para
-   falhar: mesmo padrão dos deploys anteriores, todos verdes).
-2. **Task 4 da spec do zeep** (verificação ao vivo pós-deploy contra TJES) — precisa de
-   acesso ao `pje-vps`; esta sandbox não tem.
-3. Nada mais está bloqueado. Segue como backlog não-urgente (CLAUDE.md tem o texto
+1. **Task 4 da spec do zeep** (verificação ao vivo pós-deploy contra TJES) — precisa de
+   acesso ao `pje-vps`; esta sandbox não tem. Único item realmente pendente.
+2. Nada mais está bloqueado. Segue como backlog não-urgente (CLAUDE.md tem o texto
    completo): expansão do zeep SSRF para os outros 5 tribunais; os achados de
    qualidade/reuse do item 6; os follow-ups residuais já antigos (pinagem de host key do
    deploy, `TestDocumentSavedAudit` flaky isolado, threshold do alerta de lag).

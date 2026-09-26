@@ -12,10 +12,8 @@ Branch de trabalho: claude/full-analysis-bgj8hi — NUNCA desenvolva nem empurre
 branch sem permissão explícita.
 
 ⚠️ ANTES DE QUALQUER COISA:
-- Confirme o estado real, não confie em números deste prompt: `git status -sb`,
-  `git log --oneline -5`, e (se tiver acesso ao GitHub) o run de deploy mais recente
-  (`deploy.yml`, workflow_run) — no fim da sessão anterior o run do commit f2aeeec estava
-  `in_progress`, não confirmado.
+- Confirme o estado real, não confie em números deste prompt: `git status -sb` e
+  `git log --oneline -5`.
 - `git fetch origin master` sozinho NÃO atualiza o ponteiro local `master` — isso já causou
   uma revisão de código inteira rodar contra ref desatualizada nesta sessão. Rode
   `git branch -f master origin/master` depois de qualquer fetch, ou diffe sempre contra
@@ -38,7 +36,8 @@ Estado ao fim da sessão anterior:
 - Suíte completa: 599 passed, mesmas 2 falhas pré-existentes não relacionadas (chmod 0o444
   não bloqueia root neste sandbox). ruff limpo na 0.14.14.
 - Deploy de dd21133 (#49): run 36198261853, confirmado success. Deploy de f2aeeec (#50):
-  run 36210166619, estava in_progress no fim da sessão — CONFIRME antes de assumir êxito.
+  run 36210166619, confirmado success também (checado de novo depois do #51, docs-only,
+  que não dispara deploy).
 - zeep SSRF hardening (backlog item 5): feito e deployado, mas SÓ para TJES (decisão do
   Felipe, não limitação técnica) — Settings(forbid_external=...) agora é por tribunal via
   MNI_FORBID_EXTERNAL_TRIBUNALS (config.py, default {"TJES"}). Confirmado empiricamente
