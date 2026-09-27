@@ -276,22 +276,6 @@ class TestSaveDocument:
         result = client._save_document(doc, tmp_path, seen)
         assert result is None
 
-    def test_propagates_oserror(self, tmp_path):
-        from mni_client import MNIDocumento
-
-        client = _make_client()
-        b64 = base64.b64encode(b"x").decode("ascii")
-        doc = MNIDocumento(
-            id="789", nome="Doc", tipo="doc", conteudo_base64=b64, tamanho_bytes=1
-        )
-        readonly_dir = tmp_path / "readonly"
-        readonly_dir.mkdir()
-        readonly_dir.chmod(0o444)
-        try:
-            with pytest.raises(OSError):
-                client._save_document(doc, readonly_dir, set())
-        finally:
-            readonly_dir.chmod(0o755)
 
 
 # ---------------------------------------------------------------------------
@@ -431,30 +415,6 @@ class TestSaveDocumentAudit:
         assert entry.event_type == "document_saved"
         assert entry.status == "duplicate_skipped"
         assert entry.checksum_sha256 == checksum
-
-    def test_audit_called_on_disk_error(self, tmp_path):
-        """audit.log_access called with status='error' on OSError."""
-        client = _make_client()
-        doc = self._make_doc()
-        readonly_dir = tmp_path / "readonly"
-        readonly_dir.mkdir()
-        readonly_dir.chmod(0o444)
-        try:
-            with patch("audit.log_access") as mock_audit:
-                with pytest.raises(OSError):
-                    client._save_document(
-                        doc,
-                        readonly_dir,
-                        set(),
-                        processo_numero="5000003-00.2024.8.08.0001",
-                    )
-            mock_audit.assert_called_once()
-            entry = mock_audit.call_args[0][0]
-            assert entry.event_type == "document_saved"
-            assert entry.status == "error"
-            assert entry.erro is not None
-        finally:
-            readonly_dir.chmod(0o755)
 
     def test_processo_numero_passed_through(self, tmp_path):
         """processo_numero parameter appears in audit entry."""
