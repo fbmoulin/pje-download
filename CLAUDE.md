@@ -266,11 +266,20 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
      - `tests/test_mni_client.py::TestSaveDocument::test_propagates_oserror` + `TestSaveDocumentAudit::test_audit_called_on_disk_error` — aspirational tests esperavam OSError handling que nunca existiu em `_save_document()`. Deletado como parte do cleanup final (não era um code defect, teste só). **CI agora verde: 597 passed, 0 failed.**
    - **Qualidade (reuse/simplification) — backlog de menor prioridade:** duplicação do builder `AuditEntry(event_type="document_saved", ...)` entre `worker.py` e `mni_client.py`; `audit_sync.py` faz 3 I/O varreduras redundantes por tick; `gdrive_downloader.py` resourcekey assimetria entre estratégias.
 
-### Phase 2 Backlog (T2.x – Planned, Not Yet Scheduled)
+### Phase 2 Sprint 1 — SSRF Hardening Expansion (DONE 2026-09-28)
+
+✅ **T2.1 Complete:** Expanded `forbid_external` from TJES only to all 6 tribunals (TJES, TJES_2G, TJBA, TJBA_2G, TJCE, TRT17).
+- Spec: `docs/specs/2026-09-28-phase2-sprint1-ssrf-expansion.md`
+- Parallel measurement: 5 subagents (Tasks 1.1–1.5), one per tribunal
+- Consolidated commits: `df821f3` (T1.3) + `4328f70` (T1.2)
+- Test suite: +5 cases (TestForbidExternalSettings now 6/6 passing)
+- Config default: `MNI_FORBID_EXTERNAL_TRIBUNALS = "TJES,TJES_2G,TJBA,TJBA_2G,TJCE,TRT17"` (env-configurable)
+- Live verification: All 6 tribunals confirmed SAFE (zero external schemaLocations)
+- Status: Ready for deployment (rollout per tribunal recommended, monitor 24h each)
+
+### Phase 2 Backlog (T3.x – Planned, Not Yet Scheduled)
 
 Candidate items for next sprint(s):
-
-- **T2.1** — Expand SSRF hardening to 5 other tribunals (TJES_2G, TJBA, TJBA_2G, TJCE, TRT17). Measurement-only task: audit `schemaLocation` from each tribunal, add to `MNI_FORBID_EXTERNAL_TRIBUNALS` env var. No code change needed (backport of #49 logic).
 - **T2.2** — Playwright timeout tuning. Current `PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS=300_000` (5 min) may hang on slow networks. Collect telemetry, reduce if possible without regressing success rate.
 - **T2.3** — Redis circuit-breaker refinement. Current threshold `REDIS_CIRCUIT_THRESHOLD=20` may be too strict for prod scale. Review metrics, adjust if telemetry justifies.
 - **T3.1** — Audit log retention policy. Define configurable TTL for `audit_entries` table, S3 archival strategy, Prometheus alert on size growth.
