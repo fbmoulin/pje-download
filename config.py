@@ -130,7 +130,7 @@ MNI_PROXY = os.getenv("MNI_PROXY", "")
 MNI_FORBID_EXTERNAL_TRIBUNALS: frozenset[str] = frozenset(
     t.strip().upper()
     for t in os.getenv(
-        "MNI_FORBID_EXTERNAL_TRIBUNALS", "TJES,TJCE,TRT17,TJBA_2G"
+        "MNI_FORBID_EXTERNAL_TRIBUNALS", "TJES,TJES_2G,TJBA,TJBA_2G,TJCE,TRT17"
     ).split(",")
     if t.strip()
 )

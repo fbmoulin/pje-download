@@ -562,6 +562,26 @@ class TestForbidExternalSettings:
         settings = mock_client_cls.call_args.kwargs["settings"]
         assert settings.forbid_external is False
 
+    def test_forbid_external_tjba(self):
+        """TJBA tribunal uses forbid_external=True (measured 2026-09-28,
+        zero external schemaLocation refs — see
+        docs/specs/2026-09-28-phase2-sprint1-ssrf-expansion.md Task 1.2)."""
+        from mni_client import MNIClient, MNI_FORBID_EXTERNAL_TRIBUNALS
+
+        assert "TJBA" in MNI_FORBID_EXTERNAL_TRIBUNALS, "TJBA not in forbid_external set"
+
+        client = MNIClient(tribunal="TJBA", username="u", password="p")
+
+        with (
+            patch("zeep.Client", return_value=MagicMock()) as mock_client_cls,
+            patch("zeep.transports.Transport", return_value=MagicMock()),
+            patch("requests.Session", return_value=MagicMock()),
+        ):
+            client._get_client()
+
+        settings = mock_client_cls.call_args.kwargs["settings"]
+        assert settings.forbid_external is True
+
     def test_forbid_external_tjce(self):
         """TJCE tribunal uses forbid_external=True (measured 2026-09-28,
         zero external schemaLocation refs — see
