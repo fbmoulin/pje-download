@@ -33,12 +33,12 @@ def _patch_asyncio_to_thread(monkeypatch):
     monkeypatch.setattr(asyncio, "to_thread", _fake_to_thread)
 
 
-def _make_client():
+def _make_client(tribunal="TJES"):
     """Return an MNIClient with lazy init bypassed."""
     from mni_client import MNIClient
 
     client = MNIClient.__new__(MNIClient)
-    client.tribunal = "TJES"
+    client.tribunal = tribunal
     client.username = "user"
     client.password = "pass"
     client.timeout = 60
@@ -540,11 +540,37 @@ class TestForbidExternalSettings:
         assert settings.forbid_external is True
 
     def test_unhardened_tribunal_gets_forbid_external_false(self):
-        """A tribunal not yet measured (e.g. TJBA) must see zero behavior
-        change — forbid_external stays False, matching zeep's own default."""
+        """A tribunal not in MNI_FORBID_EXTERNAL_TRIBUNALS must see zero
+        behavior change — forbid_external stays False, matching zeep's own
+        default. Exercised by patching the module-level constant directly
+        (rather than picking a real tribunal code presumed unhardened) so
+        this assertion can't be invalidated by a sibling measurement task in
+        docs/specs/2026-09-28-phase2-sprint1-ssrf-expansion.md landing
+        concurrently and hardening every known tribunal."""
         from mni_client import MNIClient
 
         client = MNIClient(tribunal="TJBA", username="u", password="p")
+
+        with (
+            patch("mni_client.MNI_FORBID_EXTERNAL_TRIBUNALS", frozenset()),
+            patch("zeep.Client", return_value=MagicMock()) as mock_client_cls,
+            patch("zeep.transports.Transport", return_value=MagicMock()),
+            patch("requests.Session", return_value=MagicMock()),
+        ):
+            client._get_client()
+
+        settings = mock_client_cls.call_args.kwargs["settings"]
+        assert settings.forbid_external is False
+
+    def test_forbid_external_tjce(self):
+        """TJCE tribunal uses forbid_external=True (measured 2026-09-28,
+        zero external schemaLocation refs — see
+        docs/specs/2026-09-28-phase2-sprint1-ssrf-expansion.md Task 1.4)."""
+        from mni_client import MNIClient, MNI_FORBID_EXTERNAL_TRIBUNALS
+
+        assert "TJCE" in MNI_FORBID_EXTERNAL_TRIBUNALS, "TJCE not in forbid_external set"
+
+        client = MNIClient(tribunal="TJCE", username="u", password="p")
 
         with (
             patch("zeep.Client", return_value=MagicMock()) as mock_client_cls,
@@ -554,7 +580,36 @@ class TestForbidExternalSettings:
             client._get_client()
 
         settings = mock_client_cls.call_args.kwargs["settings"]
-        assert settings.forbid_external is False
+        assert settings.forbid_external is True
+
+    def test_forbid_external_trt17(self):
+        """TRT17 tribunal uses forbid_external=True."""
+        from mni_client import MNIClient, MNI_FORBID_EXTERNAL_TRIBUNALS
+
+        assert "TRT17" in MNI_FORBID_EXTERNAL_TRIBUNALS, "TRT17 not in forbid_external set"
+
+        client = MNIClient(tribunal="TRT17", username="u", password="p")
+
+        with (
+            patch("zeep.Client", return_value=MagicMock()) as mock_client_cls,
+            patch("zeep.transports.Transport", return_value=MagicMock()),
+            patch("requests.Session", return_value=MagicMock()),
+        ):
+            client._get_client()
+
+        settings = mock_client_cls.call_args.kwargs["settings"]
+        assert settings.forbid_external is True
+
+    def test_forbid_external_tjba_2g(self):
+        """TJBA_2G tribunal uses forbid_external=True (measured 2026-09-28,
+        zero external schemaLocation refs — see
+        docs/specs/2026-09-28-phase2-sprint1-ssrf-expansion.md Task 1.3)."""
+        client = _make_client(tribunal="TJBA_2G")
+        from mni_client import MNI_FORBID_EXTERNAL_TRIBUNALS
+
+        assert "TJBA_2G" in MNI_FORBID_EXTERNAL_TRIBUNALS, (
+            "TJBA_2G not in forbid_external set"
+        )
 
 
 class TestForbidExternalSSRFFixture:

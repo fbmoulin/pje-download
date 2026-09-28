@@ -129,7 +129,9 @@ MNI_PROXY = os.getenv("MNI_PROXY", "")
 # after measuring a tribunal's WSDL from a BR-IP host — see that spec's "Future expansion".
 MNI_FORBID_EXTERNAL_TRIBUNALS: frozenset[str] = frozenset(
     t.strip().upper()
-    for t in os.getenv("MNI_FORBID_EXTERNAL_TRIBUNALS", "TJES").split(",")
+    for t in os.getenv(
+        "MNI_FORBID_EXTERNAL_TRIBUNALS", "TJES,TJCE,TRT17,TJBA_2G"
+    ).split(",")
     if t.strip()
 )
 
