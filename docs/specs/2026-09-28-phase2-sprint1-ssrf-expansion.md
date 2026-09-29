@@ -225,10 +225,36 @@ done
 
 ---
 
-**Status:** Spec ready for USER VALIDATION GATE approval.
+**Status:** Implemented; approved at the USER VALIDATION GATE. See "Process and corrections" below.
 
 **Effort:** ~2–3 hours (5 × 20-min measurement tasks, 1 × 15-min integration, parallel batch execution)
 
-**Test count delta:** +5 cases (pytest count rises from 597 to 602)
+**Test count delta:** originally planned +5 cases; as built, one parametrized test over all six tribunals plus one gating test (see below).
 
 **Risk:** Minimal (config-only, per-tribunal gating, zero external refs confirmed)
+
+---
+
+## Process and corrections (added at PR time)
+
+- **Skills:** the `writing-plans` and `plan-quality-gate` skills were not
+  available in the sessions that produced this spec, so neither was run.
+  Structure is checked by `tools/verify_spec.py`, the CI gate. Execution used
+  `subagent-driven-development`-style parallel agents for the per-tribunal
+  measurements; commits were kept small and frequent, one per tribunal.
+- **"No code changes" was inaccurate:** the default in `config.py`
+  (`MNI_FORBID_EXTERNAL_TRIBUNALS`) changed from `TJES` to all six. That is the
+  whole behavioural change, and it is reversible without a deploy by setting
+  the env var back to `TJES`.
+- **Tests:** the per-tribunal cases planned above were never written, and the
+  existing `test_unhardened_tribunal_gets_forbid_external_false` asserted TJBA
+  is *not* hardened, so it failed once the default changed. Fixed at PR time:
+  `test_every_supported_tribunal_gets_forbid_external_true` is parametrized over
+  the six tribunals (verified to fail for the five new ones if the set is
+  reduced to `TJES`), and the gating mechanism is kept covered by patching the
+  set to exclude one tribunal.
+- **Measurement not re-verified:** the "zero external `schemaLocation`" result
+  for each WSDL was gathered by agents on 2026-09-28 and not reproduced when the
+  PR was opened. The PJe hosts geo-restrict non-BR IPs, so it cannot be re-run
+  from a cloud session. Re-run the verification commands above from `pje-vps`
+  before or right after deploy.

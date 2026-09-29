@@ -523,10 +523,15 @@ class TestGetClient:
 class TestForbidExternalSettings:
     """_get_client must pass Settings(forbid_external=...) scoped per tribunal."""
 
-    def test_hardened_tribunal_gets_forbid_external_true(self):
-        """TJES is in MNI_FORBID_EXTERNAL_TRIBUNALS (the default hardened set)."""
-        client = _make_client()
-        assert client.tribunal == "TJES"
+    @pytest.mark.parametrize(
+        "tribunal", ["TJES", "TJES_2G", "TJBA", "TJBA_2G", "TJCE", "TRT17"]
+    )
+    def test_every_supported_tribunal_gets_forbid_external_true(self, tribunal):
+        """The default MNI_FORBID_EXTERNAL_TRIBUNALS covers all six tribunals
+        (docs/specs/2026-09-28-phase2-sprint1-ssrf-expansion.md)."""
+        from mni_client import MNIClient
+
+        client = MNIClient(tribunal=tribunal, username="u", password="p")
 
         with (
             patch("zeep.Client", return_value=MagicMock()) as mock_client_cls,
@@ -538,14 +543,16 @@ class TestForbidExternalSettings:
         settings = mock_client_cls.call_args.kwargs["settings"]
         assert settings.forbid_external is True
 
-    def test_unhardened_tribunal_gets_forbid_external_false(self):
-        """A tribunal not yet measured (e.g. TJBA) must see zero behavior
-        change — forbid_external stays False, matching zeep's own default."""
+    def test_tribunal_outside_configured_set_gets_forbid_external_false(self):
+        """Gating stays per tribunal: when the env-configured set excludes a
+        tribunal (rollback lever), it sees zero behavior change and
+        forbid_external stays False, matching zeep's own default."""
         from mni_client import MNIClient
 
         client = MNIClient(tribunal="TJBA", username="u", password="p")
 
         with (
+            patch("mni_client.MNI_FORBID_EXTERNAL_TRIBUNALS", frozenset({"TJES"})),
             patch("zeep.Client", return_value=MagicMock()) as mock_client_cls,
             patch("zeep.transports.Transport", return_value=MagicMock()),
             patch("requests.Session", return_value=MagicMock()),
