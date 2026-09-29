@@ -40,8 +40,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **619 tests** (measured 2026-09-29: 617 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
-  - ⚠️ **Without a reachable redis you get "617 passed, 2 skipped", and the 2 skips are silent.**
+- Test suite: pytest — **622 tests** (measured 2026-09-29: 620 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
+  - ⚠️ **Without a reachable redis you get "620 passed, 2 skipped", and the 2 skips are silent.**
     They are `tests/test_redis_socket_timeout.py` and `tests/test_result_queue_ttl.py` — the only
     real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
     publishes redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379
@@ -239,7 +239,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 **As of 2026-09-29:** All Phase 1 backlog items (1–6) are complete and merged, and Phase 2 T2.1 and T2.2A are merged and deployed (#54, #53). Remaining Phase 2 items are below.
 
-**Test suite status:** 617 passed, 2 skipped without Redis (no failures).
+**Test suite status:** 620 passed, 2 skipped without Redis (no failures).
 
 ### Phase 1 Completed Items (2026-04-04 → 2026-09-27)
 
@@ -253,8 +253,8 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 2. ~~**Grafana dashboard** (fecha P0.4)~~ — DONE 2026-04-18. Stack (Prometheus 2.55 + Grafana 11.3 + Alertmanager 0.27 + blackbox_exporter 0.25) provisionada no openclaw VPS via `ops/monitoring/stack/` (docker-compose). Scrape cross-host via Tailscale. 4 scrape jobs + 5 alert rules + 8 panels. Telegram `@kaiOpsBot` dedicado. Spec: `docs/superpowers/specs/2026-04-18-grafana-dashboard-design.md`.
 3. ~~**Sprint 3B (R1)**~~ — DONE 2026-04-18. PR #15 (`refactor/sprint3b-download-process-split`): `download_process` 438L→80L orchestrator + `DownloadContext` dataclass + 4 `_phase_*` methods + 9 isolation tests (399→408).
 4. ~~**Sprint 4 (A1/A2)**~~ — DONE 2026-05-01. PR #20 squash-merged (`4be29fe`): A1 `protocol.py` (`JobMessage`/`ResultMessage`/`ProgressMessage`/`DeadLetterEntry` typed dataclasses, 122L) + worker `_publish_result` migration + `job_from_json` input validation; A2 `dashboard_api` 7 module globals collapsed into `AppContext` dataclass at `app[APP_CTX_KEY]`. +8 tests (416→424), wire format byte-identical, ruff clean.
-   - Follow-up (5-line): migrate `worker._try_official_api` to construct `ResultMessage` via typed helper instead of inline dict — left out of PR #20 to keep scope tight.
-   - Follow-up (typing): add `batchId: NotRequired[str | None]` to `ProgressMessage` (worker.py:1494 sets it but type doesn't declare; surfaced by code-reviewer agent).
+   - ~~Follow-up (5-line): migrate `worker._try_official_api` to a typed `ResultMessage`~~ — **closed as mis-described 2026-09-29.** `_try_official_api` returns a list of files and never builds a result dict; the only result builder is `worker._result`, which already returns a `ResultMessage`, and the progress payload is already a `ProgressMessage`.
+   - ~~Follow-up (typing): add `batchId` to `ProgressMessage`~~ — **already done** (`protocol.py`, `batchId: NotRequired[str | None]`).
 5. ~~**zeep SSRF hardening (defense-in-depth)**~~ — ✅ **MERGED 2026-09-26 (#49)** (spec `docs/specs/2026-09-25-zeep-forbid-external.md`). Bump para `zeep==4.3.3` já feito antes (`23d5e8a`, fecha Dependabot alert #1 / GHSA-4cc2-g9w2-fhf6). Escopo: **só TJES por enquanto** — `Settings(forbid_external=...)` agora é **por tribunal**, via `MNI_FORBID_EXTERNAL_TRIBUNALS` (`config.py`, default `{"TJES"}`, env-configurável). `mni_client.py:_get_client` passa `settings=Settings(forbid_external=self.tribunal in MNI_FORBID_EXTERNAL_TRIBUNALS)` ao `Client(...)`. Exceção é `zeep.exceptions.ExternalReferenceForbidden` direto — dispara **antes** de qualquer tentativa de rede. Prova via fixture WSDL local (`tests/fixtures/wsdl_external_schema_location.wsdl`) com `schemaLocation` externo em RFC 5737 TEST-NET-1 (`192.0.2.1`). Suite final: 599 passed (+4 testes novos, 2 skipped Redis). Task 4 (live verification pós-deploy): ✅ confirmado verde em produção (worker `/health` contra TJES). Expansão para outros 5 tribunais (`TJES_2G`, `TJBA`, `TJBA_2G`, `TJCE`, `TRT17`) — future sprint, sem PR de código novo (só adicionar à env var após auditar schemaLocation de cada tribunal).
 6. ~~**Achados de code-review sobre #46/#47 (já em produção)**~~ — ✅ **MERGED 2026-09-26 (#50)** — 4 real bugs fixed + 1 test-only issue cleaned. Origem: 2026-09-25, subagentes `/code-review` rodaram contra uma ref desatualizada, os achados eram reais mesmo após merge+deploy.
    - **4 Bugs Fixed (merged #50):**
@@ -264,7 +264,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
      - `mni_client.py` `verify_credentials()` — body-level rejection distingue `not_found` vs `mni_error` genérico (+2 testes).
    - **1 Test-Only Issue Cleaned (2026-09-27, commit b018f7e):**
      - `tests/test_mni_client.py::TestSaveDocument::test_propagates_oserror` + `TestSaveDocumentAudit::test_audit_called_on_disk_error` — aspirational tests esperavam OSError handling que nunca existiu em `_save_document()`. Deletado como parte do cleanup final (não era um code defect, teste só). **CI agora verde: 597 passed, 0 failed.**
-   - **Qualidade (reuse/simplification) — backlog de menor prioridade:** duplicação do builder `AuditEntry(event_type="document_saved", ...)` entre `worker.py` e `mni_client.py`; `audit_sync.py` faz 3 I/O varreduras redundantes por tick; `gdrive_downloader.py` resourcekey assimetria entre estratégias.
+   - **Qualidade (reuse/simplification) — backlog de menor prioridade:** ~~duplicação do builder `AuditEntry(event_type="document_saved", ...)` entre `worker.py` e `mni_client.py`~~ (feito 2026-09-29: `audit.log_document_saved`; os 3 sites em `gdrive_downloader.py` ainda constroem o `AuditEntry` inline); `audit_sync.py` faz 3 I/O varreduras redundantes por tick; `gdrive_downloader.py` resourcekey assimetria entre estratégias.
 
 ### Phase 2 Sprint 1 — SSRF Hardening Expansion (MERGED + DEPLOYED 2026-09-29, #54)
 
