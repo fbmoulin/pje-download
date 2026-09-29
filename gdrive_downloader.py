@@ -343,17 +343,14 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
                         size=total_bytes,
                         index=i + 1,
                     )
-                    audit.log_access(
-                        audit.AuditEntry(
-                            event_type="document_saved",
-                            processo_numero="",
-                            documento_nome=dest.name,
-                            fonte="google_drive",
-                            tribunal=config.MNI_TRIBUNAL,
-                            tamanho_bytes=info.get("tamanhoBytes"),
-                            checksum_sha256=info.get("checksum"),
-                            status="success",
-                        )
+                    audit.log_document_saved(
+                        "",
+                        "google_drive",
+                        config.MNI_TRIBUNAL,
+                        status="success",
+                        documento_nome=dest.name,
+                        tamanho_bytes=info.get("tamanhoBytes"),
+                        checksum_sha256=info.get("checksum"),
                     )
 
                     # Pausa entre downloads
@@ -467,17 +464,14 @@ async def _try_playwright_download(
                             filename=dest.name,
                             index=i + 1,
                         )
-                        audit.log_access(
-                            audit.AuditEntry(
-                                event_type="document_saved",
-                                processo_numero="",
-                                documento_nome=dest.name,
-                                fonte="google_drive",
-                                tribunal=config.MNI_TRIBUNAL,
-                                tamanho_bytes=info.get("tamanhoBytes"),
-                                checksum_sha256=info.get("checksum"),
-                                status="success",
-                            )
+                        audit.log_document_saved(
+                            "",
+                            "google_drive",
+                            config.MNI_TRIBUNAL,
+                            status="success",
+                            documento_nome=dest.name,
+                            tamanho_bytes=info.get("tamanhoBytes"),
+                            checksum_sha256=info.get("checksum"),
                         )
                     except Exception:
                         # Pode ser página de confirmação — tentar clicar botão
@@ -500,17 +494,14 @@ async def _try_playwright_download(
                                 await download2.save_as(str(dest2))
                                 info2 = _file_info(dest2)
                                 files.append(info2)
-                                audit.log_access(
-                                    audit.AuditEntry(
-                                        event_type="document_saved",
-                                        processo_numero="",
-                                        documento_nome=dest2.name,
-                                        fonte="google_drive",
-                                        tribunal=config.MNI_TRIBUNAL,
-                                        tamanho_bytes=info2.get("tamanhoBytes"),
-                                        checksum_sha256=info2.get("checksum"),
-                                        status="success",
-                                    )
+                                audit.log_document_saved(
+                                    "",
+                                    "google_drive",
+                                    config.MNI_TRIBUNAL,
+                                    status="success",
+                                    documento_nome=dest2.name,
+                                    tamanho_bytes=info2.get("tamanhoBytes"),
+                                    checksum_sha256=info2.get("checksum"),
                                 )
                         except Exception as inner_exc:
                             log.warning(
