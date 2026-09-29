@@ -176,6 +176,15 @@ PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS = int(
 PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS = int(
     os.getenv("PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS", "30000")
 )  # 30 seconds
+# How long worker.load_session waits for a human to finish the manual PJe
+# login. Separate from the download caps above on purpose: it waits on a
+# person, not a download, so tuning PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS
+# (Phase 2 T2.2B) must not change it. Default equals the value the two used to
+# share.
+PLAYWRIGHT_LOGIN_TIMEOUT_MS = int(
+    os.getenv("PLAYWRIGHT_LOGIN_TIMEOUT_MS", "300000")
+)  # 5 minutes
+
 # Google Drive Playwright fallback (gdrive_downloader.py). Kept at the 60s that
 # was previously hardcoded there; Drive's confirm-page redirect makes it slower
 # than a PJe document, so it is deliberately not tied to the individual cap.
