@@ -40,8 +40,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **599 tests** (measured 2026-09-27; final count after item 6 cleanup) — run with `pytest tests/ -q` before any commit
-  - ⚠️ **Without a reachable redis you get "588 passed, 2 skipped", and the 2 skips are silent.**
+- Test suite: pytest — **619 tests** (measured 2026-09-29: 617 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
+  - ⚠️ **Without a reachable redis you get "617 passed, 2 skipped", and the 2 skips are silent.**
     They are `tests/test_redis_socket_timeout.py` and `tests/test_result_queue_ttl.py` — the only
     real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
     publishes redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379
@@ -237,9 +237,9 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 ## Backlog — Phase 1 Complete (Items 1–6 DONE)
 
-**As of 2026-09-27:** All Phase 1 backlog items (1–6) are complete and merged. Phase 2 backlog (T2.1+) planned below.
+**As of 2026-09-29:** All Phase 1 backlog items (1–6) are complete and merged, and Phase 2 T2.1 and T2.2A are merged and deployed (#54, #53). Remaining Phase 2 items are below.
 
-**Test suite status:** 597 passed, 2 skipped (no failures) — test count stabilized.
+**Test suite status:** 617 passed, 2 skipped without Redis (no failures).
 
 ### Phase 1 Completed Items (2026-04-04 → 2026-09-27)
 
@@ -266,22 +266,21 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
      - `tests/test_mni_client.py::TestSaveDocument::test_propagates_oserror` + `TestSaveDocumentAudit::test_audit_called_on_disk_error` — aspirational tests esperavam OSError handling que nunca existiu em `_save_document()`. Deletado como parte do cleanup final (não era um code defect, teste só). **CI agora verde: 597 passed, 0 failed.**
    - **Qualidade (reuse/simplification) — backlog de menor prioridade:** duplicação do builder `AuditEntry(event_type="document_saved", ...)` entre `worker.py` e `mni_client.py`; `audit_sync.py` faz 3 I/O varreduras redundantes por tick; `gdrive_downloader.py` resourcekey assimetria entre estratégias.
 
-### Phase 2 Sprint 1 — SSRF Hardening Expansion (DONE 2026-09-28)
+### Phase 2 Sprint 1 — SSRF Hardening Expansion (MERGED + DEPLOYED 2026-09-29, #54)
 
 ✅ **T2.1 Complete:** Expanded `forbid_external` from TJES only to all 6 tribunals (TJES, TJES_2G, TJBA, TJBA_2G, TJCE, TRT17).
 - Spec: `docs/specs/2026-09-28-phase2-sprint1-ssrf-expansion.md`
 - Parallel measurement: 5 subagents (Tasks 1.1–1.5), one per tribunal
-- Consolidated commits: `df821f3` (T1.3) + `4328f70` (T1.2)
-- Test suite: +5 cases (TestForbidExternalSettings now 6/6 passing)
+- Test suite: `test_every_supported_tribunal_gets_forbid_external_true` parametrized over the six tribunals, plus a gating test that patches the set to exclude one
 - Config default: `MNI_FORBID_EXTERNAL_TRIBUNALS = "TJES,TJES_2G,TJBA,TJBA_2G,TJCE,TRT17"` (env-configurable)
-- Live verification: All 6 tribunals confirmed SAFE (zero external schemaLocations)
-- Status: Ready for deployment (rollout per tribunal recommended, monitor 24h each)
+- WSDL measurement: zero external schemaLocations for all 6, gathered by agents 2026-09-28 — **not re-verified from a BR IP; still to do from `pje-vps`** (the PJe hosts geo-block other IPs)
+- Status: deployed (deploy run #100, 2026-09-29). Rollback without a code change: set `MNI_FORBID_EXTERNAL_TRIBUNALS=TJES` (or any subset) in the environment
 
 ### Phase 2 Backlog (T2.x – Planned, Not Yet Scheduled)
 
 Candidate items for next sprint(s):
-- **T2.2** — Playwright timeout tuning, split in two. **T2.2A DONE 2026-09-29** (spec `docs/specs/2026-09-29-phase2-sprint2-playwright-telemetry.md`): `pje_playwright_download_wait_seconds{operation,outcome}` histogram via `metrics.track_playwright_download` at the 4 `worker.py` + 2 `gdrive_downloader.py` `expect_download` sites, Grafana panels 9–10, and `GDRIVE_PLAYWRIGHT_DOWNLOAD_TIMEOUT_MS` (default 60000 = old hardcode). No timeout value changed. **T2.2B (lowering the caps) waits for 1–2 weeks of prod data** and needs its own gate. ⚠️ `PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS` is also the manual-login wait in `worker.py` — split it before lowering. ⚠️ Tests must read the registry via the module under test (`w.metrics`), because `test_image_dependency_pins.py` re-imports `metrics`.
-- **T2.3** — Redis circuit-breaker refinement. Current threshold `REDIS_CIRCUIT_THRESHOLD=20` may be too strict for prod scale. Review metrics, adjust if telemetry justifies.
+- **T2.2** — Playwright timeout tuning, split in two. **T2.2A DONE 2026-09-29** (spec `docs/specs/2026-09-29-phase2-sprint2-playwright-telemetry.md`): `pje_playwright_download_wait_seconds{operation,outcome}` histogram via `metrics.track_playwright_download` at the 4 `worker.py` + 2 `gdrive_downloader.py` `expect_download` sites, Grafana panels 9–10, and `GDRIVE_PLAYWRIGHT_DOWNLOAD_TIMEOUT_MS` (default 60000 = old hardcode). No timeout value changed. **T2.2B (lowering the caps) waits for 1–2 weeks of prod data** and needs its own gate. The manual-login wait was split off 2026-09-29: `worker.load_session` now uses `PLAYWRIGHT_LOGIN_TIMEOUT_MS` (default 300000), so lowering the download caps no longer shortens it (`pje_session.py` keeps its own separate hardcoded 300 s). ⚠️ Tests must read the registry via the module under test (`w.metrics`), because `test_image_dependency_pins.py` re-imports `metrics`.
+- ~~**T2.3** — Redis circuit-breaker refinement.~~ **Closed as stale 2026-09-29.** The spurious trips came from the redis-py 8.0.0 `socket_timeout` regression, already fixed (#32/#33/#35; see the `REDIS_SOCKET_TIMEOUT_*` comment in `config.py`). No evidence `REDIS_CIRCUIT_THRESHOLD=20` is wrong; reopen only if telemetry shows real false trips.
 - **T3.1** — Audit log retention policy. Define configurable TTL for `audit_entries` table, S3 archival strategy, Prometheus alert on size growth.
 - **T3.2** — CI/CD polish. Add pre-commit hook suite (fast ruff + pytest on changed files), reduce feedback latency for devs.
 
