@@ -10,7 +10,13 @@ from unittest.mock import patch
 
 import pytest
 
-from audit import AuditEntry, get_audit_dir, log_access, rotate_logs
+from audit import (
+    AuditEntry,
+    get_audit_dir,
+    log_access,
+    log_document_saved,
+    rotate_logs,
+)
 
 
 def _make_entry(**overrides) -> AuditEntry:
@@ -23,6 +29,53 @@ def _make_entry(**overrides) -> AuditEntry:
     }
     defaults.update(overrides)
     return AuditEntry(**defaults)
+
+
+class TestLogDocumentSaved:
+    """One shared builder for the ``document_saved`` audit event, so the
+    worker and the MNI client cannot drift apart on field names."""
+
+    def test_writes_a_document_saved_line(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AUDIT_LOG_DIR", str(tmp_path))
+        log_document_saved(
+            "0001234-56.2024.8.08.0001",
+            "mni_soap",
+            "TJES",
+            status="success",
+            documento_id="D1",
+            tamanho_bytes=42,
+        )
+
+        path = tmp_path / f"audit-{date.today()}.jsonl"
+        row = json.loads(path.read_text(encoding="utf-8").strip())
+        assert row["event_type"] == "document_saved"
+        assert row["processo_numero"] == "0001234-56.2024.8.08.0001"
+        assert row["fonte"] == "mni_soap"
+        assert row["tribunal"] == "TJES"
+        assert row["status"] == "success"
+        assert row["documento_id"] == "D1"
+        assert row["tamanho_bytes"] == 42
+
+    def test_goes_through_log_access(self):
+        """Callers and tests patch ``audit.log_access``; the helper must
+        reach it through the module global, not a captured reference."""
+        with patch("audit.log_access") as mock_log:
+            log_document_saved("P", "pje_api", "TJBA", status="error", erro="boom")
+
+        mock_log.assert_called_once()
+        entry = mock_log.call_args[0][0]
+        assert isinstance(entry, AuditEntry)
+        assert (entry.event_type, entry.fonte, entry.tribunal) == (
+            "document_saved",
+            "pje_api",
+            "TJBA",
+        )
+        assert (entry.status, entry.erro) == ("error", "boom")
+
+    def test_unknown_field_is_rejected_like_the_dataclass(self):
+        with patch("audit.log_access"):
+            with pytest.raises(TypeError):
+                log_document_saved("P", "x", "T", status="success", nope=1)
 
 
 class TestLogAccess:

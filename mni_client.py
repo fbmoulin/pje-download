@@ -861,16 +861,13 @@ class MNIClient:
                     doc_id=doc.id,
                     checksum=checksum[:12],
                 )
-                audit.log_access(
-                    audit.AuditEntry(
-                        event_type="document_saved",
-                        processo_numero=processo_numero,
-                        documento_id=doc.id,
-                        fonte="mni_soap",
-                        tribunal=self.tribunal,
-                        status="duplicate_skipped",
-                        checksum_sha256=checksum,
-                    )
+                audit.log_document_saved(
+                    processo_numero,
+                    "mni_soap",
+                    self.tribunal,
+                    status="duplicate_skipped",
+                    documento_id=doc.id,
+                    checksum_sha256=checksum,
                 )
                 return None
             seen_checksums.add(checksum)
@@ -883,19 +880,16 @@ class MNIClient:
                 size=len(content_bytes),
                 doc_id=doc.id,
             )
-            audit.log_access(
-                audit.AuditEntry(
-                    event_type="document_saved",
-                    processo_numero=processo_numero,
-                    documento_id=doc.id,
-                    documento_tipo=doc.tipo,
-                    documento_nome=filename,
-                    fonte="mni_soap",
-                    tribunal=self.tribunal,
-                    tamanho_bytes=len(content_bytes),
-                    checksum_sha256=checksum,
-                    status="success",
-                )
+            audit.log_document_saved(
+                processo_numero,
+                "mni_soap",
+                self.tribunal,
+                status="success",
+                documento_id=doc.id,
+                documento_tipo=doc.tipo,
+                documento_nome=filename,
+                tamanho_bytes=len(content_bytes),
+                checksum_sha256=checksum,
             )
 
             return {
@@ -912,16 +906,13 @@ class MNIClient:
                 doc_id=doc.id,
                 error=str(exc),
             )
-            audit.log_access(
-                audit.AuditEntry(
-                    event_type="document_saved",
-                    processo_numero=processo_numero,
-                    documento_id=doc.id,
-                    fonte="mni_soap",
-                    tribunal=self.tribunal,
-                    status="error",
-                    erro=str(exc),
-                )
+            audit.log_document_saved(
+                processo_numero,
+                "mni_soap",
+                self.tribunal,
+                status="error",
+                documento_id=doc.id,
+                erro=str(exc),
             )
             raise  # Disk-full must propagate
         except Exception as exc:

@@ -1091,16 +1091,13 @@ class PJeSessionWorker:
     ) -> None:
         """One CNJ 615/2025 entry per document write attempt from this worker
         (F6). Never raises — `audit.log_access` swallows internally."""
-        audit.log_access(
-            audit.AuditEntry(
-                event_type="document_saved",
-                processo_numero=numero_processo,
-                fonte=fonte,
-                tribunal=self._audit_tribunal(),
-                status=status,
-                erro=erro,
-                **fields,
-            )
+        audit.log_document_saved(
+            numero_processo,
+            fonte,
+            self._audit_tribunal(),
+            status=status,
+            erro=erro,
+            **fields,
         )
 
     # ──────────────────────
