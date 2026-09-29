@@ -442,7 +442,7 @@ class TestTryGdown:
 
         with (
             patch.dict("sys.modules", {"gdown": mock_gdown}),
-            patch("gdrive_downloader.metrics"),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
         ):
             result = await _try_gdown(
                 "https://drive.google.com/drive/folders/ABC123", tmp_path
@@ -473,7 +473,7 @@ class TestTryGdown:
 
         with (
             patch.dict("sys.modules", {"gdown": mock_gdown}),
-            patch("gdrive_downloader.metrics"),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
         ):
             result = await _try_gdown(
                 "https://drive.google.com/drive/folders/ABC123", tmp_path
@@ -488,7 +488,7 @@ class TestTryGdown:
 
         with (
             patch.dict("sys.modules", {"gdown": mock_gdown}),
-            patch("gdrive_downloader.metrics"),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
         ):
             result = await _try_gdown(
                 "https://drive.google.com/drive/folders/ABC123", tmp_path
@@ -544,7 +544,7 @@ class TestTryRequestsParse:
 
         with (
             patch("requests.Session", return_value=session),
-            patch("gdrive_downloader.metrics"),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
             patch("gdrive_downloader.audit"),
         ):
             result = await _try_requests_parse("FOLDER_ID_123", tmp_path)
@@ -569,7 +569,7 @@ class TestTryRequestsParse:
 
         with (
             patch("requests.Session", return_value=session),
-            patch("gdrive_downloader.metrics"),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
         ):
             result = await _try_requests_parse("FOLDER_ID_123", tmp_path)
 
@@ -588,7 +588,7 @@ class TestTryRequestsParse:
 
         with (
             patch("requests.Session", return_value=session),
-            patch("gdrive_downloader.metrics"),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
         ):
             result = await _try_requests_parse("FOLDER_ID_123", tmp_path)
 
@@ -637,7 +637,7 @@ class TestTryRequestsParse:
 
         with (
             patch("requests.Session", return_value=session),
-            patch("gdrive_downloader.metrics"),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
             patch("gdrive_downloader.audit"),
             patch("asyncio.wait_for", side_effect=_timeout_wait_for),
         ):
@@ -654,7 +654,7 @@ class TestTryRequestsParse:
 
         with (
             patch("requests.Session", return_value=session),
-            patch("gdrive_downloader.metrics"),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
             patch("audit.log_access") as mock_log_access,
         ):
             result = await _try_requests_parse("FOLDER_ID_123", tmp_path)
@@ -745,8 +745,35 @@ def _build_pw_mock(output_dir: Path, filenames: list[str]):
     pw_cm = AsyncMock()
     pw_cm.__aenter__ = AsyncMock(return_value=pw)
     pw_cm.__aexit__ = AsyncMock(return_value=False)
+    pw_cm.dl_pages = dl_pages  # exposed so tests can inspect expect_download kwargs
 
     return pw_cm
+
+
+class TestGdrivePlaywrightTimeoutConfig:
+    def test_default_matches_previous_hardcode(self):
+        """Extracting the literal must not change behaviour: 60s stays 60s."""
+        import config
+
+        assert config.GDRIVE_PLAYWRIGHT_DOWNLOAD_TIMEOUT_MS == 60_000
+
+    @pytest.mark.asyncio
+    async def test_expect_download_receives_config_timeout(self, tmp_path):
+        pw_cm = _build_pw_mock(tmp_path, ["report.pdf"])
+        with (
+            patch("playwright.async_api.async_playwright", return_value=pw_cm),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
+            patch("gdrive_downloader.audit"),
+            patch(
+                "gdrive_downloader.config.GDRIVE_PLAYWRIGHT_DOWNLOAD_TIMEOUT_MS", 12_345
+            ),
+        ):
+            await _try_playwright_download(
+                "https://drive.google.com/drive/folders/ABC123", tmp_path
+            )
+
+        (dl_page,) = pw_cm.dl_pages
+        dl_page.expect_download.assert_called_once_with(timeout=12_345)
 
 
 class TestTryPlaywrightDownload:
@@ -757,7 +784,7 @@ class TestTryPlaywrightDownload:
 
         with (
             patch("playwright.async_api.async_playwright", return_value=pw_cm),
-            patch("gdrive_downloader.metrics"),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
             patch("gdrive_downloader.audit"),
         ):
             result = await _try_playwright_download(
@@ -815,7 +842,7 @@ class TestTryPlaywrightDownload:
 
         with (
             patch("playwright.async_api.async_playwright", return_value=pw_cm),
-            patch("gdrive_downloader.metrics"),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
             patch("gdrive_downloader.audit"),
         ):
             result = await _try_playwright_download(
@@ -824,6 +851,18 @@ class TestTryPlaywrightDownload:
 
         # No files downloaded due to timeout — returns None
         assert result is None
+        # The wait is now recorded as a timeout (T2.2A telemetry). Read the
+        # registry gdrive_downloader itself holds: another test re-imports
+        # `metrics`, so a fresh `import metrics` here could be a different one.
+        import gdrive_downloader
+
+        assert (
+            gdrive_downloader.metrics.REGISTRY.get_sample_value(
+                "pje_playwright_download_wait_seconds_count",
+                {"operation": "gdrive", "outcome": "timeout"},
+            )
+            or 0
+        ) >= 1
 
     @pytest.mark.asyncio
     async def test_audit_called(self, tmp_path):
@@ -832,7 +871,7 @@ class TestTryPlaywrightDownload:
 
         with (
             patch("playwright.async_api.async_playwright", return_value=pw_cm),
-            patch("gdrive_downloader.metrics"),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
             patch("audit.log_access") as mock_log_access,
         ):
             result = await _try_playwright_download(
@@ -881,7 +920,7 @@ class TestTryPlaywrightDownload:
 
         with (
             patch("playwright.async_api.async_playwright", return_value=pw_cm),
-            patch("gdrive_downloader.metrics"),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
         ):
             result = await _try_playwright_download(
                 "https://drive.google.com/drive/folders/ABC123", tmp_path
@@ -1094,7 +1133,7 @@ class TestGDrive429Retry:
 
         with (
             patch("requests.Session", return_value=session),
-            patch("gdrive_downloader.metrics"),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
             patch("gdrive_downloader.audit"),
         ):
             result = await _try_requests_parse("FOLDER_ID_RATELIMIT", tmp_path)

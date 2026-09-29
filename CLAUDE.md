@@ -277,10 +277,10 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 - Live verification: All 6 tribunals confirmed SAFE (zero external schemaLocations)
 - Status: Ready for deployment (rollout per tribunal recommended, monitor 24h each)
 
-### Phase 2 Backlog (T3.x – Planned, Not Yet Scheduled)
+### Phase 2 Backlog (T2.x – Planned, Not Yet Scheduled)
 
 Candidate items for next sprint(s):
-- **T2.2** — Playwright timeout tuning. Current `PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS=300_000` (5 min) may hang on slow networks. Collect telemetry, reduce if possible without regressing success rate.
+- **T2.2** — Playwright timeout tuning, split in two. **T2.2A DONE 2026-09-29** (spec `docs/specs/2026-09-29-phase2-sprint2-playwright-telemetry.md`): `pje_playwright_download_wait_seconds{operation,outcome}` histogram via `metrics.track_playwright_download` at the 4 `worker.py` + 2 `gdrive_downloader.py` `expect_download` sites, Grafana panels 9–10, and `GDRIVE_PLAYWRIGHT_DOWNLOAD_TIMEOUT_MS` (default 60000 = old hardcode). No timeout value changed. **T2.2B (lowering the caps) waits for 1–2 weeks of prod data** and needs its own gate. ⚠️ `PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS` is also the manual-login wait in `worker.py` — split it before lowering. ⚠️ Tests must read the registry via the module under test (`w.metrics`), because `test_image_dependency_pins.py` re-imports `metrics`.
 - **T2.3** — Redis circuit-breaker refinement. Current threshold `REDIS_CIRCUIT_THRESHOLD=20` may be too strict for prod scale. Review metrics, adjust if telemetry justifies.
 - **T3.1** — Audit log retention policy. Define configurable TTL for `audit_entries` table, S3 archival strategy, Prometheus alert on size growth.
 - **T3.2** — CI/CD polish. Add pre-commit hook suite (fast ruff + pytest on changed files), reduce feedback latency for devs.

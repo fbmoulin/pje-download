@@ -445,9 +445,12 @@ async def _try_playwright_download(
                     dl_page = await context.new_page()
 
                     try:
-                        async with dl_page.expect_download(timeout=60_000) as dl_info:
-                            await dl_page.goto(dl_url)
-                        download = await dl_info.value
+                        with metrics.track_playwright_download("gdrive"):
+                            async with dl_page.expect_download(
+                                timeout=config.GDRIVE_PLAYWRIGHT_DOWNLOAD_TIMEOUT_MS
+                            ) as dl_info:
+                                await dl_page.goto(dl_url)
+                            download = await dl_info.value
                         filename = (
                             download.suggested_filename or f"gdrive_{file_id}.pdf"
                         )
@@ -483,11 +486,12 @@ async def _try_playwright_download(
                                 'a[href*="confirm="], form[action*="uc"] input[type="submit"]'
                             )
                             if await btn.count() > 0:
-                                async with dl_page.expect_download(
-                                    timeout=60_000
-                                ) as dl2:
-                                    await btn.first.click()
-                                download2 = await dl2.value
+                                with metrics.track_playwright_download("gdrive"):
+                                    async with dl_page.expect_download(
+                                        timeout=config.GDRIVE_PLAYWRIGHT_DOWNLOAD_TIMEOUT_MS
+                                    ) as dl2:
+                                        await btn.first.click()
+                                    download2 = await dl2.value
                                 filename2 = (
                                     download2.suggested_filename
                                     or f"gdrive_{file_id}.pdf"

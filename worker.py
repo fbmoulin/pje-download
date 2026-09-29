@@ -1434,12 +1434,13 @@ class PJeSessionWorker:
             # Clicar no botão e capturar o download
             # Downloads de processo inteiro podem demorar bastante
             try:
-                async with self.page.expect_download(
-                    timeout=PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS
-                ) as download_info:
-                    await download_btn.click()
+                with metrics.track_playwright_download("full_download"):
+                    async with self.page.expect_download(
+                        timeout=PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS
+                    ) as download_info:
+                        await download_btn.click()
 
-                download = await download_info.value
+                    download = await download_info.value
                 raw_name = (
                     download.suggested_filename or f"{numero_processo}_completo.pdf"
                 )
@@ -1506,11 +1507,12 @@ class PJeSessionWorker:
                             'button:has-text("OK"), button:has-text("Baixar"), button:has-text("Download"), button:has-text("Confirmar")'
                         )
                         if await confirm.count() > 0:
-                            async with self.page.expect_download(
-                                timeout=PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS
-                            ) as dl2:
-                                await confirm.first.click()
-                            download2 = await dl2.value
+                            with metrics.track_playwright_download("full_download"):
+                                async with self.page.expect_download(
+                                    timeout=PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS
+                                ) as dl2:
+                                    await confirm.first.click()
+                                download2 = await dl2.value
                             raw_name2 = (
                                 download2.suggested_filename
                                 or f"{numero_processo}_completo.pdf"
@@ -1642,11 +1644,12 @@ class PJeSessionWorker:
                 try:
                     dl_page = await self.context.new_page()
                     try:
-                        async with dl_page.expect_download(
-                            timeout=PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS
-                        ) as dl_info:
-                            await dl_page.goto(url)
-                        download = await dl_info.value
+                        with metrics.track_playwright_download("individual"):
+                            async with dl_page.expect_download(
+                                timeout=PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS
+                            ) as dl_info:
+                                await dl_page.goto(url)
+                            download = await dl_info.value
                         filename = download.suggested_filename or f"doc_{idx:03d}.pdf"
                         dest = output_dir / _unique_filename(output_dir, filename)
                         await download.save_as(str(dest))
@@ -1726,11 +1729,12 @@ class PJeSessionWorker:
                         "pje.browser.individual.captcha_mid_download", downloaded=i
                     )
                     break
-                async with self.page.expect_download(
-                    timeout=PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS
-                ) as download_info:
-                    await link.click()
-                download = await download_info.value
+                with metrics.track_playwright_download("individual"):
+                    async with self.page.expect_download(
+                        timeout=PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS
+                    ) as download_info:
+                        await link.click()
+                    download = await download_info.value
                 filename = download.suggested_filename or f"doc_{i:03d}.pdf"
                 dest = output_dir / _unique_filename(output_dir, filename)
                 await download.save_as(str(dest))

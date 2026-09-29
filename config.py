@@ -176,6 +176,12 @@ PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS = int(
 PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS = int(
     os.getenv("PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS", "30000")
 )  # 30 seconds
+# Google Drive Playwright fallback (gdrive_downloader.py). Kept at the 60s that
+# was previously hardcoded there; Drive's confirm-page redirect makes it slower
+# than a PJe document, so it is deliberately not tied to the individual cap.
+GDRIVE_PLAYWRIGHT_DOWNLOAD_TIMEOUT_MS = int(
+    os.getenv("GDRIVE_PLAYWRIGHT_DOWNLOAD_TIMEOUT_MS", "60000")
+)  # 60 seconds
 
 # Redis queue-consumer tuning. BLPOP timeout is the max per-iteration wait;
 # CIRCUIT_THRESHOLD is the # of consecutive BLPOP errors before the worker
