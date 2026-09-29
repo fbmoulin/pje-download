@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import config
 from gdrive_downloader import (
     _file_info,
     _try_gdown,
@@ -668,6 +670,32 @@ class TestTryRequestsParse:
         assert entry.tamanho_bytes > 0
         assert entry.checksum_sha256 is not None
 
+    @pytest.mark.asyncio
+    async def test_audit_entry_shape(self, tmp_path):
+        """Pins every field of the requests-strategy audit entry."""
+        folder_html = _make_folder_html([("C" * 33, "audit_test.pdf")])
+        session = _make_mock_session(folder_html, b"AUDIT_TEST_CONTENT")
+
+        with (
+            patch("requests.Session", return_value=session),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
+            patch("audit.log_access") as mock_log_access,
+        ):
+            await _try_requests_parse("FOLDER_ID_123", tmp_path)
+
+        entry = mock_log_access.call_args[0][0]
+        assert entry.event_type == "document_saved"
+        assert entry.processo_numero == ""
+        assert entry.fonte == "google_drive"
+        assert entry.tribunal == config.MNI_TRIBUNAL
+        assert entry.status == "success"
+        assert entry.documento_nome == Path(entry.documento_nome).name
+        assert entry.documento_nome.endswith(".pdf")
+        assert entry.tamanho_bytes == len(b"AUDIT_TEST_CONTENT")
+        assert (
+            entry.checksum_sha256 == hashlib.sha256(b"AUDIT_TEST_CONTENT").hexdigest()
+        )
+
 
 # ─────────────────────────────────────────────
 # _try_playwright_download
@@ -884,6 +912,106 @@ class TestTryPlaywrightDownload:
         assert entry.event_type == "document_saved"
         assert entry.fonte == "google_drive"
         assert entry.status == "success"
+
+    @pytest.mark.asyncio
+    async def test_audit_entry_shape_direct_download(self, tmp_path):
+        """Pins every field of the direct-download audit entry."""
+        pw_cm = _build_pw_mock(tmp_path, ["shape.pdf"])
+
+        with (
+            patch("playwright.async_api.async_playwright", return_value=pw_cm),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
+            patch("audit.log_access") as mock_log_access,
+        ):
+            await _try_playwright_download(
+                "https://drive.google.com/drive/folders/ABC123", tmp_path
+            )
+
+        entry = mock_log_access.call_args[0][0]
+        assert entry.event_type == "document_saved"
+        assert entry.processo_numero == ""
+        assert entry.fonte == "google_drive"
+        assert entry.tribunal == config.MNI_TRIBUNAL
+        assert entry.status == "success"
+        assert entry.documento_nome == "shape.pdf"
+        assert entry.tamanho_bytes == len(b"PW_CONTENT")
+        assert entry.checksum_sha256 == hashlib.sha256(b"PW_CONTENT").hexdigest()
+
+    @pytest.mark.asyncio
+    async def test_audit_entry_shape_confirm_page_download(self, tmp_path):
+        """The Drive confirm-page path (first download times out, then the
+        confirm button yields the file) audits with the same shape."""
+        link = AsyncMock()
+        link.get_attribute = AsyncMock(
+            return_value="/file/d/FILE_ID_CONFIRM_XXXXXXXXXXX/view"
+        )
+        page = MagicMock()
+        page.goto = AsyncMock()
+        file_links_loc = MagicMock()
+        file_links_loc.all = AsyncMock(return_value=[link])
+        page.locator = MagicMock(return_value=file_links_loc)
+
+        download2 = AsyncMock()
+        download2.suggested_filename = "confirmed.pdf"
+        download2.save_as = AsyncMock(
+            side_effect=lambda path: Path(path).write_bytes(b"CONFIRMED")
+        )
+
+        async def _value():
+            return download2
+
+        dl_info2 = MagicMock()
+        dl_info2.value = _value()
+        first_cm = AsyncMock()
+        first_cm.__aenter__ = AsyncMock(side_effect=TimeoutError("first"))
+        first_cm.__aexit__ = AsyncMock(return_value=False)
+        second_cm = AsyncMock()
+        second_cm.__aenter__ = AsyncMock(return_value=dl_info2)
+        second_cm.__aexit__ = AsyncMock(return_value=False)
+
+        btn_loc = MagicMock()
+        btn_loc.count = AsyncMock(return_value=1)
+        btn_loc.first = MagicMock()
+        btn_loc.first.click = AsyncMock()
+
+        dl_page = MagicMock()
+        dl_page.goto = AsyncMock()
+        dl_page.close = AsyncMock()
+        dl_page.locator = MagicMock(return_value=btn_loc)
+        dl_page.expect_download = MagicMock(side_effect=[first_cm, second_cm])
+
+        context = MagicMock()
+        context.new_page = AsyncMock(side_effect=[page, dl_page])
+        browser = MagicMock()
+        browser.new_context = AsyncMock(return_value=context)
+        browser.close = AsyncMock()
+        pw = MagicMock()
+        pw.chromium = MagicMock()
+        pw.chromium.launch = AsyncMock(return_value=browser)
+        pw_cm = MagicMock()
+        pw_cm.__aenter__ = AsyncMock(return_value=pw)
+        pw_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("playwright.async_api.async_playwright", return_value=pw_cm),
+            patch("gdrive_downloader.metrics.gdrive_attempts_total"),
+            patch("audit.log_access") as mock_log_access,
+        ):
+            result = await _try_playwright_download(
+                "https://drive.google.com/drive/folders/ABC123", tmp_path
+            )
+
+        assert result is not None and len(result) == 1
+        mock_log_access.assert_called_once()
+        entry = mock_log_access.call_args[0][0]
+        assert entry.event_type == "document_saved"
+        assert entry.processo_numero == ""
+        assert entry.fonte == "google_drive"
+        assert entry.tribunal == config.MNI_TRIBUNAL
+        assert entry.status == "success"
+        assert entry.documento_nome == "confirmed.pdf"
+        assert entry.tamanho_bytes == len(b"CONFIRMED")
+        assert entry.checksum_sha256 == hashlib.sha256(b"CONFIRMED").hexdigest()
 
     @pytest.mark.asyncio
     async def test_playwright_not_installed(self, tmp_path):

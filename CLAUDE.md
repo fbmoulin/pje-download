@@ -264,7 +264,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
      - `mni_client.py` `verify_credentials()` — body-level rejection distingue `not_found` vs `mni_error` genérico (+2 testes).
    - **1 Test-Only Issue Cleaned (2026-09-27, commit b018f7e):**
      - `tests/test_mni_client.py::TestSaveDocument::test_propagates_oserror` + `TestSaveDocumentAudit::test_audit_called_on_disk_error` — aspirational tests esperavam OSError handling que nunca existiu em `_save_document()`. Deletado como parte do cleanup final (não era um code defect, teste só). **CI agora verde: 597 passed, 0 failed.**
-   - **Qualidade (reuse/simplification) — backlog de menor prioridade:** ~~duplicação do builder `AuditEntry(event_type="document_saved", ...)` entre `worker.py` e `mni_client.py`~~ (feito 2026-09-29: `audit.log_document_saved`; os 3 sites em `gdrive_downloader.py` ainda constroem o `AuditEntry` inline); `audit_sync.py` faz 3 I/O varreduras redundantes por tick; `gdrive_downloader.py` resourcekey assimetria entre estratégias.
+   - **Qualidade (reuse/simplification) — backlog de menor prioridade:** ~~duplicação do builder `AuditEntry(event_type="document_saved", ...)` entre `worker.py` e `mni_client.py`~~ (feito 2026-09-29: `audit.log_document_saved`, usado por `worker.py`, `mni_client.py` e `gdrive_downloader.py`; `pje_session.py` ainda constrói 2 entradas `document_saved` inline, e seus testes mockam o módulo `audit` inteiro, então migrar exige ajustá-los); `audit_sync.py` faz 3 I/O varreduras redundantes por tick; `gdrive_downloader.py` resourcekey assimetria entre estratégias.
 
 ### Phase 2 Sprint 1 — SSRF Hardening Expansion (MERGED + DEPLOYED 2026-09-29, #54)
 
