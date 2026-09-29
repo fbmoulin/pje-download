@@ -61,6 +61,7 @@ from config import (
     MNI_HEALTH_CACHE_TTL_SECS,
     PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS,
     PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS,
+    PLAYWRIGHT_LOGIN_TIMEOUT_MS,
     REDIS_BLPOP_TIMEOUT_SECS,
     REDIS_RESULT_QUEUE_TTL_SECS,
     REDIS_SOCKET_TIMEOUT_SECS,
@@ -350,7 +351,7 @@ class PJeSessionWorker:
         try:
             await self.page.wait_for_url(
                 lambda url: "login" not in url.lower(),
-                timeout=PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS,
+                timeout=PLAYWRIGHT_LOGIN_TIMEOUT_MS,
             )
         except Exception:
             log.error("pje.session.manual_login_timeout")

@@ -95,8 +95,9 @@ requires a fresh gate** and should not start until the panels show at least
 
 Decision rule to propose at that gate: set each cap to roughly 2× the observed
 p99 of successful waits, and only if timeouts in that window were caused by
-genuine hangs. First decide whether to split the login wait from
-`PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS`.
+genuine hangs. The login-wait coupling is already resolved:
+`worker.load_session` uses its own `PLAYWRIGHT_LOGIN_TIMEOUT_MS` (default
+300000) since 2026-09-29, so lowering the download caps does not shorten it.
 
 ## References
 
