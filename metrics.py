@@ -32,6 +32,8 @@ gdrive_downloader.py
     _try_requests_parse()  -> gdrive_attempts_total (strategy="requests")
     _try_playwright_*()    -> gdrive_attempts_total (strategy="playwright")
     All functions:           status="success" (files returned) or "failed" (exception)
+    Playwright expect_download waits -> playwright_download_wait_seconds
+                             (operation="gdrive", see worker.py below)
 
 batch_downloader.py / dashboard_api.py
     CLI and dashboard control plane both update batch_processos_total,
@@ -39,6 +41,8 @@ batch_downloader.py / dashboard_api.py
     real production path as well as offline runs.
 
 worker.py
+    Playwright expect_download waits (4 sites) -> playwright_download_wait_seconds
+                             operation: full_download | individual
     _publish_result()      -> worker_results_total(status=...)
     _publish_progress()    -> worker_progress_events_total(phase=..., status=...)
     _publish_dead_letter() -> worker_dead_letters_total(reason=...)
@@ -73,6 +77,9 @@ To add instrumentation to a new module
         )
 """
 
+from contextlib import contextmanager
+import time
+
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
 REGISTRY = CollectorRegistry()
@@ -106,6 +113,49 @@ gdrive_attempts_total = Counter(
 )
 # strategy: gdown | requests | playwright
 # status:   success | failed
+
+# ── Playwright download waits ────────────────────────────────────────────────
+
+playwright_download_wait_seconds = Histogram(
+    "pje_playwright_download_wait_seconds",
+    "Time spent in a Playwright expect_download wait, by operation and outcome",
+    ["operation", "outcome"],
+    buckets=[1, 2, 5, 10, 20, 30, 45, 60, 90, 120, 180, 240, 300],
+    registry=REGISTRY,
+)
+# operation: full_download | individual | gdrive
+# outcome:   success | timeout | error
+# Timeouts land in the bucket of the configured cap, so the success-side
+# distribution is what shows how far PLAYWRIGHT_*_DOWNLOAD_TIMEOUT_MS can
+# safely be lowered. Buckets top out at 300s = the default full-download cap.
+
+
+@contextmanager
+def track_playwright_download(operation: str):
+    """Time a Playwright download wait and record its outcome.
+
+    Wrap the ``expect_download`` block *and* the ``await info.value`` — Playwright
+    raises the timeout on the latter. Exceptions always propagate. A timeout is
+    recognised by class name so playwright's own ``TimeoutError`` (which does
+    not subclass the builtin) is covered without importing playwright here.
+    Cancellation is not recorded: it says nothing about download speed.
+    """
+    t0 = time.monotonic()
+    outcome = "success"
+    try:
+        yield
+    except Exception as exc:
+        outcome = "timeout" if type(exc).__name__ == "TimeoutError" else "error"
+        raise
+    except BaseException:
+        outcome = ""
+        raise
+    finally:
+        if outcome:
+            playwright_download_wait_seconds.labels(
+                operation=operation, outcome=outcome
+            ).observe(time.monotonic() - t0)
+
 
 # ── Batch downloader ─────────────────────────────────────────────────────────
 
