@@ -40,8 +40,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **622 tests** (measured 2026-09-29: 620 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
-  - ⚠️ **Without a reachable redis you get "620 passed, 2 skipped", and the 2 skips are silent.**
+- Test suite: pytest — **625 tests** (measured 2026-09-30: 623 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
+  - ⚠️ **Without a reachable redis you get "623 passed, 2 skipped", and the 2 skips are silent.**
     They are `tests/test_redis_socket_timeout.py` and `tests/test_result_queue_ttl.py` — the only
     real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
     publishes redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379
@@ -239,7 +239,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 **As of 2026-09-29:** All Phase 1 backlog items (1–6) are complete and merged, and Phase 2 T2.1 and T2.2A are merged and deployed (#54, #53). Remaining Phase 2 items are below.
 
-**Test suite status:** 620 passed, 2 skipped without Redis (no failures).
+**Test suite status:** 623 passed, 2 skipped without Redis (no failures).
 
 ### Phase 1 Completed Items (2026-04-04 → 2026-09-27)
 
@@ -264,7 +264,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
      - `mni_client.py` `verify_credentials()` — body-level rejection distingue `not_found` vs `mni_error` genérico (+2 testes).
    - **1 Test-Only Issue Cleaned (2026-09-27, commit b018f7e):**
      - `tests/test_mni_client.py::TestSaveDocument::test_propagates_oserror` + `TestSaveDocumentAudit::test_audit_called_on_disk_error` — aspirational tests esperavam OSError handling que nunca existiu em `_save_document()`. Deletado como parte do cleanup final (não era um code defect, teste só). **CI agora verde: 597 passed, 0 failed.**
-   - **Qualidade (reuse/simplification) — backlog de menor prioridade:** ~~duplicação do builder `AuditEntry(event_type="document_saved", ...)` entre `worker.py` e `mni_client.py`~~ (feito 2026-09-29: `audit.log_document_saved`, usado por `worker.py`, `mni_client.py` e `gdrive_downloader.py`; `pje_session.py` ainda constrói 2 entradas `document_saved` inline, e seus testes mockam o módulo `audit` inteiro, então migrar exige ajustá-los); `audit_sync.py` faz 3 I/O varreduras redundantes por tick; `gdrive_downloader.py` resourcekey assimetria entre estratégias.
+   - **Qualidade (reuse/simplification) — backlog de menor prioridade:** ~~duplicação do builder `AuditEntry(event_type="document_saved", ...)` entre `worker.py` e `mni_client.py`~~ (feito 2026-09-29: `audit.log_document_saved`, usado por `worker.py`, `mni_client.py`, `gdrive_downloader.py` e `pje_session.py` — todos os eventos `document_saved`; só `batch_started`/`batch_completed`/`session_login` (outros eventos) ainda constroem `AuditEntry` direto. Testes devem patchear `audit.log_access`, não substituir o módulo `audit` inteiro, para observar a entrada); `audit_sync.py` faz 3 I/O varreduras redundantes por tick; `gdrive_downloader.py` resourcekey assimetria entre estratégias.
 
 ### Phase 2 Sprint 1 — SSRF Hardening Expansion (MERGED + DEPLOYED 2026-09-29, #54)
 
