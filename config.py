@@ -4,9 +4,13 @@ import os
 import re
 import hashlib
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # CNJ process number format: NNNNNNN-DD.YYYY.J.TR.OOOO
-CNJ_PATTERN = re.compile(r"^\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}$")
+# re.ASCII: without it ``\d`` matches every Unicode decimal digit (Arabic-Indic,
+# fullwidth, ...), which would pass validation and then reach file paths and
+# audit keys that assume ASCII.
+CNJ_PATTERN = re.compile(r"^\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}$", re.ASCII)
 
 
 def load_env() -> None:
@@ -94,13 +98,33 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> tuple[str, int]:
 # Centralized defaults (all env-configurable)
 # ─────────────────────────────────────────────
 
+
 # PJe / Worker
-_pje_url = os.getenv("PJE_BASE_URL", "https://pje.tjes.jus.br/pje")
-if _pje_url != "https://pje.tjes.jus.br/pje" and (
-    not _pje_url.startswith("https://") or ".jus.br" not in _pje_url
-):
-    raise ValueError(f"PJE_BASE_URL must be HTTPS .jus.br URL, got: {_pje_url}")
-PJE_BASE_URL = _pje_url
+def validate_pje_base_url(url: str) -> str:
+    """Return ``url`` if it is an HTTPS URL whose *host* is under ``.jus.br``.
+
+    The login page is opened from this URL with real credentials, so the check is
+    on the parsed hostname. A substring test (``".jus.br" in url``) also accepts
+    ``https://evil.com/?x=.jus.br``, ``https://pje.jus.br.evil.com`` and
+    ``https://pje.tjes.jus.br@evil.com`` (whose host is ``evil.com``).
+    Backslashes and whitespace are refused outright: browsers and ``urlsplit``
+    disagree about where the host ends when they are present.
+    """
+    ok = False
+    if url and "\\" not in url and not any(c.isspace() for c in url):
+        try:
+            parts = urlsplit(url)
+            ok = parts.scheme == "https" and (parts.hostname or "").endswith(".jus.br")
+        except ValueError:
+            ok = False
+    if not ok:
+        raise ValueError(f"PJE_BASE_URL must be HTTPS .jus.br URL, got: {url}")
+    return url
+
+
+PJE_BASE_URL = validate_pje_base_url(
+    os.getenv("PJE_BASE_URL", "https://pje.tjes.jus.br/pje")
+)
 SESSION_STATE_PATH = Path(os.getenv("SESSION_STATE_PATH", "/data/pje-session.json"))
 DOWNLOAD_BASE_DIR = Path(os.getenv("DOWNLOAD_BASE_DIR", "/data/downloads"))
 AUDIT_LOG_DIR = Path(os.getenv("AUDIT_LOG_DIR", "/data/audit"))

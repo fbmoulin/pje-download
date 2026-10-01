@@ -35,6 +35,7 @@ import structlog
 
 import audit
 import metrics
+from file_utils import DiskWriteError
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.mni-client")
 
@@ -823,6 +824,10 @@ class MNIClient:
                     if batch_idx < len(batches) - 1:
                         await asyncio.sleep(1.0)
 
+                except DiskWriteError:
+                    # Every remaining batch would be fetched over SOAP only to fail
+                    # the same way, and the process would end as a "success".
+                    raise
                 except Exception as exc:
                     log.error(
                         "mni.download.batch_error",
@@ -922,7 +927,9 @@ class MNIClient:
                 documento_id=doc.id,
                 erro=str(exc),
             )
-            raise  # Disk-full must propagate
+            # Disk-full must propagate, as a type callers can tell from a network
+            # OSError (see DiskWriteError).
+            raise DiskWriteError(exc.errno, exc.strerror or str(exc)) from exc
         except Exception as exc:
             log.warning(
                 "mni.download.save_failed",

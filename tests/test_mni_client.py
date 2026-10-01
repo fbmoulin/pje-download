@@ -913,6 +913,98 @@ class TestDownloadDocumentos:
         assert len(saved) == 3
 
     @pytest.mark.asyncio
+    async def test_disk_full_in_phase2_propagates_and_stops_fetching(self, tmp_path):
+        """`_save_document` re-raises OSError on purpose ("Disk-full must
+        propagate"), but the phase-2 loop wrapped it in `except Exception:
+        continue`. A full disk was logged as a batch error, every remaining batch
+        was fetched over SOAP only to fail the same way, and the process was
+        reported as a (partial) success."""
+        import errno
+
+        from mni_client import MNIProcesso, MNIDocumento, MNIResult
+
+        docs = [
+            MNIDocumento(id=f"doc{i}", nome=f"Doc {i}", tipo="doc") for i in range(3)
+        ]
+        processo = MNIProcesso(numero="5000001-00.2024.8.08.0001", documentos=docs)
+        client = _make_client()
+        fetch_calls = []
+
+        async def fake_consultar(numero, **kwargs):
+            fetch_calls.append(kwargs.get("documento_ids", []))
+            did = kwargs["documento_ids"][0]
+            content = f"content-{did}".encode()
+            fetched = MNIDocumento(
+                id=did,
+                nome=f"Doc {did}",
+                tipo="doc",
+                conteudo_base64=base64.b64encode(content).decode("ascii"),
+                tamanho_bytes=len(content),
+            )
+            return MNIResult(
+                success=True,
+                processo=MNIProcesso(numero=numero, documentos=[fetched]),
+            )
+
+        def disk_full(self, data):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with (
+            patch.object(client, "consultar_processo", side_effect=fake_consultar),
+            patch("pathlib.Path.write_bytes", disk_full),
+            patch("audit.log_access"),
+        ):
+            with pytest.raises(OSError) as excinfo:
+                await client.download_documentos(processo, tmp_path, batch_size=1)
+
+        assert excinfo.value.errno == errno.ENOSPC
+        assert len(fetch_calls) == 1, "kept fetching batches after the disk filled up"
+
+    @pytest.mark.asyncio
+    async def test_network_oserror_in_one_batch_does_not_stop_the_next(self, tmp_path):
+        """The disk-full fix must not catch `OSError` wholesale: requests'
+        ConnectionError/Timeout subclass it, and a blip on one batch has always
+        been tolerated."""
+        import requests
+
+        from mni_client import MNIProcesso, MNIDocumento, MNIResult
+
+        docs = [
+            MNIDocumento(id=f"doc{i}", nome=f"Doc {i}", tipo="doc") for i in range(2)
+        ]
+        processo = MNIProcesso(numero="5000001-00.2024.8.08.0001", documentos=docs)
+        client = _make_client()
+        calls = []
+
+        async def flaky_consultar(numero, **kwargs):
+            calls.append(kwargs["documento_ids"])
+            if len(calls) == 1:
+                raise requests.exceptions.ConnectionError("reset by peer")
+            did = kwargs["documento_ids"][0]
+            content = b"ok"
+            fetched = MNIDocumento(
+                id=did,
+                nome=did,
+                tipo="doc",
+                conteudo_base64=base64.b64encode(content).decode("ascii"),
+                tamanho_bytes=len(content),
+            )
+            return MNIResult(
+                success=True,
+                processo=MNIProcesso(numero=numero, documentos=[fetched]),
+            )
+
+        with (
+            patch.object(client, "consultar_processo", side_effect=flaky_consultar),
+            patch("audit.log_access"),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            saved = await client.download_documentos(processo, tmp_path, batch_size=1)
+
+        assert len(calls) == 2
+        assert len(saved) == 1
+
+    @pytest.mark.asyncio
     async def test_progress_callback_tracks_saved_docs(self, tmp_path):
         """Progress callback receives cumulative doc count and bytes."""
         from mni_client import MNIProcesso, MNIDocumento
