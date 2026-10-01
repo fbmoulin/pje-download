@@ -250,6 +250,23 @@ class TestDashboardExclusionLosesNoPin:
             "update both or the tests stop describing the image"
         )
 
+    def test_playwright_absence_check_restores_the_modules_it_evicts(self):
+        """The check above re-imports four app modules. Leaving the NEW module objects
+        in sys.modules splits the suite in two: tests that imported at collection time
+        hold the old objects, while `patch("dashboard_api.X")` and lazy imports hit the
+        new ones. Reproduced: run after this file, the absolute-batch-timeout test spins
+        (its patch of BATCH_MAX_DURATION_SECS lands on the wrong module). Alphabetical
+        ordering was the only thing hiding it."""
+        import importlib
+        import sys
+
+        names = ("dashboard_api", "audit_sync", "metrics", "protocol")
+        before = {n: importlib.import_module(n) for n in names}
+
+        self.test_dashboard_does_not_need_playwright_at_import()
+
+        assert {n: sys.modules.get(n) for n in names} == before
+
     def test_dashboard_does_not_need_playwright_at_import(self):
         """Justifies the exclusion: dropping playwright must change no behaviour.
 
@@ -269,13 +286,20 @@ class TestDashboardExclusionLosesNoPin:
         blocker = _Blocker()
         removed = [m for m in list(sys.modules) if m.startswith("playwright")]
         saved = {m: sys.modules.pop(m) for m in removed}
+        app_modules = ("dashboard_api", "audit_sync", "metrics", "protocol")
+        evicted = {n: sys.modules.get(n) for n in app_modules}
         sys.meta_path.insert(0, blocker)
         try:
             import importlib
 
-            for name in ("dashboard_api", "audit_sync", "metrics", "protocol"):
+            for name in app_modules:
                 sys.modules.pop(name, None)
                 importlib.import_module(name)
         finally:
             sys.meta_path.remove(blocker)
             sys.modules.update(saved)
+            for name, original in evicted.items():
+                if original is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = original

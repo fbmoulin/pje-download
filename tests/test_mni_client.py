@@ -563,6 +563,85 @@ class TestForbidExternalSettings:
         assert settings.forbid_external is False
 
 
+class TestSoapOperationTimeout:
+    """zeep's Transport(timeout=...) only sets `load_timeout` (WSDL fetches). SOAP
+    POSTs use `operation_timeout`, which defaults to None, i.e. no socket timeout.
+    `asyncio.wait_for` around `to_thread` only cancels the awaiter, so without a
+    socket timeout a hung MNI connection leaves its thread blocked forever and each
+    of the 3 retries stacks another one."""
+
+    def test_get_client_sets_operation_timeout_from_the_client_timeout(self):
+        from mni_client import MNIClient
+
+        client = MNIClient(tribunal="TJES", username="u", password="p", timeout=7)
+
+        with (
+            patch("zeep.Client", return_value=MagicMock()),
+            patch(
+                "zeep.transports.Transport", return_value=MagicMock()
+            ) as transport_cls,
+            patch("requests.Session", return_value=MagicMock()),
+        ):
+            client._get_client()
+
+        kwargs = transport_cls.call_args.kwargs
+        assert kwargs["operation_timeout"] == 7
+        assert kwargs["timeout"] == 7
+
+    def test_a_hung_soap_endpoint_times_out_instead_of_blocking_forever(
+        self, monkeypatch
+    ):
+        """End to end with the REAL Transport that `_get_client` builds, against a
+        local socket that accepts the connection and never answers."""
+        import socket
+        import threading
+
+        import requests
+
+        from mni_client import MNIClient
+
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+        monkeypatch.setattr("mni_client.MNI_PROXY", "")
+
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        held = []
+        threading.Thread(
+            target=lambda: held.append(server.accept()[0]), daemon=True
+        ).start()
+
+        client = MNIClient(tribunal="TJES", username="u", password="p", timeout=1)
+        with patch("zeep.Client", return_value=MagicMock()) as zeep_client:
+            client._get_client()
+        transport = zeep_client.call_args.kwargs["transport"]
+
+        outcome: dict = {}
+
+        def _post():
+            try:
+                transport.post(
+                    f"http://127.0.0.1:{server.getsockname()[1]}/", "<x/>", {}
+                )
+            except BaseException as exc:  # noqa: BLE001 - recording for the assert
+                outcome["exc"] = exc
+
+        worker = threading.Thread(target=_post, daemon=True)
+        worker.start()
+        worker.join(timeout=8)
+        try:
+            assert not worker.is_alive(), (
+                "SOAP POST is still blocked after 8s: no socket timeout is set"
+            )
+            assert isinstance(outcome.get("exc"), requests.exceptions.Timeout)
+        finally:
+            for conn in held:
+                conn.close()
+            server.close()
+
+
 class TestForbidExternalSSRFFixture:
     """Offline, deterministic proof (real zeep/lxml, no live network) that
     forbid_external actually closes the SSRF window an external

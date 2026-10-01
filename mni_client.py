@@ -209,7 +209,15 @@ class MNIClient:
             if proxy:
                 session.proxies = {"http": proxy, "https": proxy}
                 log.info("mni.client.proxy", proxy=proxy.split("@")[-1])
-            transport = Transport(session=session, timeout=self.timeout)
+            # `timeout` is zeep's *load* timeout (WSDL fetches only). SOAP POSTs use
+            # `operation_timeout`, which defaults to None = no socket timeout, so a
+            # hung MNI connection would pin its to_thread worker forever (wait_for
+            # only cancels the awaiter) and every retry would stack another one.
+            transport = Transport(
+                session=session,
+                timeout=self.timeout,
+                operation_timeout=self.timeout,
+            )
 
             forbid_external = self.tribunal in MNI_FORBID_EXTERNAL_TRIBUNALS
             settings = Settings(forbid_external=forbid_external)
