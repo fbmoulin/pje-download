@@ -1,5 +1,3 @@
-
-
 # PJe Download
 
 [![CI](https://github.com/fbmoulin/pje-download/actions/workflows/ci.yml/badge.svg)](https://github.com/fbmoulin/pje-download/actions/workflows/ci.yml)
