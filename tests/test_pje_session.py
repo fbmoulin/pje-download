@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -346,43 +347,42 @@ def _make_client(tmp_path):
 class TestTryApiAudit:
     @pytest.mark.asyncio
     async def test_audit_called_on_api_save(self, tmp_path):
-        """_try_api() calls audit.log_access with document_saved."""
-        import audit as real_audit
+        """_try_api() audits one document_saved entry with every field set."""
+        import config
 
         pw, browser, ctx, page, download, api_resp = _mock_playwright_chain()
         client = _make_client(tmp_path)
         output_dir = tmp_path / "output"
         output_dir.mkdir()
 
-        with patch("pje_session.audit") as mock_audit:
-            mock_audit.AuditEntry = real_audit.AuditEntry
+        with patch("audit.log_access") as mock_log:
             result = await client._try_api(
                 ctx, "5000001-02.2024.8.08.0001", output_dir, True
             )
 
         assert len(result) == 1
-        mock_audit.log_access.assert_called_once()
-        entry = mock_audit.log_access.call_args[0][0]
+        mock_log.assert_called_once()
+        entry = mock_log.call_args[0][0]
         assert entry.event_type == "document_saved"
         assert entry.fonte == "pje_api"
         assert entry.processo_numero == "5000001-02.2024.8.08.0001"
+        assert entry.tribunal == config.MNI_TRIBUNAL
         assert entry.status == "success"
+        assert entry.documento_id == "DOC1"
+        assert entry.documento_nome == Path(result[0]["localPath"]).name
 
     @pytest.mark.asyncio
     async def test_audit_includes_checksum(self, tmp_path):
         """_try_api() includes SHA256 checksum of content."""
-        import audit as real_audit
-
         pw, browser, ctx, page, download, api_resp = _mock_playwright_chain()
         client = _make_client(tmp_path)
         output_dir = tmp_path / "output"
         output_dir.mkdir()
 
-        with patch("pje_session.audit") as mock_audit:
-            mock_audit.AuditEntry = real_audit.AuditEntry
+        with patch("audit.log_access") as mock_log:
             await client._try_api(ctx, "5000001-02.2024.8.08.0001", output_dir, True)
 
-        entry = mock_audit.log_access.call_args[0][0]
+        entry = mock_log.call_args[0][0]
         expected_hash = hashlib.sha256(b"PDF_CONTENT").hexdigest()
         assert entry.checksum_sha256 == expected_hash
         assert entry.tamanho_bytes == len(b"PDF_CONTENT")
@@ -468,8 +468,8 @@ def _setup_browser_download_mocks(page, download, output_dir, file_content=b"CON
 class TestTryBrowserAudit:
     @pytest.mark.asyncio
     async def test_audit_called_on_browser_save(self, tmp_path):
-        """_try_browser() calls audit.log_access with document_saved."""
-        import audit as real_audit
+        """_try_browser() audits one document_saved entry with every field set."""
+        import config
 
         pw, browser, ctx, page, download, api_resp = _mock_playwright_chain()
         client = _make_client(tmp_path)
@@ -478,24 +478,26 @@ class TestTryBrowserAudit:
 
         _setup_browser_download_mocks(page, download, output_dir, b"BROWSER_PDF")
 
-        with patch("pje_session.audit") as mock_audit:
-            mock_audit.AuditEntry = real_audit.AuditEntry
+        with patch("audit.log_access") as mock_log:
             result = await client._try_browser(
                 ctx, "5000001-02.2024.8.08.0001", output_dir
             )
 
         assert len(result) >= 1
-        mock_audit.log_access.assert_called_once()
-        entry = mock_audit.log_access.call_args[0][0]
+        mock_log.assert_called_once()
+        entry = mock_log.call_args[0][0]
         assert entry.event_type == "document_saved"
         assert entry.fonte == "pje_browser"
+        assert entry.processo_numero == "5000001-02.2024.8.08.0001"
+        assert entry.tribunal == config.MNI_TRIBUNAL
         assert entry.status == "success"
+        assert entry.documento_id is None
+        assert entry.documento_nome == Path(result[0]["localPath"]).name
+        assert entry.tamanho_bytes == len(b"BROWSER_PDF")
 
     @pytest.mark.asyncio
     async def test_audit_no_checksum_for_browser(self, tmp_path):
         """_try_browser() sets checksum_sha256=None."""
-        import audit as real_audit
-
         pw, browser, ctx, page, download, api_resp = _mock_playwright_chain()
         client = _make_client(tmp_path)
         output_dir = tmp_path / "output"
@@ -503,11 +505,10 @@ class TestTryBrowserAudit:
 
         _setup_browser_download_mocks(page, download, output_dir, b"CONTENT")
 
-        with patch("pje_session.audit") as mock_audit:
-            mock_audit.AuditEntry = real_audit.AuditEntry
+        with patch("audit.log_access") as mock_log:
             await client._try_browser(ctx, "5000001-02.2024.8.08.0001", output_dir)
 
-        entry = mock_audit.log_access.call_args[0][0]
+        entry = mock_log.call_args[0][0]
         assert entry.checksum_sha256 is None
 
 

@@ -209,3 +209,76 @@ class TestBrowserPrimaryModeUnchanged:
         assert result["status"] == "session_expired"
         assert result["status"] in dashboard_api._FATAL_WORKER_STATUSES
         assert worker._health_status == "session_expired"
+
+
+class TestMniModeSessionLostDuringJobKeepsSessionFile:
+    """Code-review finding on #46/#47: F4's `_ensure_browser()` makes
+    `self.page` reachable in MNI mode, which reopened a branch in
+    `download_process`'s outer `except` — the `session_lost` check
+    (`"login" in self.page.url.lower()`) — that used to be dead code there
+    (`self.page` was always `None` in MNI mode before F4). That branch still
+    called the unconditional-delete `invalidate_session()`, exactly the call
+    F7 (above) replaced with `_close_browser()` everywhere else in MNI mode.
+    A stale mid-job redirect glitch would force an unwanted manual re-login."""
+
+    @pytest.mark.asyncio
+    async def test_session_lost_mid_job_in_mni_mode_closes_but_keeps_file(
+        self, tmp_path
+    ):
+        w = _load_worker_module()
+        worker = _mni_worker(w, tmp_path, uptime_minutes=5)  # not a timeout case
+        session_file = tmp_path / "pje-session.json"
+        session_file.write_text("{}")
+        w.SESSION_STATE_PATH = session_file
+
+        page, context, browser = AsyncMock(), AsyncMock(), AsyncMock()
+        page.url = "https://pje.tjes.jus.br/pje/login.seam"
+        worker.page, worker.context, worker._browser = page, context, browser
+        worker.session_valid = worker.fallback_ready = True
+        worker._try_mni_download = AsyncMock(side_effect=RuntimeError("boom"))
+
+        result = await worker.download_process(dict(_JOB))
+
+        assert result["status"] == "session_expired"
+        assert worker._health_status == "session_expired"
+        page.close.assert_awaited_once()
+        context.close.assert_awaited_once()
+        browser.close.assert_awaited_once()
+        assert worker.page is None and worker.context is None
+        assert session_file.exists(), (
+            "a helper browser dying mid-job in MNI mode must not delete the "
+            "operator's session file — only a human re-login should"
+        )
+        assert worker.session_started_at is not None, (
+            "_close_browser (unlike invalidate_session) must not clear "
+            "session_started_at"
+        )
+
+    @pytest.mark.asyncio
+    async def test_session_lost_mid_job_without_mni_still_deletes_file(self, tmp_path):
+        """Control: browser-primary mode keeps the original, stricter
+        behavior — a mid-job login redirect really does mean the session is
+        dead, and there is no MNI pipeline to fall back to."""
+        w = _load_worker_module()
+        w.DOWNLOAD_BASE_DIR = tmp_path
+        worker = w.PJeSessionWorker()
+        worker.mni_client = None
+        worker.redis = None
+        session_file = tmp_path / "pje-session.json"
+        session_file.write_text("{}")
+        w.SESSION_STATE_PATH = session_file
+
+        page, context, browser = AsyncMock(), AsyncMock(), AsyncMock()
+        page.url = "https://pje.tjes.jus.br/pje/login.seam"
+        worker.page, worker.context, worker._browser = page, context, browser
+        worker.session_started_at = datetime.now(UTC)
+        worker._try_official_api = AsyncMock(side_effect=RuntimeError("boom"))
+
+        result = await worker.download_process(dict(_JOB))
+
+        assert result["status"] == "session_expired"
+        assert not session_file.exists(), (
+            "browser-primary mode must keep deleting the session file on a "
+            "mid-job session loss, as before this fix"
+        )
+        assert worker.session_started_at is None

@@ -1,6 +1,6 @@
 {
   "annotations": {"list": []},
-  "description": "pje-download operational observability — 8 panels covering MNI SOAP, GDrive, batch, worker, and Railway audit sync. Spec: 2026-04-18-grafana-dashboard-design.md",
+  "description": "pje-download operational observability — 10 panels covering MNI SOAP, GDrive, batch, worker, Playwright download waits, and Railway audit sync. Spec: 2026-04-18-grafana-dashboard-design.md",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -107,6 +107,22 @@
       "gridPos": {"x": 0, "y": 24, "w": 24, "h": 7},
       "targets": [{"expr": "sum(rate(pje_gdrive_attempts_total{status=\"success\"}[5m])) by (strategy) / clamp_min(sum(rate(pje_gdrive_attempts_total[5m])) by (strategy), 1e-9)", "refId": "A", "legendFormat": "{{strategy}} success rate"}],
       "fieldConfig": {"defaults": {"unit": "percentunit", "custom": {"stacking": {"mode": "none"}}, "min": 0, "max": 1}}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "9. Playwright download wait, successes p50/p95 (tune PLAYWRIGHT_*_TIMEOUT_MS from this)",
+      "gridPos": {"x": 0, "y": 31, "w": 12, "h": 7},
+      "targets": [{"expr": "histogram_quantile(0.50, sum(rate(pje_playwright_download_wait_seconds_bucket{outcome=\"success\"}[1h])) by (le, operation))", "refId": "A", "legendFormat": "{{operation}} p50"}, {"expr": "histogram_quantile(0.95, sum(rate(pje_playwright_download_wait_seconds_bucket{outcome=\"success\"}[1h])) by (le, operation))", "refId": "B", "legendFormat": "{{operation}} p95"}],
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}}
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "10. Playwright download outcomes (1h increase)",
+      "gridPos": {"x": 12, "y": 31, "w": 12, "h": 7},
+      "targets": [{"expr": "sum(increase(pje_playwright_download_wait_seconds_count[1h])) by (operation, outcome)", "refId": "A", "legendFormat": "{{operation}} {{outcome}}"}],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"stacking": {"mode": "none"}}, "min": 0}}
     }
   ],
   "refresh": "30s",

@@ -123,6 +123,17 @@ MNI_TIMEOUT = int(os.getenv("MNI_TIMEOUT", "60"))
 # Proxy for MNI SOAP calls (optional — needed when VPS IP is blocked by tribunal)
 # Format: http://user:pass@host:port  or  socks5://user:pass@host:port
 MNI_PROXY = os.getenv("MNI_PROXY", "")
+# SSRF hardening: tribunals whose WSDL has been measured to contain zero external
+# schemaLocation references (see docs/specs/2026-09-25-zeep-forbid-external.md), so their
+# zeep Client is safe to construct with Settings(forbid_external=True). Expand this set only
+# after measuring a tribunal's WSDL from a BR-IP host — see that spec's "Future expansion".
+MNI_FORBID_EXTERNAL_TRIBUNALS: frozenset[str] = frozenset(
+    t.strip().upper()
+    for t in os.getenv(
+        "MNI_FORBID_EXTERNAL_TRIBUNALS", "TJES,TJES_2G,TJBA,TJBA_2G,TJCE,TRT17"
+    ).split(",")
+    if t.strip()
+)
 
 # Batch Downloader
 BATCH_SIZE_DEFAULT = int(os.getenv("MNI_BATCH_SIZE", "5"))
@@ -165,6 +176,21 @@ PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS = int(
 PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS = int(
     os.getenv("PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS", "30000")
 )  # 30 seconds
+# How long worker.load_session waits for a human to finish the manual PJe
+# login. Separate from the download caps above on purpose: it waits on a
+# person, not a download, so tuning PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS
+# (Phase 2 T2.2B) must not change it. Default equals the value the two used to
+# share.
+PLAYWRIGHT_LOGIN_TIMEOUT_MS = int(
+    os.getenv("PLAYWRIGHT_LOGIN_TIMEOUT_MS", "300000")
+)  # 5 minutes
+
+# Google Drive Playwright fallback (gdrive_downloader.py). Kept at the 60s that
+# was previously hardcoded there; Drive's confirm-page redirect makes it slower
+# than a PJe document, so it is deliberately not tied to the individual cap.
+GDRIVE_PLAYWRIGHT_DOWNLOAD_TIMEOUT_MS = int(
+    os.getenv("GDRIVE_PLAYWRIGHT_DOWNLOAD_TIMEOUT_MS", "60000")
+)  # 60 seconds
 
 # Redis queue-consumer tuning. BLPOP timeout is the max per-iteration wait;
 # CIRCUIT_THRESHOLD is the # of consecutive BLPOP errors before the worker

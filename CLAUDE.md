@@ -40,8 +40,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **590 tests** (measured 2026-09-24 on #47; CI reports `590 passed`) — run with `pytest tests/ -q` before any commit
-  - ⚠️ **Without a reachable redis you get "588 passed, 2 skipped", and the 2 skips are silent.**
+- Test suite: pytest — **625 tests** (measured 2026-09-30: 623 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
+  - ⚠️ **Without a reachable redis you get "623 passed, 2 skipped", and the 2 skips are silent.**
     They are `tests/test_redis_socket_timeout.py` and `tests/test_result_queue_ttl.py` — the only
     real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
     publishes redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379
@@ -235,9 +235,13 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
     replaced), not a hand-edit on the box.
   - Deploying by registry digest stays deliberately out of scope for a single-host app.
 
-## Backlog (não-código)
+## Backlog — Phase 1 Complete (Items 1–6 DONE)
 
-Tudo acionável-via-código das auditorias técnicas de 2026-04-17 e 2026-04-18 está em branches/PRs ativos. Restante:
+**As of 2026-09-29:** All Phase 1 backlog items (1–6) are complete and merged, and Phase 2 T2.1 and T2.2A are merged and deployed (#54, #53). Remaining Phase 2 items are below.
+
+**Test suite status:** 623 passed, 2 skipped without Redis (no failures).
+
+### Phase 1 Completed Items (2026-04-04 → 2026-09-27)
 
 1. ~~**Deploy prod**~~ — ✅ **DONE 2026-07-18 — app NO AR num Hostinger VPS, MNI FUNCIONANDO** (run verde `29647851676`, 5/5). Host **`pje-vps`** (alias SSH em `~/.ssh/config`; valor real em GitHub Secrets `VPS_HOST`) (VM Hostinger `<id no painel>`, KVM 2, **datacenter São Paulo id 14**; o IP antigo `2.24.126.161` era Boston/dc 24 e está morto). 3 containers `Up (healthy)`: dashboard :8007, worker :8006, redis. **`mni check: healthy`** ✅ (ver resolução do geo-bloqueio no follow-up abaixo). Dashboard acessível só por **túnel SSH** (`ssh -L 8007:localhost:8007 pje-vps`), 8007 fechado de fora pelo firewall. **`AUDIT_SYNC_ENABLED` segue off** (sink Railway opcional; audit JSON-L local funciona no volume).
    - **⚠️ CORREÇÃO DO DIAGNÓSTICO ANTERIOR (estava ERRADO):** o "deploy vermelho em 0s" **NÃO era** "gate de secrets funcionando/esperado". Era um **erro de sintaxe de YAML**: o passo `Validate required secrets` misturava `${{ }}` (expressão do Actions) com `${VAR:?}` (bash) → o GitHub **não compilava o workflow** → todo run morria no parse. `deploy.yml` **nunca tinha rodado**. Os secrets eram pista falsa.
@@ -249,9 +253,38 @@ Tudo acionável-via-código das auditorias técnicas de 2026-04-17 e 2026-04-18 
 2. ~~**Grafana dashboard** (fecha P0.4)~~ — DONE 2026-04-18. Stack (Prometheus 2.55 + Grafana 11.3 + Alertmanager 0.27 + blackbox_exporter 0.25) provisionada no openclaw VPS via `ops/monitoring/stack/` (docker-compose). Scrape cross-host via Tailscale. 4 scrape jobs + 5 alert rules + 8 panels. Telegram `@kaiOpsBot` dedicado. Spec: `docs/superpowers/specs/2026-04-18-grafana-dashboard-design.md`.
 3. ~~**Sprint 3B (R1)**~~ — DONE 2026-04-18. PR #15 (`refactor/sprint3b-download-process-split`): `download_process` 438L→80L orchestrator + `DownloadContext` dataclass + 4 `_phase_*` methods + 9 isolation tests (399→408).
 4. ~~**Sprint 4 (A1/A2)**~~ — DONE 2026-05-01. PR #20 squash-merged (`4be29fe`): A1 `protocol.py` (`JobMessage`/`ResultMessage`/`ProgressMessage`/`DeadLetterEntry` typed dataclasses, 122L) + worker `_publish_result` migration + `job_from_json` input validation; A2 `dashboard_api` 7 module globals collapsed into `AppContext` dataclass at `app[APP_CTX_KEY]`. +8 tests (416→424), wire format byte-identical, ruff clean.
-   - Follow-up (5-line): migrate `worker._try_official_api` to construct `ResultMessage` via typed helper instead of inline dict — left out of PR #20 to keep scope tight.
-   - Follow-up (typing): add `batchId: NotRequired[str | None]` to `ProgressMessage` (worker.py:1494 sets it but type doesn't declare; surfaced by code-reviewer agent).
-5. **zeep SSRF hardening (defense-in-depth)** — bump para `zeep==4.3.3` já feito (`23d5e8a`, fecha Dependabot alert #1 / GHSA-4cc2-g9w2-fhf6). Falta: passar `Settings(forbid_external=True)` no `Client(...)` em `mni_client.py:178`. **Não aplicar às cegas** — WSDLs do MNI/PJe frequentemente fazem `xsd:import` de schemas externos; ligar o flag pode quebrar o cliente com `ExternalReferenceForbidden`. Requer teste contra fetch de WSDL real. **⚠️ O bloqueador citado aqui NÃO existe mais** — dizia "hoje bloqueado por IP cloud", refutado desde 2026-07-18 (geo-bloqueio resolvido, ver item 1) e comprovado em 2026-07-25: `curl https://pje.tjes.jus.br/pje/intercomunicacao?wsdl` de IP BR devolve **HTTP 200, 34,5 KB**, e o WSDL do TJES tem **5 `xs:import`/`xs:include` mas ZERO `schemaLocation`** — ou seja, os imports são só de namespace e não disparam fetch externo, que é justamente o dado que faltava para avaliar `forbid_external=True`. ⚠️ Medido **só no TJES**: `TRIBUNAL_ENDPOINTS` tem 6 tribunais e um WSDL com `schemaLocation` externo quebraria o cliente com `ExternalReferenceForbidden`. Meça os outros 5 antes de ligar o flag. Este item está desbloqueado. Ataque direto já mitigado: as URLs de WSDL são allowlist hardcoded `.jus.br` (`mni_client.py:46-51`).
+   - ~~Follow-up (5-line): migrate `worker._try_official_api` to a typed `ResultMessage`~~ — **closed as mis-described 2026-09-29.** `_try_official_api` returns a list of files and never builds a result dict; the only result builder is `worker._result`, which already returns a `ResultMessage`, and the progress payload is already a `ProgressMessage`.
+   - ~~Follow-up (typing): add `batchId` to `ProgressMessage`~~ — **already done** (`protocol.py`, `batchId: NotRequired[str | None]`).
+5. ~~**zeep SSRF hardening (defense-in-depth)**~~ — ✅ **MERGED 2026-09-26 (#49)** (spec `docs/specs/2026-09-25-zeep-forbid-external.md`). Bump para `zeep==4.3.3` já feito antes (`23d5e8a`, fecha Dependabot alert #1 / GHSA-4cc2-g9w2-fhf6). Escopo: **só TJES por enquanto** — `Settings(forbid_external=...)` agora é **por tribunal**, via `MNI_FORBID_EXTERNAL_TRIBUNALS` (`config.py`, default `{"TJES"}`, env-configurável). `mni_client.py:_get_client` passa `settings=Settings(forbid_external=self.tribunal in MNI_FORBID_EXTERNAL_TRIBUNALS)` ao `Client(...)`. Exceção é `zeep.exceptions.ExternalReferenceForbidden` direto — dispara **antes** de qualquer tentativa de rede. Prova via fixture WSDL local (`tests/fixtures/wsdl_external_schema_location.wsdl`) com `schemaLocation` externo em RFC 5737 TEST-NET-1 (`192.0.2.1`). Suite final: 599 passed (+4 testes novos, 2 skipped Redis). Task 4 (live verification pós-deploy): ✅ confirmado verde em produção (worker `/health` contra TJES). Expansão para outros 5 tribunais (`TJES_2G`, `TJBA`, `TJBA_2G`, `TJCE`, `TRT17`) — future sprint, sem PR de código novo (só adicionar à env var após auditar schemaLocation de cada tribunal).
+6. ~~**Achados de code-review sobre #46/#47 (já em produção)**~~ — ✅ **MERGED 2026-09-26 (#50)** — 4 real bugs fixed + 1 test-only issue cleaned. Origem: 2026-09-25, subagentes `/code-review` rodaram contra uma ref desatualizada, os achados eram reais mesmo após merge+deploy.
+   - **4 Bugs Fixed (merged #50):**
+     - `worker.py` `_download_document_api` — exception branches agora chamam `_audit_document_saved` também (+3 testes).
+     - `worker.py` — `session_lost` branch distingue MNI vs browser modes (+2 testes).
+     - `gdrive_downloader.py` `extract_gdrive_link_from_pje` — todos os 3 extraction paths passam por `canonical_folder_url()` antes de retornar (+2 testes).
+     - `mni_client.py` `verify_credentials()` — body-level rejection distingue `not_found` vs `mni_error` genérico (+2 testes).
+   - **1 Test-Only Issue Cleaned (2026-09-27, commit b018f7e):**
+     - `tests/test_mni_client.py::TestSaveDocument::test_propagates_oserror` + `TestSaveDocumentAudit::test_audit_called_on_disk_error` — aspirational tests esperavam OSError handling que nunca existiu em `_save_document()`. Deletado como parte do cleanup final (não era um code defect, teste só). **CI agora verde: 597 passed, 0 failed.**
+   - **Qualidade (reuse/simplification) — backlog de menor prioridade:** ~~duplicação do builder `AuditEntry(event_type="document_saved", ...)` entre `worker.py` e `mni_client.py`~~ (feito 2026-09-29: `audit.log_document_saved`, usado por `worker.py`, `mni_client.py`, `gdrive_downloader.py` e `pje_session.py` — todos os eventos `document_saved`; só `batch_started`/`batch_completed`/`session_login` (outros eventos) ainda constroem `AuditEntry` direto. Testes devem patchear `audit.log_access`, não substituir o módulo `audit` inteiro, para observar a entrada); `audit_sync.py` faz 3 I/O varreduras redundantes por tick; `gdrive_downloader.py` resourcekey assimetria entre estratégias.
+
+### Phase 2 Sprint 1 — SSRF Hardening Expansion (MERGED + DEPLOYED 2026-09-29, #54)
+
+✅ **T2.1 Complete:** Expanded `forbid_external` from TJES only to all 6 tribunals (TJES, TJES_2G, TJBA, TJBA_2G, TJCE, TRT17).
+- Spec: `docs/specs/2026-09-28-phase2-sprint1-ssrf-expansion.md`
+- Parallel measurement: 5 subagents (Tasks 1.1–1.5), one per tribunal
+- Test suite: `test_every_supported_tribunal_gets_forbid_external_true` parametrized over the six tribunals, plus a gating test that patches the set to exclude one
+- Config default: `MNI_FORBID_EXTERNAL_TRIBUNALS = "TJES,TJES_2G,TJBA,TJBA_2G,TJCE,TRT17"` (env-configurable)
+- WSDL measurement: zero external schemaLocations for all 6, gathered by agents 2026-09-28 — **not re-verified from a BR IP; still to do from `pje-vps`** (the PJe hosts geo-block other IPs)
+- Status: deployed (deploy run #100, 2026-09-29). Rollback without a code change: set `MNI_FORBID_EXTERNAL_TRIBUNALS=TJES` (or any subset) in the environment
+
+### Phase 2 Backlog (T2.x – Planned, Not Yet Scheduled)
+
+Candidate items for next sprint(s):
+- **T2.2** — Playwright timeout tuning, split in two. **T2.2A DONE 2026-09-29** (spec `docs/specs/2026-09-29-phase2-sprint2-playwright-telemetry.md`): `pje_playwright_download_wait_seconds{operation,outcome}` histogram via `metrics.track_playwright_download` at the 4 `worker.py` + 2 `gdrive_downloader.py` `expect_download` sites, Grafana panels 9–10, and `GDRIVE_PLAYWRIGHT_DOWNLOAD_TIMEOUT_MS` (default 60000 = old hardcode). No timeout value changed. **T2.2B (lowering the caps) waits for 1–2 weeks of prod data** and needs its own gate. The manual-login wait was split off 2026-09-29: `worker.load_session` now uses `PLAYWRIGHT_LOGIN_TIMEOUT_MS` (default 300000), so lowering the download caps no longer shortens it (`pje_session.py` keeps its own separate hardcoded 300 s). ⚠️ Tests must read the registry via the module under test (`w.metrics`), because `test_image_dependency_pins.py` re-imports `metrics`.
+- ~~**T2.3** — Redis circuit-breaker refinement.~~ **Closed as stale 2026-09-29.** The spurious trips came from the redis-py 8.0.0 `socket_timeout` regression, already fixed (#32/#33/#35; see the `REDIS_SOCKET_TIMEOUT_*` comment in `config.py`). No evidence `REDIS_CIRCUIT_THRESHOLD=20` is wrong; reopen only if telemetry shows real false trips.
+- **T3.1** — Audit log retention policy. Define configurable TTL for `audit_entries` table, S3 archival strategy, Prometheus alert on size growth.
+- **T3.2** — CI/CD polish. Add pre-commit hook suite (fast ruff + pytest on changed files), reduce feedback latency for devs.
+
+---
 
 ## Observability
 

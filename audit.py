@@ -75,6 +75,32 @@ def log_access(entry: AuditEntry) -> None:
         logger.warning("audit.log_access.failed", exc_info=True)
 
 
+def log_document_saved(
+    processo_numero: str,
+    fonte: str,
+    tribunal: str,
+    *,
+    status: str,
+    **fields,
+) -> None:
+    """Build and log a ``document_saved`` entry (one per document write attempt).
+
+    ``fields`` are any other ``AuditEntry`` fields (``documento_id``,
+    ``tamanho_bytes``, ``erro``, ...). Resolves ``log_access`` at call time, so
+    it is never captured before a caller patches it.
+    """
+    log_access(
+        AuditEntry(
+            event_type="document_saved",
+            processo_numero=processo_numero,
+            fonte=fonte,
+            tribunal=tribunal,
+            status=status,
+            **fields,
+        )
+    )
+
+
 def rotate_logs(max_days: int = 90) -> int:
     """Delete audit files older than max_days. Returns count deleted."""
     cutoff = date.today() - timedelta(days=max_days)

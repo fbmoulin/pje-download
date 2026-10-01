@@ -282,18 +282,15 @@ class PJeSessionClient:
                         }
                     )
                     log.info("pje.session.doc_saved", nome=dest.name, size=len(content))
-                    audit.log_access(
-                        audit.AuditEntry(
-                            event_type="document_saved",
-                            processo_numero=numero,
-                            documento_id=str(doc_id),
-                            documento_nome=dest.name,
-                            fonte="pje_api",
-                            tribunal=config.MNI_TRIBUNAL,
-                            tamanho_bytes=len(content),
-                            checksum_sha256=checksum,
-                            status="success",
-                        )
+                    audit.log_document_saved(
+                        numero,
+                        "pje_api",
+                        config.MNI_TRIBUNAL,
+                        status="success",
+                        documento_id=str(doc_id),
+                        documento_nome=dest.name,
+                        tamanho_bytes=len(content),
+                        checksum_sha256=checksum,
                     )
 
         except Exception as exc:
@@ -355,17 +352,13 @@ class PJeSessionClient:
                         "fonte": "pje_browser",
                     }
                 )
-                audit.log_access(
-                    audit.AuditEntry(
-                        event_type="document_saved",
-                        processo_numero=numero,
-                        documento_nome=dest.name,
-                        fonte="pje_browser",
-                        tribunal=config.MNI_TRIBUNAL,
-                        tamanho_bytes=size,
-                        checksum_sha256=None,
-                        status="success",
-                    )
+                audit.log_document_saved(
+                    numero,
+                    "pje_browser",
+                    config.MNI_TRIBUNAL,
+                    status="success",
+                    documento_nome=dest.name,
+                    tamanho_bytes=size,
                 )
 
         except Exception as exc:

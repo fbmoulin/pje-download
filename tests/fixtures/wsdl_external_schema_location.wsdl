@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Test fixture for docs/specs/2026-09-25-zeep-forbid-external.md, Task 1/Task 2.
+
+  A minimal, otherwise-valid WSDL whose <types> section carries one xsd:import
+  with a schemaLocation pointing at an external host. Used to prove, offline
+  and deterministically, that zeep/lxml attempts to dereference that URL when
+  Settings(forbid_external=False) (today's default before this spec's change)
+  and refuses to when Settings(forbid_external=True) is set.
+
+  192.0.2.1 is RFC 5737 TEST-NET-1 — reserved for documentation, never
+  routable — chosen so the URL is never a real, answering service (e.g. a
+  cloud metadata endpoint) even if a test somehow let the fetch reach the
+  network instead of being intercepted by the test's own mock.
+-->
+<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+                   xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+                   xmlns:tns="http://example.org/ssrf-fixture"
+                   xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                   targetNamespace="http://example.org/ssrf-fixture">
+  <wsdl:types>
+    <xsd:schema targetNamespace="http://example.org/ssrf-fixture">
+      <xsd:import namespace="http://example.org/ssrf-fixture-external"
+                   schemaLocation="http://192.0.2.1/malicious.xsd"/>
+      <xsd:element name="pingRequest" type="xsd:string"/>
+      <xsd:element name="pingResponse" type="xsd:string"/>
+    </xsd:schema>
+  </wsdl:types>
+  <wsdl:message name="PingRequestMessage">
+    <wsdl:part name="parameters" element="tns:pingRequest"/>
+  </wsdl:message>
+  <wsdl:message name="PingResponseMessage">
+    <wsdl:part name="parameters" element="tns:pingResponse"/>
+  </wsdl:message>
+  <wsdl:portType name="PingPortType">
+    <wsdl:operation name="Ping">
+      <wsdl:input message="tns:PingRequestMessage"/>
+      <wsdl:output message="tns:PingResponseMessage"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="PingBinding" type="tns:PingPortType">
+    <soap:binding transport="http://schemas.xmlsoap.org/soap/http" style="document"/>
+    <wsdl:operation name="Ping">
+      <soap:operation soapAction="http://example.org/ssrf-fixture/Ping"/>
+      <wsdl:input>
+        <soap:body use="literal"/>
+      </wsdl:input>
+      <wsdl:output>
+        <soap:body use="literal"/>
+      </wsdl:output>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="PingService">
+    <wsdl:port name="PingPort" binding="tns:PingBinding">
+      <soap:address location="http://example.org/ssrf-fixture/ping"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>
