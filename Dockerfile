@@ -73,6 +73,10 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends xvfb curl fonts-liberation \
     libasound2t64 libatk-bridge2.0-0t64 libdrm2 libgbm1 libnss3 libxss1 && \
     rm -rf /var/lib/apt/lists/*
+# Install Chromium into a shared path. Left unset, `playwright install` (run as
+# root here) writes to /root/.cache/ms-playwright, but the worker runs as
+# appuser and Playwright looks under $HOME/.cache -- so launch() never found it.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN pip install --no-cache-dir -r requirements.txt && \
     playwright install chromium
 COPY --chown=appuser:appuser . .

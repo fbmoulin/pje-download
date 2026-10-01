@@ -40,8 +40,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **667 tests** (measured 2026-10-01: 665 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
-  - ⚠️ **Without a reachable redis you get "665 passed, 2 skipped", and the 2 skips are silent.**
+- Test suite: pytest — **670 tests** (measured 2026-10-01: 668 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
+  - ⚠️ **Without a reachable redis you get "668 passed, 2 skipped", and the 2 skips are silent.**
     They are `tests/test_redis_socket_timeout.py` and `tests/test_result_queue_ttl.py` — the only
     real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
     publishes redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379
@@ -245,7 +245,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 **As of 2026-09-29:** All Phase 1 backlog items (1–6) are complete and merged, and Phase 2 T2.1 and T2.2A are merged and deployed (#54, #53). Remaining Phase 2 items are below.
 
-**Test suite status:** 665 passed, 2 skipped without Redis (no failures).
+**Test suite status:** 668 passed, 2 skipped without Redis (no failures).
 
 ### Phase 1 Completed Items (2026-04-04 → 2026-09-27)
 
@@ -286,7 +286,23 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 Fixed, each with a test seen failing first: CNJ Unicode digits; `PJE_BASE_URL` substring check; `worker.load_session` session file 0644 → 0600; `esc()` quotes + `statusTag` + inline `onclick` (XSS, reproduced in headless Chromium: clicking a row ran JS from `batch_id`); disk-full swallowed in `download_documentos` phase 2.
 
-**Still open (not fixed):** partial MNI downloads end as `success` (`_phase_mni` never compares `len(downloaded)` with `expected_total_docs`; `partial_success` already exists end to end, but duplicates skipped by checksum also lower the count, so the fix needs `download_documentos` to report *failed* docs separately); telemetry flaws in T2.2A; Dockerfile Chromium path/`appuser` and Prometheus scrape reachability (agent-reported, need the VPS to verify).
+Also: the worker image installed Chromium as root into `/root/.cache/ms-playwright` while the worker runs as `appuser`, and Playwright resolves browsers under `$HOME` — `launch()` could never have found it. Fixed with `ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` before the install (pinned by `tests/test_dockerfile_playwright_path.py`, a static check). ⚠️ **The image was NOT built when this was written** (no docker daemon in the session). After the deploy, prove it on the VPS with a real launch as `appuser` (a bare import proves nothing):
+
+```bash
+docker compose exec worker python -c "
+import asyncio
+from playwright.async_api import async_playwright
+async def main():
+    async with async_playwright() as p:
+        b = await p.chromium.launch()
+        print(b.version)
+        await b.close()
+asyncio.run(main())"
+```
+
+The next deploy rebuilds the worker layer once (~2.5 min) because the ENV changes the cache key.
+
+**Still open (not fixed):** partial MNI downloads end as `success` (`_phase_mni` never compares `len(downloaded)` with `expected_total_docs`; `partial_success` already exists end to end, but duplicates skipped by checksum also lower the count, so the fix needs `download_documentos` to report *failed* docs separately); Prometheus scrape reachability (needs the VPS). The T2.2A telemetry was re-read: each block wraps exactly the click/`goto` plus the download wait that the timeout guards, so no defect was confirmed there.
 
 ### Maintenance 2026-10-01 — dependabot queue cleared (#44, #36, #45; all deployed)
 
