@@ -2,8 +2,11 @@
 
 import importlib
 import os
+import pytest
+
 from config import (
     is_valid_processo,
+    validate_pje_base_url,
     load_env,
     sanitize_filename,
     unique_path,
@@ -169,3 +172,59 @@ class TestSha256File:
 
         assert checksum == hashlib.sha256(payload).hexdigest()
         assert size == len(payload)
+
+
+class TestCnjIsAsciiOnly:
+    """``\\d`` matches every Unicode decimal digit, so a number written in
+    Arabic-Indic or fullwidth digits used to pass validation and then reach
+    file paths and log/audit keys that assume ASCII."""
+
+    @pytest.mark.parametrize(
+        "numero",
+        [
+            "\u0660\u0660\u0660\u0661\u0662\u0663\u0664-56.2024.8.08.0020",  # Arabic-Indic
+            "\uff10\uff10\uff10\u0661234-56.2024.8.08.0020",  # fullwidth
+            "0001234-56.2024.8.08.\u0660\u0660\u0662\u0660",  # mixed, in the tail
+        ],
+    )
+    def test_non_ascii_digits_are_rejected(self, numero):
+        assert is_valid_processo(numero) is False
+
+
+class TestValidatePjeBaseUrl:
+    """The old check was ``".jus.br" in url``: a substring test that accepts any
+    host merely *mentioning* .jus.br, e.g. in the path or as a subdomain label of
+    an attacker's domain. The login page is loaded from this URL with real
+    credentials, so the host itself must end in .jus.br."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://pje.tjes.jus.br/pje",
+            "https://pje.tjba.jus.br/pje",
+            "https://pje.trt17.jus.br:8443/pje",
+        ],
+    )
+    def test_accepts_jus_br_hosts(self, url):
+        assert validate_pje_base_url(url) == url
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://evil.com/?next=.jus.br",  # mentioned in the query
+            "https://evil.com/pje.jus.br/pje",  # mentioned in the path
+            "https://pje.jus.br.evil.com/pje",  # label of someone else's domain
+            "https://pje.tjes.jus.br@evil.com/pje",  # userinfo trick
+            "https://evil.com\\@pje.tjes.jus.br/pje",  # backslash: host differs per parser
+            "https://pje.tjes.jus.br /pje",  # whitespace
+            "https://notjus.br/pje",  # no dot boundary before jus.br
+            "https://jus.br/pje",  # the bare registry, not a court host
+            "http://pje.tjes.jus.br/pje",  # not HTTPS
+            "ftp://pje.tjes.jus.br/pje",
+            "pje.tjes.jus.br/pje",  # no scheme
+            "",
+        ],
+    )
+    def test_rejects_everything_else(self, url):
+        with pytest.raises(ValueError, match="PJE_BASE_URL"):
+            validate_pje_base_url(url)

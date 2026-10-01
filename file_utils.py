@@ -22,6 +22,16 @@ from __future__ import annotations
 from typing import Iterable
 
 
+class DiskWriteError(OSError):
+    """A downloaded document could not be written to disk (full, read-only, quota).
+
+    A dedicated subclass rather than a bare ``OSError`` because ``requests``'
+    ``ConnectionError``/``Timeout`` are ``OSError`` subclasses too: callers that
+    must stop on a full disk but keep going on a flaky network cannot tell them
+    apart by ``except OSError``.
+    """
+
+
 def total_bytes(files: Iterable[dict]) -> int:
     """Sum ``tamanhoBytes`` across a sequence of file-metadata dicts.
 

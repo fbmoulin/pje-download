@@ -40,8 +40,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **632 tests** (measured 2026-10-01: 630 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
-  - ⚠️ **Without a reachable redis you get "630 passed, 2 skipped", and the 2 skips are silent.**
+- Test suite: pytest — **670 tests** (measured 2026-10-01: 668 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
+  - ⚠️ **Without a reachable redis you get "668 passed, 2 skipped", and the 2 skips are silent.**
     They are `tests/test_redis_socket_timeout.py` and `tests/test_result_queue_ttl.py` — the only
     real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
     publishes redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379
@@ -78,6 +78,7 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 - **env var propagation in worker tests**: use `importlib.reload(w)` after `monkeypatch.setenv`
 - **aiohttp test client**: `async with TestClient(TestServer(create_app(tmp_path))) as client:`
 - **A test that evicts modules from `sys.modules` must restore the originals.** Tests that imported `dashboard_api`/`metrics` at collection time keep the OLD objects while `patch("dashboard_api.X")` and lazy imports resolve the NEW ones. Fixed in `test_image_dependency_pins.py` (2026-10-01): left unrestored, a dashboard test that takes 1.5 s alone spun until killed when run after it; alphabetical order was the only thing hiding it. Check with `pytest tests/test_image_dependency_pins.py tests/` (pins file first).
+- **A full disk must fail the job, and only a full disk.** `_save_document` raises `file_utils.DiskWriteError` (an `OSError` subclass); `download_documentos` phase 2 and `worker._try_mni_download` re-raise it so `download_process` fails the job with the real message instead of trying the API/browser fallbacks on the same disk. Do NOT broaden those `except` clauses to `OSError`: `requests.ConnectionError`/`Timeout` subclass it, and a network blip on one batch is meant to be survived (`test_network_oserror_in_one_batch_does_not_stop_the_next`).
 - **zeep `Transport(timeout=...)` is only the WSDL *load* timeout.** SOAP POSTs use `operation_timeout` (default `None` = no socket timeout); `mni_client._get_client` sets both. `asyncio.wait_for` around `to_thread` cancels only the awaiter, never the thread.
 
 ## Completed Sprints
@@ -176,8 +177,10 @@ Post-v2.5.0 — Deploy Verifier + Spec Verifier (SDD) (2026-06-26 → 2026-07, H
 ## Security
 
 - `DASHBOARD_API_KEY` env var required for POST endpoints in production (empty = dev mode, no auth)
-- Session file written with 0600 permissions
-- `PJE_BASE_URL` validated: must be HTTPS `.jus.br` domain
+- Session file written with 0600 permissions — on BOTH write paths: `pje_session.interactive_login` and `worker.load_session` (`_ensure_owner_only_file` creates it 0600 *before* Playwright's `storage_state(path=...)` writes, which would otherwise use the umask → 0644)
+- `PJE_BASE_URL` validated by `config.validate_pje_base_url`: HTTPS and the parsed **hostname** must end in `.jus.br`. Never go back to `".jus.br" in url` — it accepts `https://evil.com/?x=.jus.br` and `https://pje.jus.br.evil.com`
+- `config.CNJ_PATTERN` is `re.ASCII`: without it `\d` matches Arabic-Indic/fullwidth digits
+- `static/js/app.js` `esc()` escapes `& < > " '` (it is used inside attributes). Never build an inline `on…="fn('${x}')"` handler from data — escaping cannot make that safe; use `data-*` + a delegated listener. Pinned by `tests/test_dashboard_js_escaping.py` (runs the real functions under `node`; skipped if node is absent).
 - Rate limiter parses `X-Forwarded-For` for real client IP behind proxy
 - Worker health bound to 127.0.0.1 (not exposed externally)
 - CNJ 615/2025 audit trail: `audit.py` logs every document access to JSON-L (`/data/audit/audit-YYYY-MM-DD.jsonl`, 0600 perms, append-only)
@@ -242,7 +245,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 **As of 2026-09-29:** All Phase 1 backlog items (1–6) are complete and merged, and Phase 2 T2.1 and T2.2A are merged and deployed (#54, #53). Remaining Phase 2 items are below.
 
-**Test suite status:** 630 passed, 2 skipped without Redis (no failures).
+**Test suite status:** 668 passed, 2 skipped without Redis (no failures).
 
 ### Phase 1 Completed Items (2026-04-04 → 2026-09-27)
 
@@ -278,6 +281,28 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 - Config default: `MNI_FORBID_EXTERNAL_TRIBUNALS = "TJES,TJES_2G,TJBA,TJBA_2G,TJCE,TRT17"` (env-configurable)
 - WSDL measurement: zero external schemaLocations for all 6, gathered by agents 2026-09-28 — **not re-verified from a BR IP; still to do from `pje-vps`** (the PJe hosts geo-block other IPs)
 - Status: deployed (deploy run #100, 2026-09-29). Rollback without a code change: set `MNI_FORBID_EXTERNAL_TRIBUNALS=TJES` (or any subset) in the environment
+
+### Audit fixes 2026-10-01 (after the 5-agent + code-review sweep)
+
+Fixed, each with a test seen failing first: CNJ Unicode digits; `PJE_BASE_URL` substring check; `worker.load_session` session file 0644 → 0600; `esc()` quotes + `statusTag` + inline `onclick` (XSS, reproduced in headless Chromium: clicking a row ran JS from `batch_id`); disk-full swallowed in `download_documentos` phase 2.
+
+Also: the worker image installed Chromium as root into `/root/.cache/ms-playwright` while the worker runs as `appuser`, and Playwright resolves browsers under `$HOME` — `launch()` could never have found it. Fixed with `ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` before the install (pinned by `tests/test_dockerfile_playwright_path.py`, a static check). ⚠️ **The image was NOT built when this was written** (no docker daemon in the session). After the deploy, prove it on the VPS with a real launch as `appuser` (a bare import proves nothing):
+
+```bash
+docker compose exec worker python -c "
+import asyncio
+from playwright.async_api import async_playwright
+async def main():
+    async with async_playwright() as p:
+        b = await p.chromium.launch()
+        print(b.version)
+        await b.close()
+asyncio.run(main())"
+```
+
+The next deploy rebuilds the worker layer once (~2.5 min) because the ENV changes the cache key.
+
+**Still open (not fixed):** partial MNI downloads end as `success` (`_phase_mni` never compares `len(downloaded)` with `expected_total_docs`; `partial_success` already exists end to end, but duplicates skipped by checksum also lower the count, so the fix needs `download_documentos` to report *failed* docs separately); Prometheus scrape reachability (needs the VPS). The T2.2A telemetry was re-read: each block wraps exactly the click/`goto` plus the download wait that the timeout guards, so no defect was confirmed there.
 
 ### Maintenance 2026-10-01 — dependabot queue cleared (#44, #36, #45; all deployed)
 

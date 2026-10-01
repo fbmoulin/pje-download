@@ -21,6 +21,7 @@ O foco é REDUZIR a exposição ao CAPTCHA, não combatê-lo.
 import asyncio
 import hashlib
 import json
+import os
 import random
 import signal
 from dataclasses import dataclass, field
@@ -35,7 +36,7 @@ from playwright.async_api import BrowserContext, Page, async_playwright
 import audit
 import metrics
 from async_retry import AsyncRetry
-from file_utils import merge_file_lists, total_bytes
+from file_utils import DiskWriteError, merge_file_lists, total_bytes
 from mni_client import MNIClient, MNIResult
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.pje-worker")
@@ -158,6 +159,19 @@ CAPTCHA_INDICATORS = [
 # ─────────────────────────────────────────────
 # WORKER PRINCIPAL
 # ─────────────────────────────────────────────
+
+
+def _ensure_owner_only_file(path: Path) -> None:
+    """Make ``path`` exist with mode 0600 *before* something writes cookies to it.
+
+    Playwright's ``storage_state(path=...)`` writes with the process umask
+    (typically 0644), so the live PJe session would be readable by every user on
+    the host. Creating the file first means the content is never exposed, and the
+    chmod tightens a file left behind by an older version.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.close(os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600))
+    os.chmod(path, 0o600)
 
 
 class PJeSessionWorker:
@@ -363,6 +377,7 @@ class PJeSessionWorker:
         # Only acquire if not already held to avoid opening a second file handle (H15).
         if self._session_lock_fh is None:
             self._acquire_session_lock()
+        _ensure_owner_only_file(SESSION_STATE_PATH)
         await self.context.storage_state(path=str(SESSION_STATE_PATH))
         log.info("pje.session.saved", path=str(SESSION_STATE_PATH))
 
@@ -1053,6 +1068,10 @@ class PJeSessionWorker:
             )
             return (files if files else None), anexos_pendentes, expected_total_docs
 
+        except DiskWriteError:
+            # Not an MNI failure: the fallbacks write to the same disk. Let
+            # download_process fail the job with the real reason.
+            raise
         except Exception as exc:
             log.warning("pje.mni.download_error", error=str(exc))
             return None, 0, 0

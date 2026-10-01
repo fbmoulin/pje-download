@@ -2030,3 +2030,77 @@ class TestDiskLowThreshold:
             f"Got: {body['checks'].get('disk')!r}"
         )
         assert response.status == 503
+
+
+class TestDiskFullStopsTheJob:
+    """A full disk used to be reported as "MNI returned nothing": the job went on
+    to the API and browser fallbacks, which write to the same disk."""
+
+    @pytest.mark.asyncio
+    async def test_try_mni_download_does_not_swallow_a_disk_write_error(self, tmp_path):
+        import errno
+
+        from file_utils import DiskWriteError
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.mni_client = AsyncMock()
+        worker.mni_client.consultar_processo.return_value = MagicMock(
+            success=True, processo=MagicMock(documentos=[MagicMock(vinculados=[])])
+        )
+        worker.mni_client.download_documentos = AsyncMock(
+            side_effect=DiskWriteError(errno.ENOSPC, "No space left on device")
+        )
+
+        with pytest.raises(DiskWriteError):
+            await worker._try_mni_download("5000005-00.2024.8.08.0001", tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_try_mni_download_still_swallows_a_network_oserror(self, tmp_path):
+        """requests' ConnectionError is an OSError subclass; only the disk type
+        may escape, or a network blip would fail every job instead of falling
+        back."""
+        import requests
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.mni_client = AsyncMock()
+        worker.mni_client.consultar_processo.side_effect = (
+            requests.exceptions.ConnectionError("reset by peer")
+        )
+
+        files, anexos, total = await worker._try_mni_download(
+            "5000005-00.2024.8.08.0001", tmp_path
+        )
+
+        assert (files, anexos, total) == (None, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_job_fails_with_the_disk_error_and_skips_the_fallbacks(
+        self, tmp_path
+    ):
+        import errno
+
+        from file_utils import DiskWriteError
+
+        w = _load_worker_module()
+        w.DOWNLOAD_BASE_DIR = tmp_path
+        worker = w.PJeSessionWorker()
+        worker.mni_client = MagicMock()
+        worker._try_mni_download = AsyncMock(
+            side_effect=DiskWriteError(errno.ENOSPC, "No space left on device")
+        )
+        worker._try_official_api = AsyncMock(return_value=None)
+        worker._download_via_browser = AsyncMock(return_value=None)
+        worker._publish_progress = AsyncMock()
+        worker._log_job_result = AsyncMock()
+        worker.is_session_expired = MagicMock(return_value=False)
+
+        result = await worker.download_process(
+            {"jobId": "JD", "numeroProcesso": "5000000-00.2024.8.08.0001"}
+        )
+
+        assert result["status"] == "failed"
+        assert "No space left on device" in result["errorMessage"]
+        worker._try_official_api.assert_not_awaited()
+        worker._download_via_browser.assert_not_awaited()

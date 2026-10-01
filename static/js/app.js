@@ -24,11 +24,16 @@ const API_KEY_STORAGE_KEY = 'pje-dashboard-api-key';
 const $ = (sel, ctx = document) => ctx.querySelector(sel);
 const $$ = (sel, ctx = document) => [...ctx.querySelectorAll(sel)];
 
+// Safe in text nodes AND in quoted attributes. The previous textContent->innerHTML
+// trick leaves " and ' untouched, so title="${esc(x)}" was injectable.
 function esc(str) {
   if (!str) return '';
-  const el = document.createElement('span');
-  el.textContent = String(str);
-  return el.innerHTML;
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function el(tag, attrs = {}, children = []) {
@@ -227,7 +232,7 @@ function renderPhase(p, isAntigoProc) {
 // ── Status Tag ──
 
 function statusTag(status) {
-  const s = status || 'pending';
+  const s = esc(status || 'pending');
   return `<span class="tag tag--${s}">${s}</span>`;
 }
 
@@ -534,7 +539,7 @@ function renderHistory(batches) {
   let html = '';
   for (const b of batches) {
     const errHint = b.error ? `<div class="pipeline__detail" style="color:var(--red)">${esc(b.error.substring(0, 80))}</div>` : '';
-    html += `<tr class="clickable" onclick="viewBatch('${esc(b.batch_id)}')">
+    html += `<tr class="clickable" data-batch-id="${esc(b.batch_id)}">
       <td class="td-mono">${esc(b.batch_id)}</td>
       <td>${b.processos}</td>
       <td>${statusTag(b.status)}${errHint}</td>
@@ -550,7 +555,7 @@ function renderHistory(batches) {
 
 async function viewBatch(batchId) {
   try {
-    const data = await apiFetch('/api/batch/' + batchId);
+    const data = await apiFetch('/api/batch/' + encodeURIComponent(batchId));
     if (!data.progress || !data.progress.processos) return;
 
     const batchCard = $('#batch-card');
@@ -752,4 +757,12 @@ async function sessionVerify() {
 }
 
 // Boot
+// Row clicks are delegated. An inline click handler built from the batch id would
+// run the id as JavaScript after the HTML parser decodes entities, which no
+// amount of HTML-escaping prevents.
+document.addEventListener('click', (e) => {
+  const row = e.target.closest && e.target.closest('tr[data-batch-id]');
+  if (row) viewBatch(row.dataset.batchId);
+});
+
 document.addEventListener('DOMContentLoaded', init);
