@@ -343,17 +343,14 @@ async def _try_requests_parse(folder_id: str, output_dir: Path) -> list[dict] | 
                         size=total_bytes,
                         index=i + 1,
                     )
-                    audit.log_access(
-                        audit.AuditEntry(
-                            event_type="document_saved",
-                            processo_numero="",
-                            documento_nome=dest.name,
-                            fonte="google_drive",
-                            tribunal=config.MNI_TRIBUNAL,
-                            tamanho_bytes=info.get("tamanhoBytes"),
-                            checksum_sha256=info.get("checksum"),
-                            status="success",
-                        )
+                    audit.log_document_saved(
+                        "",
+                        "google_drive",
+                        config.MNI_TRIBUNAL,
+                        status="success",
+                        documento_nome=dest.name,
+                        tamanho_bytes=info.get("tamanhoBytes"),
+                        checksum_sha256=info.get("checksum"),
                     )
 
                     # Pausa entre downloads
@@ -445,9 +442,12 @@ async def _try_playwright_download(
                     dl_page = await context.new_page()
 
                     try:
-                        async with dl_page.expect_download(timeout=60_000) as dl_info:
-                            await dl_page.goto(dl_url)
-                        download = await dl_info.value
+                        with metrics.track_playwright_download("gdrive"):
+                            async with dl_page.expect_download(
+                                timeout=config.GDRIVE_PLAYWRIGHT_DOWNLOAD_TIMEOUT_MS
+                            ) as dl_info:
+                                await dl_page.goto(dl_url)
+                            download = await dl_info.value
                         filename = (
                             download.suggested_filename or f"gdrive_{file_id}.pdf"
                         )
@@ -464,17 +464,14 @@ async def _try_playwright_download(
                             filename=dest.name,
                             index=i + 1,
                         )
-                        audit.log_access(
-                            audit.AuditEntry(
-                                event_type="document_saved",
-                                processo_numero="",
-                                documento_nome=dest.name,
-                                fonte="google_drive",
-                                tribunal=config.MNI_TRIBUNAL,
-                                tamanho_bytes=info.get("tamanhoBytes"),
-                                checksum_sha256=info.get("checksum"),
-                                status="success",
-                            )
+                        audit.log_document_saved(
+                            "",
+                            "google_drive",
+                            config.MNI_TRIBUNAL,
+                            status="success",
+                            documento_nome=dest.name,
+                            tamanho_bytes=info.get("tamanhoBytes"),
+                            checksum_sha256=info.get("checksum"),
                         )
                     except Exception:
                         # Pode ser página de confirmação — tentar clicar botão
@@ -483,11 +480,12 @@ async def _try_playwright_download(
                                 'a[href*="confirm="], form[action*="uc"] input[type="submit"]'
                             )
                             if await btn.count() > 0:
-                                async with dl_page.expect_download(
-                                    timeout=60_000
-                                ) as dl2:
-                                    await btn.first.click()
-                                download2 = await dl2.value
+                                with metrics.track_playwright_download("gdrive"):
+                                    async with dl_page.expect_download(
+                                        timeout=config.GDRIVE_PLAYWRIGHT_DOWNLOAD_TIMEOUT_MS
+                                    ) as dl2:
+                                        await btn.first.click()
+                                    download2 = await dl2.value
                                 filename2 = (
                                     download2.suggested_filename
                                     or f"gdrive_{file_id}.pdf"
@@ -496,17 +494,14 @@ async def _try_playwright_download(
                                 await download2.save_as(str(dest2))
                                 info2 = _file_info(dest2)
                                 files.append(info2)
-                                audit.log_access(
-                                    audit.AuditEntry(
-                                        event_type="document_saved",
-                                        processo_numero="",
-                                        documento_nome=dest2.name,
-                                        fonte="google_drive",
-                                        tribunal=config.MNI_TRIBUNAL,
-                                        tamanho_bytes=info2.get("tamanhoBytes"),
-                                        checksum_sha256=info2.get("checksum"),
-                                        status="success",
-                                    )
+                                audit.log_document_saved(
+                                    "",
+                                    "google_drive",
+                                    config.MNI_TRIBUNAL,
+                                    status="success",
+                                    documento_nome=dest2.name,
+                                    tamanho_bytes=info2.get("tamanhoBytes"),
+                                    checksum_sha256=info2.get("checksum"),
                                 )
                         except Exception as inner_exc:
                             log.warning(
@@ -692,9 +687,25 @@ async def extract_gdrive_link_from_pje(
         for pattern in gdrive_patterns:
             match = re.search(pattern, page_content)
             if match:
-                url = match.group(1)
-                log.info("gdrive.pje.link_found", url=url, processo=numero_processo)
-                return url
+                canonical = canonical_folder_url(match.group(1))
+                if canonical is None:
+                    # Found on the page but doesn't pass the same guard
+                    # download_gdrive_folder itself applies (extract_folder_id) —
+                    # e.g. an http:// link. Returning it raw would just have
+                    # download_gdrive_folder reject it later as gdrive.invalid_url;
+                    # skip and keep looking instead (matches the iframe fallback
+                    # below, which already canonicalizes). Found by code review
+                    # of #46/#47.
+                    log.warning(
+                        "gdrive.pje.link_rejected",
+                        url=match.group(1),
+                        processo=numero_processo,
+                    )
+                    continue
+                log.info(
+                    "gdrive.pje.link_found", url=canonical, processo=numero_processo
+                )
+                return canonical
 
         # Fallback: procurar em links clicáveis na página
         all_links = await page.locator('a[href*="drive.google.com"]').all()
@@ -703,10 +714,20 @@ async def extract_gdrive_link_from_pje(
             if href and (
                 "folders/" in href or "folderview" in href or "open?id=" in href
             ):
+                canonical = canonical_folder_url(href)
+                if canonical is None:
+                    log.warning(
+                        "gdrive.pje.link_rejected_via_href",
+                        url=href,
+                        processo=numero_processo,
+                    )
+                    continue
                 log.info(
-                    "gdrive.pje.link_found_via_href", url=href, processo=numero_processo
+                    "gdrive.pje.link_found_via_href",
+                    url=canonical,
+                    processo=numero_processo,
                 )
-                return href
+                return canonical
 
         # Fallback 2: procurar em iframes (às vezes o link está embeddado)
         iframes = await page.locator('iframe[src*="drive.google.com"]').all()
@@ -733,13 +754,20 @@ async def extract_gdrive_link_from_pje(
                 for pattern in gdrive_patterns:
                     match = re.search(pattern, inner_content)
                     if match:
-                        url = match.group(1)
+                        canonical = canonical_folder_url(match.group(1))
+                        if canonical is None:
+                            log.warning(
+                                "gdrive.pje.link_rejected_in_doc",
+                                url=match.group(1),
+                                processo=numero_processo,
+                            )
+                            continue
                         log.info(
                             "gdrive.pje.link_found_in_doc",
-                            url=url,
+                            url=canonical,
                             processo=numero_processo,
                         )
-                        return url
+                        return canonical
             except Exception:
                 continue
 

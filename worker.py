@@ -61,6 +61,7 @@ from config import (
     MNI_HEALTH_CACHE_TTL_SECS,
     PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS,
     PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS,
+    PLAYWRIGHT_LOGIN_TIMEOUT_MS,
     REDIS_BLPOP_TIMEOUT_SECS,
     REDIS_RESULT_QUEUE_TTL_SECS,
     REDIS_SOCKET_TIMEOUT_SECS,
@@ -350,7 +351,7 @@ class PJeSessionWorker:
         try:
             await self.page.wait_for_url(
                 lambda url: "login" not in url.lower(),
-                timeout=PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS,
+                timeout=PLAYWRIGHT_LOGIN_TIMEOUT_MS,
             )
         except Exception:
             log.error("pje.session.manual_login_timeout")
@@ -935,7 +936,18 @@ class PJeSessionWorker:
             except Exception:
                 session_lost = True
             if session_lost:
-                await self.invalidate_session()
+                if self.mni_client is not None:
+                    # F4 made this branch reachable in MNI mode (previously
+                    # self.page was always None there, per F7's history
+                    # above). A helper browser dying mid-job doesn't prove
+                    # the saved session file's cookies are dead — mirrors
+                    # _ensure_browser's own dead-session path (:452), which
+                    # also only closes, never deletes. Only a human re-login
+                    # should invalidate the file in MNI mode. Found by code
+                    # review of #46/#47.
+                    await self._close_browser()
+                else:
+                    await self.invalidate_session()
                 self._health_status = "session_expired"
                 await self._publish_progress(
                     job,
@@ -1079,16 +1091,13 @@ class PJeSessionWorker:
     ) -> None:
         """One CNJ 615/2025 entry per document write attempt from this worker
         (F6). Never raises — `audit.log_access` swallows internally."""
-        audit.log_access(
-            audit.AuditEntry(
-                event_type="document_saved",
-                processo_numero=numero_processo,
-                fonte=fonte,
-                tribunal=self._audit_tribunal(),
-                status=status,
-                erro=erro,
-                **fields,
-            )
+        audit.log_document_saved(
+            numero_processo,
+            fonte,
+            self._audit_tribunal(),
+            status=status,
+            erro=erro,
+            **fields,
         )
 
     # ──────────────────────
@@ -1247,7 +1256,25 @@ class PJeSessionWorker:
                     "checksum": checksum,
                     "fonte": "api_rest",
                 }
-        except OSError as exc:
+            # Non-200: no exception raised, so this branch (not an `except`)
+            # is the only place that ever sees it — must audit here too, or
+            # a failed download from a bad HTTP status leaves zero CNJ
+            # 615/2025 trail (found by code review of #46/#47).
+            log.warning(
+                "pje.document_download_failed", doc_id=doc_id, status=response.status
+            )
+            self._audit_document_saved(
+                numero_processo,
+                "pje_api",
+                status="error",
+                erro=f"HTTP {response.status}",
+                documento_id=str(doc_id) if doc_id is not None else None,
+            )
+        except Exception as exc:
+            # Any failure reaching/reading the response (timeout, transport
+            # error, disk write failure) — audited the same way regardless
+            # of exception type, so no failure class silently skips the
+            # trail (previously only OSError was audited here).
             log.warning("pje.document_download_failed", doc_id=doc_id, error=str(exc))
             self._audit_document_saved(
                 numero_processo,
@@ -1256,8 +1283,6 @@ class PJeSessionWorker:
                 erro=str(exc),
                 documento_id=str(doc_id) if doc_id is not None else None,
             )
-        except Exception as exc:
-            log.warning("pje.document_download_failed", doc_id=doc_id, error=str(exc))
         return None
 
     # ──────────────────────
@@ -1407,12 +1432,13 @@ class PJeSessionWorker:
             # Clicar no botão e capturar o download
             # Downloads de processo inteiro podem demorar bastante
             try:
-                async with self.page.expect_download(
-                    timeout=PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS
-                ) as download_info:
-                    await download_btn.click()
+                with metrics.track_playwright_download("full_download"):
+                    async with self.page.expect_download(
+                        timeout=PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS
+                    ) as download_info:
+                        await download_btn.click()
 
-                download = await download_info.value
+                    download = await download_info.value
                 raw_name = (
                     download.suggested_filename or f"{numero_processo}_completo.pdf"
                 )
@@ -1479,11 +1505,12 @@ class PJeSessionWorker:
                             'button:has-text("OK"), button:has-text("Baixar"), button:has-text("Download"), button:has-text("Confirmar")'
                         )
                         if await confirm.count() > 0:
-                            async with self.page.expect_download(
-                                timeout=PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS
-                            ) as dl2:
-                                await confirm.first.click()
-                            download2 = await dl2.value
+                            with metrics.track_playwright_download("full_download"):
+                                async with self.page.expect_download(
+                                    timeout=PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS
+                                ) as dl2:
+                                    await confirm.first.click()
+                                download2 = await dl2.value
                             raw_name2 = (
                                 download2.suggested_filename
                                 or f"{numero_processo}_completo.pdf"
@@ -1615,11 +1642,12 @@ class PJeSessionWorker:
                 try:
                     dl_page = await self.context.new_page()
                     try:
-                        async with dl_page.expect_download(
-                            timeout=PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS
-                        ) as dl_info:
-                            await dl_page.goto(url)
-                        download = await dl_info.value
+                        with metrics.track_playwright_download("individual"):
+                            async with dl_page.expect_download(
+                                timeout=PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS
+                            ) as dl_info:
+                                await dl_page.goto(url)
+                            download = await dl_info.value
                         filename = download.suggested_filename or f"doc_{idx:03d}.pdf"
                         dest = output_dir / _unique_filename(output_dir, filename)
                         await download.save_as(str(dest))
@@ -1699,11 +1727,12 @@ class PJeSessionWorker:
                         "pje.browser.individual.captcha_mid_download", downloaded=i
                     )
                     break
-                async with self.page.expect_download(
-                    timeout=PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS
-                ) as download_info:
-                    await link.click()
-                download = await download_info.value
+                with metrics.track_playwright_download("individual"):
+                    async with self.page.expect_download(
+                        timeout=PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS
+                    ) as download_info:
+                        await link.click()
+                    download = await download_info.value
                 filename = download.suggested_filename or f"doc_{i:03d}.pdf"
                 dest = output_dir / _unique_filename(output_dir, filename)
                 await download.save_as(str(dest))

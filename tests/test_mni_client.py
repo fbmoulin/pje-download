@@ -276,23 +276,6 @@ class TestSaveDocument:
         result = client._save_document(doc, tmp_path, seen)
         assert result is None
 
-    def test_propagates_oserror(self, tmp_path):
-        from mni_client import MNIDocumento
-
-        client = _make_client()
-        b64 = base64.b64encode(b"x").decode("ascii")
-        doc = MNIDocumento(
-            id="789", nome="Doc", tipo="doc", conteudo_base64=b64, tamanho_bytes=1
-        )
-        readonly_dir = tmp_path / "readonly"
-        readonly_dir.mkdir()
-        readonly_dir.chmod(0o444)
-        try:
-            with pytest.raises(OSError):
-                client._save_document(doc, readonly_dir, set())
-        finally:
-            readonly_dir.chmod(0o755)
-
 
 # ---------------------------------------------------------------------------
 # MNIClient._parse_processo
@@ -432,30 +415,6 @@ class TestSaveDocumentAudit:
         assert entry.status == "duplicate_skipped"
         assert entry.checksum_sha256 == checksum
 
-    def test_audit_called_on_disk_error(self, tmp_path):
-        """audit.log_access called with status='error' on OSError."""
-        client = _make_client()
-        doc = self._make_doc()
-        readonly_dir = tmp_path / "readonly"
-        readonly_dir.mkdir()
-        readonly_dir.chmod(0o444)
-        try:
-            with patch("audit.log_access") as mock_audit:
-                with pytest.raises(OSError):
-                    client._save_document(
-                        doc,
-                        readonly_dir,
-                        set(),
-                        processo_numero="5000003-00.2024.8.08.0001",
-                    )
-            mock_audit.assert_called_once()
-            entry = mock_audit.call_args[0][0]
-            assert entry.event_type == "document_saved"
-            assert entry.status == "error"
-            assert entry.erro is not None
-        finally:
-            readonly_dir.chmod(0o755)
-
     def test_processo_numero_passed_through(self, tmp_path):
         """processo_numero parameter appears in audit entry."""
         client = _make_client()
@@ -553,6 +512,96 @@ class TestGetClient:
         ):
             with pytest.raises(ConnectionError, match="WSDL unreachable"):
                 client._get_client()
+
+
+# ---------------------------------------------------------------------------
+# forbid_external SSRF hardening
+# (docs/specs/2026-09-25-zeep-forbid-external.md)
+# ---------------------------------------------------------------------------
+
+
+class TestForbidExternalSettings:
+    """_get_client must pass Settings(forbid_external=...) scoped per tribunal."""
+
+    @pytest.mark.parametrize(
+        "tribunal", ["TJES", "TJES_2G", "TJBA", "TJBA_2G", "TJCE", "TRT17"]
+    )
+    def test_every_supported_tribunal_gets_forbid_external_true(self, tribunal):
+        """The default MNI_FORBID_EXTERNAL_TRIBUNALS covers all six tribunals
+        (docs/specs/2026-09-28-phase2-sprint1-ssrf-expansion.md)."""
+        from mni_client import MNIClient
+
+        client = MNIClient(tribunal=tribunal, username="u", password="p")
+
+        with (
+            patch("zeep.Client", return_value=MagicMock()) as mock_client_cls,
+            patch("zeep.transports.Transport", return_value=MagicMock()),
+            patch("requests.Session", return_value=MagicMock()),
+        ):
+            client._get_client()
+
+        settings = mock_client_cls.call_args.kwargs["settings"]
+        assert settings.forbid_external is True
+
+    def test_tribunal_outside_configured_set_gets_forbid_external_false(self):
+        """Gating stays per tribunal: when the env-configured set excludes a
+        tribunal (rollback lever), it sees zero behavior change and
+        forbid_external stays False, matching zeep's own default."""
+        from mni_client import MNIClient
+
+        client = MNIClient(tribunal="TJBA", username="u", password="p")
+
+        with (
+            patch("mni_client.MNI_FORBID_EXTERNAL_TRIBUNALS", frozenset({"TJES"})),
+            patch("zeep.Client", return_value=MagicMock()) as mock_client_cls,
+            patch("zeep.transports.Transport", return_value=MagicMock()),
+            patch("requests.Session", return_value=MagicMock()),
+        ):
+            client._get_client()
+
+        settings = mock_client_cls.call_args.kwargs["settings"]
+        assert settings.forbid_external is False
+
+
+class TestForbidExternalSSRFFixture:
+    """Offline, deterministic proof (real zeep/lxml, no live network) that
+    forbid_external actually closes the SSRF window an external
+    schemaLocation opens — not just that the kwarg gets threaded through."""
+
+    FIXTURE = str(
+        Path(__file__).parent / "fixtures" / "wsdl_external_schema_location.wsdl"
+    )
+
+    class _FetchAttempted(Exception):
+        """Raised by the mocked transport in place of a real network call —
+        proves the resolver reached the point of fetching the external URL."""
+
+    def test_without_forbid_external_the_fetch_is_attempted(self):
+        """Documents the vulnerability window: zeep's own default
+        (forbid_external=False) dereferences the external schemaLocation."""
+        import requests
+        from zeep import Client
+
+        with patch.object(
+            requests.Session, "get", side_effect=self._FetchAttempted("fetched")
+        ):
+            with pytest.raises(self._FetchAttempted):
+                Client(wsdl=self.FIXTURE)
+
+    def test_forbid_external_blocks_the_fetch_before_any_network_attempt(self):
+        """The load-bearing assertion: with forbid_external=True, zeep must
+        refuse the import before session.get is ever called."""
+        import requests
+        from zeep import Client, Settings
+        from zeep.exceptions import ExternalReferenceForbidden
+
+        with patch.object(
+            requests.Session, "get", side_effect=self._FetchAttempted("fetched")
+        ) as mock_get:
+            with pytest.raises(ExternalReferenceForbidden):
+                Client(wsdl=self.FIXTURE, settings=Settings(forbid_external=True))
+
+        mock_get.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -983,11 +1032,19 @@ class TestVerifyCredentials:
         assert isinstance(outcome["latency_ms"], float)
 
     @pytest.mark.asyncio
-    async def test_mni_error_reply_is_valid(self):
-        """sucesso=False business reply (no exception) also means the server
-        authenticated the request — status=mni_error is a 'valid' shape."""
+    async def test_body_level_not_found_reply_is_valid(self):
+        """sucesso=False business reply (no exception) worded as 'not found'
+        also means the server authenticated the request. Uses the REAL
+        production TJES wording ('Processo de número X não encontrado!'),
+        different word order than the exception branch's literal
+        'Processo não encontrado' — proves the narrower 'não encontrado'
+        match (not the old 'anything not auth_failed' bucket) still
+        recognizes it."""
         client = _make_client()
-        soap_resp = _make_soap_response(sucesso=False, mensagem="Processo inexistente")
+        soap_resp = _make_soap_response(
+            sucesso=False,
+            mensagem="Processo de número 00000000000008080000 não encontrado!",
+        )
 
         with (
             patch.object(client, "_get_client", return_value=MagicMock()),
@@ -995,7 +1052,31 @@ class TestVerifyCredentials:
         ):
             outcome = await client.verify_credentials()
 
-        assert outcome["result"] == "valid"
+        assert outcome["result"] == "valid", outcome
+
+    @pytest.mark.asyncio
+    async def test_body_level_unrecognized_rejection_is_inconclusive_not_valid(self):
+        """Code-review finding on #46/#47: a body-level rejection worded as
+        neither 'não encontrado' nor an auth failure used to fall into the
+        bare 'mni_error' bucket, which verify_credentials treated as VALID —
+        so a tribunal wording its rejection differently than expected, for
+        ANY reason including actually-bad credentials, would misreport as
+        valid. It must be inconclusive instead: this synthetic, deliberately-
+        nonexistent CNJ has exactly one expected legitimate rejection
+        ('not found'); anything else worded differently is unknown, not
+        confirmed-safe."""
+        client = _make_client()
+        soap_resp = _make_soap_response(
+            sucesso=False, mensagem="Erro interno do servidor"
+        )
+
+        with (
+            patch.object(client, "_get_client", return_value=MagicMock()),
+            patch.object(client, "_call_consultar_processo", return_value=soap_resp),
+        ):
+            outcome = await client.verify_credentials()
+
+        assert outcome["result"] == "inconclusive", outcome
 
     @pytest.mark.asyncio
     async def test_body_level_acesso_negado_is_invalid(self):

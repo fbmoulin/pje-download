@@ -51,7 +51,14 @@ TRIBUNAL_ENDPOINTS: dict[str, str] = {
     "TRT17": "https://pje.trt17.jus.br/pje/intercomunicacao?wsdl",
 }
 
-from config import MNI_USERNAME, MNI_PASSWORD, MNI_TRIBUNAL, MNI_TIMEOUT, MNI_PROXY
+from config import (
+    MNI_USERNAME,
+    MNI_PASSWORD,
+    MNI_TRIBUNAL,
+    MNI_TIMEOUT,
+    MNI_PROXY,
+    MNI_FORBID_EXTERNAL_TRIBUNALS,
+)
 from config import sanitize_filename as _sanitize_filename
 
 # Syntactically valid CNJ number (matches config.CNJ_PATTERN) that is
@@ -62,8 +69,15 @@ _MNI_VERIFY_TEST_PROCESSO = "0000000-00.0000.8.08.0000"
 
 # consultar_processo() status values (see MNIResult.status) that mean the
 # server authenticated the request — the probed process merely doesn't
-# exist, which is expected and desired.
-_MNI_VERIFY_VALID_STATUSES = frozenset({"success", "mni_error", "not_found"})
+# exist, which is expected and desired. Deliberately does NOT include bare
+# "mni_error": that status is a catch-all for any body-level rejection whose
+# wording doesn't positively match "não encontrado" (see the body-level
+# classifier) — for verify_credentials()'s synthetic, deliberately-nonexistent
+# CNJ, an unrecognized rejection reason is unknown, not confirmed-safe, and
+# must fall through to "inconclusive" rather than a false "valid" (found by
+# code review of #46/#47: a tribunal wording its rejection differently than
+# expected, for ANY reason including bad credentials, used to read as valid).
+_MNI_VERIFY_VALID_STATUSES = frozenset({"success", "not_found"})
 # Status value that means the server explicitly rejected our credentials —
 # a SOAP fault "Acesso negado"/"Unauthorized". Reuses consultar_processo's OWN
 # classification; verify_credentials does not re-derive this.
@@ -186,7 +200,7 @@ class MNIClient:
             # Double-checked locking: another thread may have initialized while waiting
             if self._client is not None:
                 return self._client
-            from zeep import Client
+            from zeep import Client, Settings
             from zeep.transports import Transport
             from requests import Session
 
@@ -197,15 +211,20 @@ class MNIClient:
                 log.info("mni.client.proxy", proxy=proxy.split("@")[-1])
             transport = Transport(session=session, timeout=self.timeout)
 
+            forbid_external = self.tribunal in MNI_FORBID_EXTERNAL_TRIBUNALS
+            settings = Settings(forbid_external=forbid_external)
+
             log.info(
                 "mni.client.init",
                 tribunal=self.tribunal,
                 wsdl=self.wsdl_url,
+                forbid_external=forbid_external,
             )
 
             self._client = Client(
                 wsdl=self.wsdl_url,
                 transport=transport,
+                settings=settings,
             )
         return self._client
 
@@ -295,6 +314,24 @@ class MNIClient:
                     )
                     _body_status = "auth_failed"
                     user_error = "MNI: credenciais inválidas (Acesso negado)"
+                elif "não encontrado" in msg_text:
+                    # Mirrors the exception-branch "Processo não encontrado"
+                    # check below — but that literal substring doesn't match
+                    # every tribunal's real body-level wording (TJES in
+                    # production says "Processo de número X não encontrado!",
+                    # different word order). Matched narrowly on "não
+                    # encontrado" so this stays the ONE positively-recognized
+                    # good outcome for verify_credentials()'s synthetic,
+                    # deliberately-nonexistent CNJ, instead of the previous
+                    # "anything not auth_failed" bucket — that bucket let a
+                    # body-level rejection worded differently than expected
+                    # (any tribunal, any reason) silently read as "valid".
+                    # Found by code review of #46/#47.
+                    log.warning(
+                        "mni.consultar_processo.not_found", processo=numero_processo
+                    )
+                    _body_status = "not_found"
+                    user_error = "Processo não encontrado no tribunal"
                 else:
                     log.warning(
                         "mni.consultar_processo.mni_error",
@@ -824,16 +861,13 @@ class MNIClient:
                     doc_id=doc.id,
                     checksum=checksum[:12],
                 )
-                audit.log_access(
-                    audit.AuditEntry(
-                        event_type="document_saved",
-                        processo_numero=processo_numero,
-                        documento_id=doc.id,
-                        fonte="mni_soap",
-                        tribunal=self.tribunal,
-                        status="duplicate_skipped",
-                        checksum_sha256=checksum,
-                    )
+                audit.log_document_saved(
+                    processo_numero,
+                    "mni_soap",
+                    self.tribunal,
+                    status="duplicate_skipped",
+                    documento_id=doc.id,
+                    checksum_sha256=checksum,
                 )
                 return None
             seen_checksums.add(checksum)
@@ -846,19 +880,16 @@ class MNIClient:
                 size=len(content_bytes),
                 doc_id=doc.id,
             )
-            audit.log_access(
-                audit.AuditEntry(
-                    event_type="document_saved",
-                    processo_numero=processo_numero,
-                    documento_id=doc.id,
-                    documento_tipo=doc.tipo,
-                    documento_nome=filename,
-                    fonte="mni_soap",
-                    tribunal=self.tribunal,
-                    tamanho_bytes=len(content_bytes),
-                    checksum_sha256=checksum,
-                    status="success",
-                )
+            audit.log_document_saved(
+                processo_numero,
+                "mni_soap",
+                self.tribunal,
+                status="success",
+                documento_id=doc.id,
+                documento_tipo=doc.tipo,
+                documento_nome=filename,
+                tamanho_bytes=len(content_bytes),
+                checksum_sha256=checksum,
             )
 
             return {
@@ -875,16 +906,13 @@ class MNIClient:
                 doc_id=doc.id,
                 error=str(exc),
             )
-            audit.log_access(
-                audit.AuditEntry(
-                    event_type="document_saved",
-                    processo_numero=processo_numero,
-                    documento_id=doc.id,
-                    fonte="mni_soap",
-                    tribunal=self.tribunal,
-                    status="error",
-                    erro=str(exc),
-                )
+            audit.log_document_saved(
+                processo_numero,
+                "mni_soap",
+                self.tribunal,
+                status="error",
+                documento_id=doc.id,
+                erro=str(exc),
             )
             raise  # Disk-full must propagate
         except Exception as exc:
