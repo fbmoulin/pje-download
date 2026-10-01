@@ -35,7 +35,7 @@ import structlog
 
 import audit
 import metrics
-from file_utils import DiskWriteError
+from file_utils import DiskWriteError, DownloadedFiles
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.mni-client")
 
@@ -693,6 +693,10 @@ class MNIClient:
         t0 = time.monotonic()
         output_dir.mkdir(parents=True, exist_ok=True)
         saved_files: list[dict] = []
+        # Docs attempted but neither saved nor skipped as a duplicate. `handled`
+        # lets a mid-batch exception count only the ids not yet accounted for.
+        failed_ids: list[str] = []
+        handled: set[str] = set()
         seen_checksums: set[str] = set()
         local_bytes = 0
 
@@ -741,9 +745,13 @@ class MNIClient:
 
         # ── Salvar docs que já têm conteúdo (raro na fase 1, mas possível) ──
         for doc in docs_with_content:
+            outcome: dict = {}
             saved = self._save_document(
-                doc, output_dir, seen_checksums, processo.numero
+                doc, output_dir, seen_checksums, processo.numero, outcome
             )
+            handled.add(doc.id)
+            if not saved and outcome.get("status") == "failed":
+                failed_ids.append(doc.id)
             if saved:
                 saved_files.append(saved)
                 local_bytes += int(saved.get("tamanhoBytes", 0) or 0)
@@ -793,6 +801,8 @@ class MNIClient:
                             batch=batch_idx + 1,
                             error=result.error,
                         )
+                        failed_ids.extend(batch_ids)
+                        handled.update(batch_ids)
                         continue
 
                     # Mapear docs retornados por ID para salvar
@@ -801,9 +811,17 @@ class MNIClient:
                     for doc_id in batch_ids:
                         fetched = fetched_docs.get(doc_id)
                         if fetched and fetched.has_content:
+                            outcome = {}
                             saved = self._save_document(
-                                fetched, output_dir, seen_checksums, processo.numero
+                                fetched,
+                                output_dir,
+                                seen_checksums,
+                                processo.numero,
+                                outcome,
                             )
+                            handled.add(doc_id)
+                            if not saved and outcome.get("status") == "failed":
+                                failed_ids.append(doc_id)
                             if saved:
                                 saved_files.append(saved)
                                 local_bytes += int(saved.get("tamanhoBytes", 0) or 0)
@@ -819,6 +837,8 @@ class MNIClient:
                                 "mni.download.doc_no_content_after_fetch",
                                 doc_id=doc_id,
                             )
+                            failed_ids.append(doc_id)
+                            handled.add(doc_id)
 
                     # Pausa entre batches para não sobrecarregar o servidor
                     if batch_idx < len(batches) - 1:
@@ -834,6 +854,8 @@ class MNIClient:
                         batch=batch_idx + 1,
                         error=str(exc),
                     )
+                    failed_ids.extend(i for i in batch_ids if i not in handled)
+                    handled.update(batch_ids)
                     continue
 
         log.info(
@@ -841,6 +863,7 @@ class MNIClient:
             processo=processo.numero,
             total_saved=len(saved_files),
             total_download=len(all_docs),
+            total_failed=len(failed_ids),
         )
         metrics.mni_latency_seconds.labels(operation="download_documentos").observe(
             time.monotonic() - t0
@@ -849,7 +872,7 @@ class MNIClient:
         metrics.mni_requests_total.labels(
             operation="download_documentos", status=_status
         ).inc()
-        return saved_files
+        return DownloadedFiles(saved_files, failed_ids)
 
     def _save_document(
         self,
@@ -857,8 +880,16 @@ class MNIClient:
         output_dir: Path,
         seen_checksums: set[str],
         processo_numero: str = "",
+        outcome: dict | None = None,
     ) -> dict | None:
-        """Salva um documento com conteúdo em disco. Skips duplicates by checksum."""
+        """Salva um documento com conteúdo em disco. Skips duplicates by checksum.
+
+        Returns ``None`` both for a duplicate and for a failure; pass ``outcome``
+        (a dict) to learn which: ``outcome["status"]`` becomes ``"saved"``,
+        ``"duplicate"`` or ``"failed"``.
+        """
+        if outcome is not None:
+            outcome["status"] = "failed"
         try:
             ext = _mimetype_to_ext(doc.mimetype)
             safe_name = _sanitize_filename(doc.nome)
@@ -882,6 +913,8 @@ class MNIClient:
                     documento_id=doc.id,
                     checksum_sha256=checksum,
                 )
+                if outcome is not None:
+                    outcome["status"] = "duplicate"
                 return None
             seen_checksums.add(checksum)
 
@@ -905,6 +938,8 @@ class MNIClient:
                 checksum_sha256=checksum,
             )
 
+            if outcome is not None:
+                outcome["status"] = "saved"
             return {
                 "nome": filename,
                 "tipo": doc.tipo,

@@ -36,7 +36,12 @@ from playwright.async_api import BrowserContext, Page, async_playwright
 import audit
 import metrics
 from async_retry import AsyncRetry
-from file_utils import DiskWriteError, merge_file_lists, total_bytes
+from file_utils import (
+    DiskWriteError,
+    merge_file_lists,
+    missing_docs_message,
+    total_bytes,
+)
 from mni_client import MNIClient, MNIResult
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.pje-worker")
@@ -143,6 +148,9 @@ class DownloadContext:
     downloaded_files: list[dict] = field(default_factory=list)
     anexos_pendentes: int = 0
     expected_total_docs: int = 0
+    # Documents MNI attempted but lost (see file_utils.DownloadedFiles); duplicates
+    # skipped by checksum are not in here.
+    mni_failed_ids: list[str] = field(default_factory=list)
 
 
 # Padrões conhecidos de CAPTCHA no PJe
@@ -621,6 +629,8 @@ class PJeSessionWorker:
         else:
             mni_files, ctx.anexos_pendentes = mni_result
             ctx.expected_total_docs = len(mni_files or [])
+        # Read before _merge_downloaded_files builds a new, plain list.
+        ctx.mni_failed_ids = list(getattr(mni_files, "failed_ids", None) or [])
         await self._publish_progress(
             ctx.job,
             "mni_metadata",
@@ -647,6 +657,33 @@ class PJeSessionWorker:
                 processo=ctx.numero_processo,
                 anexos_pendentes=ctx.anexos_pendentes,
             )
+            if not ctx.anexos_pendentes and ctx.mni_failed_ids:
+                missing = missing_docs_message(ctx.mni_failed_ids)
+                log.warning(
+                    "pje.download.mni_partial",
+                    processo=ctx.numero_processo,
+                    failed=len(ctx.mni_failed_ids),
+                )
+                await self._log_job_result(
+                    ctx.job_id, ctx.numero_processo, ctx.downloaded_files
+                )
+                self._health_status = "ready"
+                await self._publish_progress(
+                    ctx.job,
+                    "partial",
+                    missing,
+                    status="partial",
+                    total_docs=max(ctx.expected_total_docs, len(ctx.downloaded_files)),
+                    docs_baixados=len(ctx.downloaded_files),
+                    tamanho_bytes=total_bytes(ctx.downloaded_files),
+                )
+                return self._result(
+                    ctx.job_id,
+                    ctx.numero_processo,
+                    "partial_success",
+                    ctx.downloaded_files,
+                    error=missing,
+                )
             if not ctx.anexos_pendentes:
                 await self._log_job_result(
                     ctx.job_id, ctx.numero_processo, ctx.downloaded_files
@@ -924,10 +961,23 @@ class PJeSessionWorker:
                     f"MNI indicou {ctx.anexos_pendentes} anexo(s) vinculados; "
                     "resultado complementar via API/browser pode conter duplicatas filtradas"
                 )
+            # With annexes pending the API fallback fetches only annexes
+            # (incluir_principais=False), so principals MNI lost are still missing.
+            final_status = "success"
+            if ctx.mni_failed_ids:
+                final_status = "partial_success"
+                missing = missing_docs_message(ctx.mni_failed_ids)
+                warning = f"{missing}; {warning}" if warning else missing
+                log.warning(
+                    "pje.download.mni_partial",
+                    processo=ctx.numero_processo,
+                    failed=len(ctx.mni_failed_ids),
+                )
             await self._publish_progress(
                 job,
-                "done",
+                "partial" if final_status == "partial_success" else "done",
                 warning or f"Concluído: {len(ctx.downloaded_files)} docs",
+                **({"status": "partial"} if final_status == "partial_success" else {}),
                 total_docs=max(ctx.expected_total_docs, len(ctx.downloaded_files)),
                 docs_baixados=len(ctx.downloaded_files),
                 tamanho_bytes=total_bytes(ctx.downloaded_files),
@@ -935,7 +985,7 @@ class PJeSessionWorker:
             return self._result(
                 ctx.job_id,
                 ctx.numero_processo,
-                "success",
+                final_status,
                 ctx.downloaded_files,
                 error=warning,
             )

@@ -40,8 +40,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **670 tests** (measured 2026-10-01: 668 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
-  - ⚠️ **Without a reachable redis you get "668 passed, 2 skipped", and the 2 skips are silent.**
+- Test suite: pytest — **683 tests** (measured 2026-10-01: 681 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
+  - ⚠️ **Without a reachable redis you get "681 passed, 2 skipped", and the 2 skips are silent.**
     They are `tests/test_redis_socket_timeout.py` and `tests/test_result_queue_ttl.py` — the only
     real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
     publishes redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379
@@ -245,7 +245,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 **As of 2026-09-29:** All Phase 1 backlog items (1–6) are complete and merged, and Phase 2 T2.1 and T2.2A are merged and deployed (#54, #53). Remaining Phase 2 items are below.
 
-**Test suite status:** 668 passed, 2 skipped without Redis (no failures).
+**Test suite status:** 681 passed, 2 skipped without Redis (no failures).
 
 ### Phase 1 Completed Items (2026-04-04 → 2026-09-27)
 
@@ -302,7 +302,9 @@ asyncio.run(main())"
 
 The next deploy rebuilds the worker layer once (~2.5 min) because the ENV changes the cache key.
 
-**Still open (not fixed):** partial MNI downloads end as `success` (`_phase_mni` never compares `len(downloaded)` with `expected_total_docs`; `partial_success` already exists end to end, but duplicates skipped by checksum also lower the count, so the fix needs `download_documentos` to report *failed* docs separately); Prometheus scrape reachability (needs the VPS). The T2.2A telemetry was re-read: each block wraps exactly the click/`goto` plus the download wait that the timeout guards, so no defect was confirmed there.
+Partial MNI downloads no longer end as `success` (2026-10-01, follow-up PR). `download_documentos` now returns `file_utils.DownloadedFiles` — a `list` subclass, so every caller is unchanged — with `failed_ids`: documents attempted but neither saved nor skipped on purpose. Loss sites covered: batch SOAP exception, batch `success=False` (was a bare `continue`), doc absent/without content in the answer, undecodable/unwritable content. **Checksum duplicates are deliberately NOT failures** (`test_checksum_duplicates_are_NOT_failures`): counting them would flag every process that attaches the same PDF twice. The worker turns a non-empty `failed_ids` into the existing `partial_success` (no new status name; the dashboard already renders it with `errorMessage`) on both exits: `_phase_mni`'s early exit and the shared success path (with annexes pending the API fallback fetches only annexes, so a lost principal stays lost). `batch_downloader.download_batch` has no `partial` status (progress file and metrics only know done|failed), so there the lost docs are surfaced in `erro`/`phase_detail` like pending annexes already were — status stays `done`. ⚠️ `_phase_mni` must read `failed_ids` from `mni_files` *before* `_merge_downloaded_files`, which returns a plain list.
+
+**Still open (not fixed):** Prometheus scrape reachability (needs the VPS). The T2.2A telemetry was re-read: each block wraps exactly the click/`goto` plus the download wait that the timeout guards, so no defect was confirmed there.
 
 ### Maintenance 2026-10-01 — dependabot queue cleared (#44, #36, #45; all deployed)
 
