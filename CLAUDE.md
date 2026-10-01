@@ -40,8 +40,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **625 tests** (measured 2026-09-30: 623 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
-  - ⚠️ **Without a reachable redis you get "623 passed, 2 skipped", and the 2 skips are silent.**
+- Test suite: pytest — **629 tests** (measured 2026-10-01: 627 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
+  - ⚠️ **Without a reachable redis you get "627 passed, 2 skipped", and the 2 skips are silent.**
     They are `tests/test_redis_socket_timeout.py` and `tests/test_result_queue_ttl.py` — the only
     real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
     publishes redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379
@@ -61,6 +61,7 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 - CORS is restricted to localhost-only (`_ALLOWED_ORIGINS`) — do not revert to `"*"`
 - Rate limiter tracks last-seen per IP to prevent memory leaks — keep `_rate_bucket_last_seen`
 - MNI credentials are validated before any SOAP call — keep fail-fast check in `download_batch()`
+- `deploy.yml` runs from `workflow_run` in the base repo **with production secrets**, so its `if:` must only ever deploy a commit of THIS repo: it requires `workflow_run.event` to be `push`/`workflow_dispatch` and `head_repository.full_name == github.repository`. `head_branch == 'master'` alone is not enough — a fork PR from the fork's own `master` passes it. Pinned by `tests/test_deploy_workflow_guard.py` (deploy.yml is not exercised by any PR). Also set required reviewers on the `production` GitHub environment — that setting is not visible from the repo.
 
 ## Metrics (metrics.py)
 - All Prometheus metrics use a dedicated `REGISTRY = CollectorRegistry()` — NOT the default global
@@ -239,7 +240,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 **As of 2026-09-29:** All Phase 1 backlog items (1–6) are complete and merged, and Phase 2 T2.1 and T2.2A are merged and deployed (#54, #53). Remaining Phase 2 items are below.
 
-**Test suite status:** 623 passed, 2 skipped without Redis (no failures).
+**Test suite status:** 627 passed, 2 skipped without Redis (no failures).
 
 ### Phase 1 Completed Items (2026-04-04 → 2026-09-27)
 

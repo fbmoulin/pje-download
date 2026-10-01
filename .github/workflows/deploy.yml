@@ -20,10 +20,18 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     needs: []
+    # workflow_run runs in the base repo with production secrets, so it must only ever
+    # deploy a commit of THIS repo. ci.yml also runs on pull_request, and a fork's
+    # default branch is named `master` too: `head_branch == 'master'` alone would let a
+    # fork PR that passes CI be checked out and rsynced to the VPS. Require a push (or a
+    # manual CI run) AND that the head commit lives in this repository.
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
+       (github.event.workflow_run.event == 'push' ||
+        github.event.workflow_run.event == 'workflow_dispatch') &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
        github.event.workflow_run.head_branch == 'master')
 
     steps:
