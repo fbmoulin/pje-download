@@ -276,6 +276,15 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 - WSDL measurement: zero external schemaLocations for all 6, gathered by agents 2026-09-28 — **not re-verified from a BR IP; still to do from `pje-vps`** (the PJe hosts geo-block other IPs)
 - Status: deployed (deploy run #100, 2026-09-29). Rollback without a code change: set `MNI_FORBID_EXTERNAL_TRIBUNALS=TJES` (or any subset) in the environment
 
+### Maintenance 2026-10-01 — dependabot queue cleared (#44, #36, #45; all deployed)
+
+- **#44** README note from a fork (merged as docs-only). **#36** `actions/checkout` and `actions/setup-python` 6→7 in `ci.yml` + `deploy.yml`; the `deploy.yml` change could only be proven by the deploy itself, and deploy #105 passed with `checkout@v7` (it uses `workflow_run` + an explicit `ref`, which v7 restricts only for *fork* PRs). **#45** `playwright` 1.63.0, `redis[hiredis]` 8.1.0, `structlog` 26.1.0, `aiohttp` 3.14.3, `prometheus_client>=0.26.0`, `gdown>=6.4.0`; deploy #106 passed (restart step ~2.5 min while the image is rebuilt, vs ~40 s for code-only deploys).
+- ⚠️ **`.md`-only PRs never run CI.** `ci.yml` has `paths-ignore: ["**.md", "docs/**", ...]` on both `pull_request` and `push`, so such a PR shows zero checks (it cannot be "made green") and merging it triggers no CI and no deploy.
+- ⚠️ **A dependabot PR's old green is stale.** Run `update_pull_request_branch` first so CI runs against the current `master` before merging.
+- ⚠️ **Before merging any `redis` bump, run the suite against a live Redis.** The sandbox has `redis-server`: `redis-server --port 6379 --save "" --daemonize yes`, then `pytest tests/ -q` in a venv built from the PR's `requirements.txt`. Without it the 2 real-socket tests skip silently and prove nothing about the pin. Result for #45: 625 passed, 0 skipped.
+- ⚠️ **You cannot push to a fork PR's branch** (`update-branch` returns 403), so a fork PR can only be reviewed and merged as-is, or recreated.
+- Not covered by any test: the real Playwright browser fallback (mocked everywhere); it only shows in production if a strategy falls through to it.
+
 ### Phase 2 Backlog (T2.x – Planned, Not Yet Scheduled)
 
 Candidate items for next sprint(s):
