@@ -2104,3 +2104,43 @@ class TestDiskFullStopsTheJob:
         assert "No space left on device" in result["errorMessage"]
         worker._try_official_api.assert_not_awaited()
         worker._download_via_browser.assert_not_awaited()
+
+
+class TestMissingMniDocsOnTheSharedPath:
+    @pytest.mark.asyncio
+    async def test_principals_lost_by_mni_stay_partial_after_the_annex_fallback(self):
+        """With annexes pending the API fallback fetches only annexes
+        (`incluir_principais=False`), so a principal MNI lost is still missing at
+        the end and the process must not be reported as a plain success."""
+        from file_utils import DownloadedFiles
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+        worker.mni_client = MagicMock()
+        worker.page = AsyncMock()
+        worker.context = AsyncMock()
+        mni = DownloadedFiles(
+            [{"nome": "p.pdf", "checksum": "p", "tamanhoBytes": 10, "fonte": "mni"}],
+            ["doc5"],
+        )
+        worker._try_mni_download = AsyncMock(return_value=(mni, 1, 3))
+        worker._try_official_api = AsyncMock(
+            return_value=[
+                {"nome": "a.pdf", "checksum": "a", "tamanhoBytes": 5, "fonte": "api"}
+            ]
+        )
+        worker._download_via_browser = AsyncMock(return_value=None)
+        worker._log_job_result = AsyncMock()
+        worker.is_session_expired = MagicMock(return_value=False)
+
+        result = await worker.download_process(
+            {
+                "jobId": "J9",
+                "numeroProcesso": "5000009-00.2024.8.08.0001",
+                "includeAnexos": True,
+            }
+        )
+
+        assert result["status"] == "partial_success"
+        assert "1 documento" in result["errorMessage"]
+        assert len(result["arquivosDownloaded"]) == 2

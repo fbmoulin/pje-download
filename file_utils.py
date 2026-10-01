@@ -32,6 +32,32 @@ class DiskWriteError(OSError):
     """
 
 
+class DownloadedFiles(list):
+    """The files saved by one MNI download, plus the documents that were NOT.
+
+    A plain ``list`` subclass so every existing caller (``len``, iteration,
+    truthiness, ``merge_file_lists``) is unchanged. ``failed_ids`` lists documents
+    that were attempted but neither saved nor skipped on purpose; checksum
+    duplicates are deliberately NOT in it, because a duplicate is a legitimate
+    shortfall and counting it would flag every process that attaches the same PDF
+    twice as incomplete.
+    """
+
+    def __init__(self, files: Iterable[dict] = (), failed_ids: Iterable[str] = ()):
+        super().__init__(files)
+        self.failed_ids: list[str] = list(failed_ids)
+
+
+def missing_docs_message(failed_ids: list[str], shown: int = 5) -> str:
+    """Short operator-facing text for documents MNI could not deliver."""
+    head = ", ".join(failed_ids[:shown])
+    more = "…" if len(failed_ids) > shown else ""
+    return (
+        f"{len(failed_ids)} documento(s) não puderam ser baixados via MNI "
+        f"(ex.: {head}{more})"
+    )
+
+
 def total_bytes(files: Iterable[dict]) -> int:
     """Sum ``tamanhoBytes`` across a sequence of file-metadata dicts.
 

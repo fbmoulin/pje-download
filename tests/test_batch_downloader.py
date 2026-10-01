@@ -781,3 +781,61 @@ async def test_B3_missing_tamanhoBytes_does_not_fail_processo(tmp_path, monkeypa
         f"When tamanhoBytes is missing, total should be 0, got {ps.tamanho_bytes}"
     )
     assert ps.docs_baixados == 1
+
+
+@pytest.mark.asyncio
+async def test_download_batch_surfaces_docs_mni_lost(tmp_path, monkeypatch):
+    """This path has no `partial` status (progress file and metrics only know
+    done|failed), so lost documents are surfaced the way pending annexes already
+    are: in `erro` and `phase_detail`, instead of a clean "done"."""
+    monkeypatch.setenv("MNI_USERNAME", "u")
+    monkeypatch.setenv("MNI_PASSWORD", "p")
+
+    from batch_downloader import download_batch
+    from file_utils import DownloadedFiles
+
+    result = MagicMock()
+    result.success = True
+    result.processo = MagicMock(documentos=[MagicMock(vinculados=[], tipo="pdf")])
+
+    mock_client = AsyncMock()
+    mock_client.health_check.return_value = {
+        "status": "healthy",
+        "tribunal": "T",
+        "operations": [],
+        "latency_ms": 1,
+    }
+    mock_client.consultar_processo.return_value = result
+    mock_client.download_documentos.return_value = DownloadedFiles(
+        [
+            {
+                "nome": "ok.pdf",
+                "tamanhoBytes": 10,
+                "localPath": str(tmp_path / "ok.pdf"),
+                "checksum": "c1",
+                "fonte": "mni",
+            }
+        ],
+        ["doc8"],
+    )
+
+    with (
+        patch("mni_client.MNIClient", return_value=mock_client),
+        patch("gdrive_downloader.is_processo_antigo", return_value=False),
+        patch(
+            "gdrive_downloader.download_gdrive_folder",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        progress = await download_batch(
+            numeros=["1234567-89.2024.8.08.0001"],
+            output_dir=tmp_path,
+            delay_entre_processos=0.0,
+        )
+
+    ps = progress.processos["1234567-89.2024.8.08.0001"]
+    assert ps.status == "done"  # status vocabulary unchanged on this path
+    assert ps.docs_baixados == 1
+    assert "1 documento" in (ps.erro or "")
+    assert "1 documento" in ps.phase_detail

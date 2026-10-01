@@ -33,7 +33,7 @@ from pathlib import Path
 import structlog
 
 import metrics
-from file_utils import merge_file_lists, total_bytes
+from file_utils import merge_file_lists, missing_docs_message, total_bytes
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.batch-downloader")
 
@@ -584,6 +584,8 @@ async def download_batch(
                     incluir_anexos=incluir_anexos,
                 )
                 all_files = _merge_downloaded_files(all_files, mni_files)
+                # Documents MNI attempted but lost (not checksum duplicates).
+                mni_failed = list(getattr(mni_files, "failed_ids", None) or [])
 
                 anexos_warning = None
                 if incluir_anexos and total_vinc:
@@ -642,6 +644,17 @@ async def download_batch(
                             processo=numero,
                             anexos_pendentes=total_vinc,
                         )
+
+                if mni_failed:
+                    missing = missing_docs_message(mni_failed)
+                    anexos_warning = (
+                        f"{missing}; {anexos_warning}" if anexos_warning else missing
+                    )
+                    log.warning(
+                        "batch.processo.mni_partial",
+                        processo=numero,
+                        failed=len(mni_failed),
+                    )
 
                 ps.docs_baixados = len(all_files)
                 ps.tamanho_bytes = total_bytes(all_files)

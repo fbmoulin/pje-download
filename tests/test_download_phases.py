@@ -165,6 +165,87 @@ class TestPhaseMni:
         assert ctx.expected_total_docs == 5
 
 
+class TestPhaseMniReportsMissingDocs:
+    """`_phase_mni` returned `success` whenever MNI produced any file, even when
+    `download_documentos` had lost some documents on the way."""
+
+    @staticmethod
+    def _files(n, failed_ids=()):
+        from file_utils import DownloadedFiles
+
+        return DownloadedFiles(
+            # distinct nome/size: merge_file_lists dedupes on that key
+            [{"nome": f"d{i}.pdf", "tamanhoBytes": 100 + i} for i in range(n)],
+            failed_ids,
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_docs_make_the_early_exit_partial_not_success(self):
+        w = _load_worker_module()
+        worker = _make_worker(w)
+        ctx = _make_ctx(w)
+        worker._try_mni_download = AsyncMock(
+            return_value=(self._files(2, ["doc7", "doc9"]), 0, 4)
+        )
+
+        result = await worker._phase_mni(ctx)
+
+        assert result is not None
+        assert result["status"] == "partial_success"
+        assert len(result["arquivosDownloaded"]) == 2  # what was saved is kept
+        assert "2 documento" in result["errorMessage"]
+        assert "doc7" in result["errorMessage"]
+        assert ctx.mni_failed_ids == ["doc7", "doc9"]
+
+    @pytest.mark.asyncio
+    async def test_no_missing_docs_is_still_success(self):
+        w = _load_worker_module()
+        worker = _make_worker(w)
+        ctx = _make_ctx(w)
+        worker._try_mni_download = AsyncMock(return_value=(self._files(2), 0, 2))
+
+        result = await worker._phase_mni(ctx)
+
+        assert result["status"] == "success"
+        assert not result.get("errorMessage")
+
+    @pytest.mark.asyncio
+    async def test_a_plain_list_from_older_callers_is_still_success(self):
+        w = _load_worker_module()
+        worker = _make_worker(w)
+        ctx = _make_ctx(w)
+        plain = [{"name": "d.pdf", "tamanhoBytes": 1}]
+        worker._try_mni_download = AsyncMock(return_value=(plain, 0, 1))
+
+        assert (await worker._phase_mni(ctx))["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_the_failure_list_survives_when_annexes_force_the_fallbacks(self):
+        w = _load_worker_module()
+        worker = _make_worker(w)
+        ctx = _make_ctx(w)
+        worker._try_mni_download = AsyncMock(
+            return_value=(self._files(1, ["doc3"]), 2, 3)
+        )
+
+        assert await worker._phase_mni(ctx) is None  # continues to API/browser
+        assert ctx.mni_failed_ids == ["doc3"]
+
+    @pytest.mark.asyncio
+    async def test_a_long_failure_list_is_truncated_in_the_message(self):
+        w = _load_worker_module()
+        worker = _make_worker(w)
+        ctx = _make_ctx(w)
+        many = [f"doc{i}" for i in range(40)]
+        worker._try_mni_download = AsyncMock(return_value=(self._files(1, many), 0, 41))
+
+        result = await worker._phase_mni(ctx)
+
+        assert "40 documento" in result["errorMessage"]
+        assert "doc39" not in result["errorMessage"]
+        assert len(result["errorMessage"]) < 400
+
+
 class TestPhaseApiAndBrowser:
     @pytest.mark.asyncio
     async def test_api_fallback_finds_files_returns_true(self):

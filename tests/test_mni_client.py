@@ -1503,3 +1503,153 @@ class TestVerifyMniCredentialsCli:
 
         assert code == 2
         assert "inconclusive" in capsys.readouterr().out.lower()
+
+
+class TestDownloadDocumentosReportsFailures:
+    """`download_documentos` used to return only the saved files. A batch that
+    failed (SOAP error, `success=False`, doc missing from the answer, unwritable
+    doc) vanished without a trace, and the worker then reported the process as a
+    full `success`. The result now carries `failed_ids`, kept apart from
+    checksum-skipped duplicates, which are a legitimate shortfall."""
+
+    @staticmethod
+    def _doc(i, content=None):
+        from mni_client import MNIDocumento
+
+        kw = {}
+        if content is not None:
+            kw = {
+                "conteudo_base64": base64.b64encode(content).decode("ascii"),
+                "tamanho_bytes": len(content),
+            }
+        return MNIDocumento(id=f"doc{i}", nome=f"Doc {i}", tipo="doc", **kw)
+
+    @staticmethod
+    def _answer(numero, docs):
+        from mni_client import MNIProcesso, MNIResult
+
+        return MNIResult(
+            success=True, processo=MNIProcesso(numero=numero, documentos=docs)
+        )
+
+    @pytest.mark.asyncio
+    async def test_result_is_still_a_list_of_the_saved_files(self, tmp_path):
+        from file_utils import DownloadedFiles
+        from mni_client import MNIProcesso
+
+        processo = MNIProcesso(
+            numero="5000001-00.2024.8.08.0001", documentos=[self._doc(0, b"a")]
+        )
+        with patch("audit.log_access"):
+            saved = await _make_client().download_documentos(processo, tmp_path)
+
+        assert isinstance(saved, DownloadedFiles) and isinstance(saved, list)
+        assert len(saved) == 1
+        assert saved.failed_ids == []
+
+    @pytest.mark.asyncio
+    async def test_batch_with_soap_exception_is_reported_as_failed(self, tmp_path):
+        import requests
+
+        from mni_client import MNIProcesso
+
+        docs = [self._doc(i) for i in range(2)]
+        processo = MNIProcesso(numero="5000001-00.2024.8.08.0001", documentos=docs)
+        client = _make_client()
+        calls = []
+
+        async def consultar(numero, **kw):
+            calls.append(kw["documento_ids"])
+            if len(calls) == 1:
+                raise requests.exceptions.ConnectionError("reset")
+            return self._answer(numero, [self._doc(1, b"ok")])
+
+        with (
+            patch.object(client, "consultar_processo", side_effect=consultar),
+            patch("audit.log_access"),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            saved = await client.download_documentos(processo, tmp_path, batch_size=1)
+
+        assert len(saved) == 1
+        assert saved.failed_ids == ["doc0"]
+
+    @pytest.mark.asyncio
+    async def test_batch_answered_with_success_false_is_reported_as_failed(
+        self, tmp_path
+    ):
+        """This branch was a bare `continue`: the whole batch disappeared."""
+        from mni_client import MNIProcesso, MNIResult
+
+        docs = [self._doc(i) for i in range(3)]
+        processo = MNIProcesso(numero="5000001-00.2024.8.08.0001", documentos=docs)
+        client = _make_client()
+
+        async def consultar(numero, **kw):
+            return MNIResult(success=False, error="MNI recusou")
+
+        with (
+            patch.object(client, "consultar_processo", side_effect=consultar),
+            patch("audit.log_access"),
+        ):
+            saved = await client.download_documentos(processo, tmp_path, batch_size=5)
+
+        assert list(saved) == []
+        assert saved.failed_ids == ["doc0", "doc1", "doc2"]
+
+    @pytest.mark.asyncio
+    async def test_doc_missing_from_the_answer_is_reported_as_failed(self, tmp_path):
+        from mni_client import MNIProcesso
+
+        docs = [self._doc(0), self._doc(1)]
+        processo = MNIProcesso(numero="5000001-00.2024.8.08.0001", documentos=docs)
+        client = _make_client()
+
+        async def consultar(numero, **kw):
+            return self._answer(numero, [self._doc(0, b"only-zero")])  # doc1 absent
+
+        with (
+            patch.object(client, "consultar_processo", side_effect=consultar),
+            patch("audit.log_access"),
+        ):
+            saved = await client.download_documentos(processo, tmp_path, batch_size=5)
+
+        assert len(saved) == 1
+        assert saved.failed_ids == ["doc1"]
+
+    @pytest.mark.asyncio
+    async def test_undecodable_content_is_reported_as_failed(self, tmp_path):
+        from mni_client import MNIDocumento, MNIProcesso
+
+        bad = MNIDocumento(
+            id="bad", nome="Bad", tipo="doc", conteudo_base64="@@not-base64@@"
+        )
+        good = self._doc(1, b"fine")
+        processo = MNIProcesso(
+            numero="5000001-00.2024.8.08.0001", documentos=[bad, good]
+        )
+
+        with patch("audit.log_access"):
+            saved = await _make_client().download_documentos(processo, tmp_path)
+
+        assert len(saved) == 1
+        assert saved.failed_ids == ["bad"]
+
+    @pytest.mark.asyncio
+    async def test_checksum_duplicates_are_NOT_failures(self, tmp_path):
+        """The false-alarm guard: two docs with identical bytes save once and the
+        second is skipped on purpose. Counting it as failed would flag every
+        process that attaches the same PDF twice as `partial`."""
+        from mni_client import MNIProcesso
+
+        same = b"identical bytes"
+        processo = MNIProcesso(
+            numero="5000001-00.2024.8.08.0001",
+            documentos=[self._doc(0, same), self._doc(1, same), self._doc(2, same)],
+        )
+
+        with patch("audit.log_access"):
+            saved = await _make_client().download_documentos(processo, tmp_path)
+
+        assert len(saved) == 1
+        assert saved.failed_ids == []
