@@ -40,8 +40,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **629 tests** (measured 2026-10-01: 627 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
-  - ⚠️ **Without a reachable redis you get "627 passed, 2 skipped", and the 2 skips are silent.**
+- Test suite: pytest — **632 tests** (measured 2026-10-01: 630 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
+  - ⚠️ **Without a reachable redis you get "630 passed, 2 skipped", and the 2 skips are silent.**
     They are `tests/test_redis_socket_timeout.py` and `tests/test_result_queue_ttl.py` — the only
     real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
     publishes redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379
@@ -77,6 +77,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
   — set `DOWNLOAD_BASE_DIR=/tmp/pje-test-downloads` in conftest BEFORE importing worker
 - **env var propagation in worker tests**: use `importlib.reload(w)` after `monkeypatch.setenv`
 - **aiohttp test client**: `async with TestClient(TestServer(create_app(tmp_path))) as client:`
+- **A test that evicts modules from `sys.modules` must restore the originals.** Tests that imported `dashboard_api`/`metrics` at collection time keep the OLD objects while `patch("dashboard_api.X")` and lazy imports resolve the NEW ones. Fixed in `test_image_dependency_pins.py` (2026-10-01): left unrestored, a dashboard test that takes 1.5 s alone spun until killed when run after it; alphabetical order was the only thing hiding it. Check with `pytest tests/test_image_dependency_pins.py tests/` (pins file first).
+- **zeep `Transport(timeout=...)` is only the WSDL *load* timeout.** SOAP POSTs use `operation_timeout` (default `None` = no socket timeout); `mni_client._get_client` sets both. `asyncio.wait_for` around `to_thread` cancels only the awaiter, never the thread.
 
 ## Completed Sprints
 
@@ -240,7 +242,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 **As of 2026-09-29:** All Phase 1 backlog items (1–6) are complete and merged, and Phase 2 T2.1 and T2.2A are merged and deployed (#54, #53). Remaining Phase 2 items are below.
 
-**Test suite status:** 627 passed, 2 skipped without Redis (no failures).
+**Test suite status:** 630 passed, 2 skipped without Redis (no failures).
 
 ### Phase 1 Completed Items (2026-04-04 → 2026-09-27)
 
