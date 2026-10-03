@@ -128,7 +128,7 @@ class Resultado:
 | `pii_cpf`, `pii_cnpj` | DV válido, formas nua e pontuada | **sempre, primeiro** | bloqueia |
 | `alvo_ou_sintoma` | caminho que existe em `$CLAUDE_PROJECT_DIR` **ou** sintoma (mensagem de erro, código HTTP, nome de teste) | 1º prompt | aviso |
 | `possui_dod` | lista de marcadores fixada na Task 1 ("pronto quando", "deve passar", `pytest`, "critério de aceite", …) | 1º prompt | aviso |
-| `multi_tarefa` | ≥ 3 itens numerados/marcados ou ≥ 3 orações imperativas coordenadas | 1º prompt | aviso sugerindo plano |
+| `multi_tarefa` | ≥ 3 itens numerados/marcados em linhas, ou ≥ 3 itens inline `1) … 2) … 3)` (orações imperativas coordenadas ficaram de fora: sem heurística confiável) | 1º prompt | aviso sugerindo plano |
 
 Isenções (`/cmd`, termina em `?`, ≤ 6 palavras, prefixo `!!`) valem **só** para as regras
 de qualidade e **não** consomem a vaga de primeiro prompt avaliado. Promoção a bloqueio é
