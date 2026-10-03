@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(/downloads/**)",
+      "Read(/downloads_batch/**)",
+      "Read(//data/**)"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/tools/prompt_gate.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/tools/prompt_gate.py\" --stop",
+            "timeout": 180
+          }
+        ]
+      }
+    ]
+  }
+}

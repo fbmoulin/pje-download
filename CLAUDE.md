@@ -185,6 +185,44 @@ Post-v2.5.0 — Deploy Verifier + Spec Verifier (SDD) (2026-06-26 → 2026-07, H
 - Worker health bound to 127.0.0.1 (not exposed externally)
 - CNJ 615/2025 audit trail: `audit.py` logs every document access to JSON-L (`/data/audit/audit-YYYY-MM-DD.jsonl`, 0600 perms, append-only)
 
+## Prompt gate (Claude Code hooks)
+
+`.claude/settings.json` registers `tools/prompt_gate.py` as a `UserPromptSubmit` hook and as a
+`Stop` hook, and denies `Read` on `downloads/`, `downloads_batch/` and `/data/`. Spec and
+evidence: `docs/specs/2026-10-03-prompt-quality-gate.md`; premortems in `.premortems/`.
+
+- **What it does:** a typed prompt with a valid CPF/CNPJ (bare or punctuated) is blocked
+  before the main model runs — no exemption, not even `!!`. On the first evaluated prompt of a
+  session it *warns* (never blocks, unless promoted) when the prompt has no target file or
+  reproducible symptom, no definition of done, or 3+ stacked tasks. At Stop it runs ruff
+  (`uvx ruff@0.14.14`) on the `.py` files changed **during the turn** and pytest on
+  `tests/test_<mod>*.py`; lint or test failures send Claude back to fix them.
+- ⚠️ **It is a safety net, not a sanitizer. Do not type PII into prompts.** A blocked prompt
+  still reaches Haiku for the session title and is written verbatim to the local transcript.
+  Party names, RG, addresses and case excerpts are not detected. A hook timeout or a crashed
+  interpreter fails open.
+- ⚠️ **Open Claude Code at the repo root.** A session started in a subdirectory (`cd tests &&
+  claude`) does not load the project `.claude/settings.json` — no PII gate, no Stop hook, no
+  deny (verified with CLI 2.1.288 in `-p` mode; re-check interactively on WSL).
+- ⚠️ **Review fork PRs with hooks off.** The hooks run the checked-out `tools/prompt_gate.py`
+  and the tests on every prompt/Stop, and `config.py` loads `.env` on import. Use
+  `"disableAllHooks": true` in `.claude/settings.local.json` (not committed) while reviewing.
+- **Escape hatches:** start a prompt with `!!` to skip the quality warnings (PII still
+  blocks). Kill switch: exit and relaunch with `PROMPT_GATE_DISABLE=1 claude --continue`.
+  Never put `PROMPT_GATE_DISABLE` in the committed settings — a test enforces that.
+- **Local knobs** (set them in `.claude/settings.local.json` → `env`; the settings `env`
+  overrides the shell): `PROMPT_GATE_PYTHON` = interpreter with the project deps for the Stop
+  pytest (the hook's `python3` usually lacks them and then only warns);
+  `PROMPT_GATE_RUFF` = ruff command; `PROMPT_GATE_BLOCK_RULES=possui_dod,...` = promote a
+  quality rule to blocking (only after the dated D2 review, spec Task 9).
+- **Labeling warnings** (feeds the D2 review): each warning shows `gate [<id>]`. Run
+  `python3 tools/prompt_gate.py --label <id> fp|tp`, and `--report` for per-rule counts and the
+  unlabeled ids with their `session_id`/`prompt_id`. Telemetry lives in
+  `${XDG_STATE_HOME:-~/.local/state}/pje-prompt-gate/` — never the prompt text, never a hash.
+- **Tests that hold PII-shaped values build them at runtime** (`tests/test_prompt_gate.py`
+  helpers). `.gitleaks.toml` also flags formatted CNJ numbers and formatted CPFs regardless of
+  check digit, so never commit such literals, not even invalid ones.
+
 ## Audit Sync (Railway Postgres, Phase 2)
 
 Local JSON-L remains the **source of truth**; Railway is a write-only redundant sink.
