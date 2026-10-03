@@ -282,9 +282,14 @@ não mexa em mais nada" com `tests/test_a.py` exigindo `X == 1` → hook `Stop` 
 ### Task 7 — Negar leitura de autos (D5)
 
 `.claude/settings.json` → `permissions.deny`: `Read(/downloads/**)`,
-`Read(/downloads_batch/**)`, `Read(//data/**)` (`/x` é relativo ao arquivo de settings;
-`//` é absoluto). Teste estende o do settings (Task 4). Smoke: pedir ao Claude para ler um
+`Read(/downloads_batch/**)`, `Read(//data/**)` (`/x` é relativo à **raiz do projeto** —
+verificado; `//` é absoluto). Teste estende o do settings (Task 4). Smoke: pedir ao Claude para ler um
 arquivo em `downloads/` → negado (da raiz; de subdiretório vale o modelo de ameaça). Commit.
+
+**Evidência (2026-10-03, CLI 2.1.288, repo descartável com `Read(/downloads/**)`):**
+`Read` em `downloads/autos.txt` → `permission_denials: 1`, conteúdo não vazou; `Read` em
+`outro/livre.txt` → permitido. Não cobre `Bash cat`, `Grep` nem `@`-menção (modelo de
+ameaça).
 
 ### Task 8 — Documentação
 

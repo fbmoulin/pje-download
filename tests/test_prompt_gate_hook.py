@@ -273,3 +273,9 @@ def test_settings_registra_o_stop_hook_com_timeout_maior_que_o_do_pytest():
     assert hook["type"] == "command"
     assert "$CLAUDE_PROJECT_DIR" in hook["command"] and "--stop" in hook["command"]
     assert hook["timeout"] >= 150  # pytest interno tem 120 s
+
+
+def test_settings_nega_leitura_dos_autos_baixados():
+    # D5: "/x" é relativo à raiz do projeto (verificado com o CLI 2.1.288); "//" é absoluto.
+    deny = set(_config()["permissions"]["deny"])
+    assert {"Read(/downloads/**)", "Read(/downloads_batch/**)", "Read(//data/**)"} <= deny

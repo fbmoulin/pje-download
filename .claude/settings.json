@@ -1,4 +1,11 @@
 {
+  "permissions": {
+    "deny": [
+      "Read(/downloads/**)",
+      "Read(/downloads_batch/**)",
+      "Read(//data/**)"
+    ]
+  },
   "hooks": {
     "UserPromptSubmit": [
       {
