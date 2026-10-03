@@ -6,7 +6,7 @@
 Decisões vigentes:
 D1=**B** (só T0 determinístico; o usuário escolheu a opção "a" em 2026-10-03, revendo o
 D1=A anterior), D2=advisory, D3=sim, D4=só pje-download, D5=sim (aprovado 2026-10-03).
-Implementação em andamento.
+**Tasks 1–8 implementadas em 2026-10-03** (PR #66). Task 9 (revisão D2) é datada: merge + 14 dias.
 **Origem:** `docs/research/2026-10-03-review-jev-claude-code-langgraph.md`.
 **Alvo:** `tools/prompt_gate.py`, `.claude/settings.json`,
 `.claude/skills/refine-prompt/SKILL.md`, `tests/test_prompt_gate.py`,
