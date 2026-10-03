@@ -3,11 +3,16 @@
 
 Nucleo deterministico, so stdlib. `avaliar` decide sobre um prompt digitado:
 
+- PII (CPF/CNPJ com digito verificador valido, nu ou pontuado) e checada PRIMEIRO e
+  sempre bloqueia — nenhuma isencao a pula, nem "!!";
 - regras de qualidade (avisam; bloqueiam so as listadas em `bloquear`), avaliadas
   apenas no primeiro prompt avaliado da sessao e nunca em prompt isento.
 
 As isencoes (`/cmd`, termina em `?`, ate 6 palavras, prefixo `!!`) valem SO para as
 regras de qualidade.
+
+O `motivo` de um bloqueio por PII nao carrega o valor, nem mascarado: o stderr do hook
+vai para o transcript da sessao.
 """
 
 from __future__ import annotations
@@ -68,13 +73,43 @@ _RE_SINTOMA = re.compile(
 _RE_ITEM_LINHA = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+\S", re.MULTILINE)
 _RE_ITEM_INLINE = re.compile(r"(?:^|\s)\d+\)\s+\S")
 
+# Formas pontuadas. As nuas vem de validate_br_pii (RE_CPF_NU / RE_CNPJ_NU).
+_RE_CPF_PONTUADO = re.compile(r"(?<![\d.])\d{3}\.\d{3}\.\d{3}-\d{2}(?!\d)")
+_RE_CNPJ_PONTUADO = re.compile(
+    r"(?<![A-Z0-9.])[A-Z0-9]{2}\.[A-Z0-9]{3}\.[A-Z0-9]{3}/[A-Z0-9]{4}-\d{2}(?!\d)"
+)
+
 _MENSAGENS = {
+    "pii_cpf": "o prompt contém um CPF válido; remova-o e use um placeholder",
+    "pii_cnpj": "o prompt contém um CNPJ válido; remova-o e use um placeholder",
     "alvo_ou_sintoma": "cite o arquivo/símbolo a mudar ou o sintoma reproduzível "
     "(erro, código HTTP, nome do teste)",
     "possui_dod": "diga como saber que terminou (ex.: 'pronto quando pytest "
     "tests/test_x.py passar')",
     "multi_tarefa": "há 3+ tarefas empilhadas; considere um plano ou um prompt por tarefa",
 }
+
+
+def _validadores():
+    """Import tardio: uma falha aqui precisa chegar ao main() (fail-closed, Task 4)."""
+    try:
+        from tools import validate_br_pii
+    except ImportError:  # executado como script: sys.path[0] e tools/
+        import validate_br_pii
+    return validate_br_pii
+
+
+def detectar_pii(prompt: str) -> tuple[str, ...]:
+    """Ids das regras de PII disparadas, em ordem estavel. Nao devolve os valores."""
+    v = _validadores()
+    regras = []
+    cpfs = v.RE_CPF_NU.findall(prompt) + _RE_CPF_PONTUADO.findall(prompt)
+    if any(v.cpf_valido(c) for c in cpfs):
+        regras.append("pii_cpf")
+    cnpjs = v.RE_CNPJ_NU.findall(prompt) + _RE_CNPJ_PONTUADO.findall(prompt)
+    if any(v.cnpj_valido(c) for c in cnpjs):
+        regras.append("pii_cnpj")
+    return tuple(regras)
 
 
 def eh_isento(prompt: str) -> bool:
@@ -124,11 +159,17 @@ def avaliar(
     primeiro_prompt: bool,
     bloquear: frozenset[str] = frozenset(),
 ) -> Resultado:
+    pii = detectar_pii(prompt)
+    if pii:
+        return Resultado("bloqueia", pii, _motivo(pii))
     if eh_isento(prompt) or not primeiro_prompt:
         return PASSA
     regras = _regras_de_qualidade(prompt, raiz)
     if not regras:
         return PASSA
     decisao: Decisao = "bloqueia" if bloquear.intersection(regras) else "aviso"
-    motivo = "; ".join(f"{r}: {_MENSAGENS[r]}" for r in regras)
-    return Resultado(decisao, regras, motivo)
+    return Resultado(decisao, regras, _motivo(regras))
+
+
+def _motivo(regras: tuple[str, ...]) -> str:
+    return "; ".join(f"{r}: {_MENSAGENS[r]}" for r in regras)

@@ -14,6 +14,7 @@ from tools.prompt_gate import (
     MARCADORES_DOD,
     Resultado,
     avaliar,
+    detectar_pii,
 )
 
 RAIZ = Path(__file__).resolve().parents[1]
@@ -170,6 +171,129 @@ def test_regras_tem_ordem_estavel():
         "melhora o projeto:\n- um item\n- outro item\n- mais um item\n- e outro"
     )
     assert r.regras == ("alvo_ou_sintoma", "possui_dod", "multi_tarefa")
+
+
+# --- PII (Task 2) ---------------------------------------------------------
+# Valores montados em tempo de execução a partir de sementes curtas: nenhum
+# literal com forma de CPF/CNPJ/CNJ entra no git.
+
+
+def _dv_mod11(valores, pesos):
+    resto = sum(v * p for v, p in zip(valores, pesos)) % 11
+    return 0 if resto < 2 else 11 - resto
+
+
+def _cpf(semente9: str) -> str:
+    d = [int(c) for c in semente9]
+    d.append(_dv_mod11(d, range(10, 1, -1)))
+    d.append(_dv_mod11(d, range(11, 1, -1)))
+    return "".join(map(str, d))
+
+
+def _cnpj(semente12: str) -> str:
+    v = [ord(c) - 48 for c in semente12]
+    for n in (12, 13):
+        pesos = [((n - 1 - i) % 8) + 2 for i in range(n)]
+        v.append(_dv_mod11(v, pesos))
+    return semente12 + "".join(str(x) for x in v[12:])
+
+
+def _pontuar_cpf(c: str) -> str:
+    return f"{c[:3]}.{c[3:6]}.{c[6:9]}-{c[9:]}"
+
+
+def _pontuar_cnpj(c: str) -> str:
+    return f"{c[:2]}.{c[2:5]}.{c[5:8]}/{c[8:12]}-{c[12:]}"
+
+
+def _invalidar(valor: str) -> str:
+    return valor[:-1] + str((int(valor[-1]) + 1) % 10)
+
+
+CPF = _cpf("5" + "29982" + "247")
+CNPJ = _cnpj("11" + "222333" + "0001")
+CNPJ_ALFA = _cnpj("12ABC345" + "01DE")
+
+FORMAS = {
+    "cpf-nu": (CPF, "pii_cpf"),
+    "cpf-pontuado": (_pontuar_cpf(CPF), "pii_cpf"),
+    "cnpj-nu": (CNPJ, "pii_cnpj"),
+    "cnpj-pontuado": (_pontuar_cnpj(CNPJ), "pii_cnpj"),
+    "cnpj-alfanumerico": (_pontuar_cnpj(CNPJ_ALFA), "pii_cnpj"),
+}
+CONTEXTOS = {
+    "texto-comum": (
+        "Em worker.py, use o documento {v} no teste; pronto quando o pytest passar",
+        True,
+    ),
+    "pergunta": ("o documento {v} desse autor bate com o dos autos?", True),
+    "bang": ("!! consulta {v} e segue com a correção do worker", True),
+    "slash": ("/refine-prompt consulta {v} no mni_client", True),
+    "curto": ("consulta {v}", True),
+    "nao-primeiro": (
+        "agora troca o valor fixo do teste por {v} e roda tudo de novo",
+        False,
+    ),
+}
+
+
+def test_helpers_geram_documentos_validos():
+    from tools.validate_br_pii import cnpj_valido, cpf_valido
+
+    assert cpf_valido(CPF) and not cpf_valido(_invalidar(CPF))
+    assert cnpj_valido(CNPJ) and cnpj_valido(CNPJ_ALFA)
+    assert not cnpj_valido(_invalidar(CNPJ))
+
+
+@pytest.mark.parametrize("forma", FORMAS)
+@pytest.mark.parametrize("contexto", CONTEXTOS)
+def test_pii_bloqueia_em_qualquer_forma_e_contexto(forma, contexto):
+    valor, regra = FORMAS[forma]
+    molde, primeiro = CONTEXTOS[contexto]
+    r = _avaliar(molde.format(v=valor), primeiro=primeiro)
+    assert r.decisao == "bloqueia"
+    assert r.regras == (regra,)
+
+
+@pytest.mark.parametrize("forma", FORMAS)
+def test_motivo_nunca_contem_o_documento(forma):
+    valor, _ = FORMAS[forma]
+    r = _avaliar(f"Em worker.py use {valor} no teste; pronto quando o pytest passar")
+    digitos = "".join(c for c in valor if c.isalnum())
+    assert valor not in r.motivo
+    assert digitos not in r.motivo
+    assert digitos[:3] not in r.motivo and digitos[-2:] not in r.motivo
+
+
+def test_cpf_e_cnpj_juntos_disparam_as_duas_regras_em_ordem():
+    r = _avaliar(f"cruze {CNPJ} com {CPF} no relatório de partes do lote")
+    assert r.regras == ("pii_cpf", "pii_cnpj")
+
+
+@pytest.mark.parametrize(
+    "valor",
+    [
+        _invalidar(CPF),
+        _pontuar_cpf(_invalidar(CPF)),
+        _invalidar(CNPJ),
+        _pontuar_cnpj(_invalidar(CNPJ)),
+        "1" * 11,  # repetido: passa no módulo 11, mas é placeholder
+    ],
+)
+def test_digito_verificador_invalido_nao_bloqueia(valor):
+    assert detectar_pii(f"use {valor} como placeholder no teste") == ()
+
+
+def test_numero_cnj_nao_e_pii():
+    cnj = "0012345" + "-" + "67" + "." + "2024" + ".8." + "08" + "." + "0001"
+    sem_pontos = "".join(c for c in cnj if c.isdigit())
+    for v in (cnj, sem_pontos):
+        assert detectar_pii(f"baixe o processo {v} pelo MNI no worker.py") == ()
+
+
+def test_kill_switch_nao_e_responsabilidade_de_avaliar():
+    # avaliar() sempre checa PII; o PROMPT_GATE_DISABLE é tratado em main() (Task 4).
+    assert _avaliar(f"consulta {CPF}").decisao == "bloqueia"
 
 
 # --- fixture rotulada -----------------------------------------------------

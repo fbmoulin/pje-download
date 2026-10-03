@@ -185,7 +185,8 @@ Reusar `tools/validate_br_pii.cpf_valido`/`cnpj_valido`; acrescentar as formas p
 `primeiro_prompt`. Teste parametrizado: CPF e CNPJ válidos (gerados) × {nu, pontuado} ×
 {texto comum, termina em `?`, prefixo `!!`, `/review …`, ≤ 6 palavras, `primeiro_prompt=False`}
 → `bloqueia`. Negativos: 11 dígitos com DV inválido, número CNJ → não bloqueiam. `motivo`
-nunca contém os dígitos (assert explícito). Commit.
+não contém o valor nem parte dele — nem mascarado, porque o stderr do hook vai para o
+transcript (as built; mais rígido que o `_mascara`, que mostra 5 de 11 dígitos). Commit.
 
 ### Task 3 — Skill `/refine-prompt` (paralela, TDD leve)
 
