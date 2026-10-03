@@ -1,7 +1,9 @@
 # Prompt Quality Gate para Claude Code (piloto no pje-download)
 
-**Status:** **v2**, revisada após o premortem `deep`
-(`.premortems/PREMORTEM-2026-10-03T14-58-00Z.md`, veredito REWORK). Decisões vigentes:
+**Status:** **v3**. v1 → premortem `deep` REWORK
+(`.premortems/PREMORTEM-2026-10-03T14-58-00Z.md`); v2 → premortem de confirmação REFINE
+(`.premortems/PREMORTEM-2026-10-03T16-05-00Z-v2.md`), cujos 8 achados esta v3 incorpora.
+Decisões vigentes:
 D1=**B** (só T0 determinístico; o usuário escolheu a opção "a" em 2026-10-03, revendo o
 D1=A anterior), D2=advisory, D3=sim, D4=só pje-download. D5 pendente. Nenhum código escrito.
 **Origem:** `docs/research/2026-10-03-review-jev-claude-code-langgraph.md`.
@@ -28,10 +30,10 @@ Critérios verificáveis:
 | Critério | Como se verifica |
 |---|---|
 | Prompt com CPF/CNPJ válido → `exit 2` em todas as formas (nu, pontuado, com `?`, `!!`, `/cmd`, ≤ 6 palavras) | Teste parametrizado (Task 2) + smoke: `num_turns == 0` no JSON do `claude -p` (Task 4) |
-| Falha interna do checador de PII → `exit 2` com mensagem, nunca `exit 0`/`1` | Teste simulando `ImportError` e exceção (Task 4) |
-| Hook funciona com sessão aberta em subdiretório | Teste executando o comando do `settings.json` a partir de outro `cwd` (Task 4) |
+| Qualquer falha *dentro* do processo antes de a PII estar decidida → `exit 2` com mensagem, nunca `exit 0`/`1` | Testes simulando `ImportError`, stdin inválido e exceção (Task 4) |
+| Comportamento em subdiretório documentado com evidência | Smoke ponta-a-ponta: `claude -p` iniciado em `tests/` com CPF gerado; resultado registrado no PR e refletido no modelo de ameaça (Task 4) |
 | Latência p95 < 150 ms medida **de fora** (inclui startup do Python) | `for i in $(seq 50); do /usr/bin/time ...; done` sobre `python3 tools/prompt_gate.py < sample.json` (Task 4) |
-| Promoção advisory→block de uma regra só com ≥ 60 avisos rotulados e ≤ 3 FP | `tools/prompt_gate.py --report` (Task 5) na revisão datada (Task 9) |
+| Promoção advisory→block de uma regra só com ≥ 60 avisos rotulados e ≤ 2 FP (heurística: limite superior do IC 95% ≈ 11%) | `tools/prompt_gate.py --report` (Task 5) na revisão datada (Task 9) |
 
 ## Modelo de ameaça e risco residual
 
@@ -47,8 +49,17 @@ O gate é **rede de segurança, não sanitizador**. Fora do alcance de qualquer 
 - Conteúdo que entra por `@arquivo`, anexo ou ferramenta (`Read` em `downloads/`) nunca
   passa pelo gate — mitigação parcial na Task 7 (D5).
 - `UserPromptSubmit` não cobre prompts de subagentes nem chamadas via SDK.
+- **Sessão aberta em subdiretório não carrega o `.claude/settings.json` do projeto**
+  (verificado 2026-10-03 com o CLI 2.1.288 em modo `-p`: o hook disparou na raiz e não em
+  `sub/`; reconfirmar em sessão interativa no WSL na Task 4). Nesse caso não há PII, Stop
+  nem deny.
+- **Falha aberta fora do processo:** se o hook estoura o `timeout`, se `python3` não está no
+  PATH (`exit 127`) ou se o interpretador morre, o Claude Code trata como erro não
+  bloqueante e o prompt segue (verificado: hook cancelado por timeout → modelo principal
+  rodou). O fail-closed só vale para falhas que o processo consegue capturar.
 
-Regra operacional (vai para o CLAUDE.md): **não digite PII em prompts**.
+Regras operacionais (vão para o CLAUDE.md): **não digite PII em prompts** e **abra o Claude
+Code na raiz do repo**.
 
 ## Non-goals
 
@@ -65,18 +76,24 @@ Regra operacional (vai para o CLAUDE.md): **não digite PII em prompts**.
 
 ```
 UserPromptSubmit ─▶ python3 "$CLAUDE_PROJECT_DIR/tools/prompt_gate.py"
+   (main() inteiro dentro de try/except BaseException; timeout do hook: 10 s)
    0. PROMPT_GATE_DISABLE=1 ─────────────────────────────▶ exit 0 (kill switch)
-   1. PII (sempre primeiro, sem isenção, nem "!!")
+   1. PII — antes de qualquer git ou disco; sem isenção, nem "!!"
         CPF/CNPJ válido ──────────────────────────────────▶ exit 2, motivo mascarado
-        erro no próprio checador ─────────────────────────▶ exit 2 (fail-closed)
-   2. grava estado da sessão (HEAD atual, 1º prompt?) fora do repo
-   3. qualidade — só no 1º prompt da sessão; isenções: /cmd, "?", ≤ 6 palavras, "!!"
-        avisos ─▶ exit 0 + JSON {additionalContext, systemMessage} (modo advisory)
+        qualquer exceção até aqui (stdin, import, regex) ─▶ exit 2 (fail-closed)
+   2. snapshot do turno, a CADA prompt, fora do repo: {arquivo: sha256} dos arquivos
+      sujos e não rastreados (insumo do Stop)
+   3. qualidade — só se a vaga de "1º prompt avaliado" da sessão estiver livre;
+      isenções (/cmd, "?", ≤ 6 palavras, "!!") passam SEM consumir a vaga
+        avisos ─▶ exit 0 + JSON {additionalContext, systemMessage com id e comando --label}
+        regra em PROMPT_GATE_BLOCK_RULES ─▶ exit 2 (só após a Task 9)
         erro ───▶ exit 0, sem aviso (fail-open, só para qualidade)
 
 Stop ─▶ python3 "$CLAUDE_PROJECT_DIR/tools/prompt_gate.py" --stop
    stop_hook_active ou PROMPT_GATE_DISABLE=1 ─▶ exit 0
-   arquivos = git diff --name-only <HEAD salvo> + git ls-files -o --exclude-standard
+   arquivos = sujos/não rastreados agora cujo sha256 difere do snapshot do turno
+              (ou ausentes dele), que ainda existem, + commitados no turno
+              (git diff --name-only --diff-filter=d <HEAD do snapshot>..HEAD)
    .py tocado? ruff (0.14.14, como o CI) + pytest em tests/test_<mod>*.py + testes tocados
         falha de teste/lint (pytest exit 1) ─▶ {"decision":"block","reason":...}
         ambiente ausente / coleta (pytest exit 2–5, ruff ausente) ─▶ exit 0 + systemMessage
@@ -86,11 +103,12 @@ Contrato **verificado** no CLI 2.1.288 (review §4 e premortem): stdin do
 `UserPromptSubmit` traz `prompt`, `cwd`, `session_id`, `transcript_path`, `prompt_id`,
 `permission_mode`, `hook_event_name` (e outros); stdin do `Stop` traz `stop_hook_active` e
 `last_assistant_message`; `exit 2` aborta o turno (`num_turns: 0`); `additionalContext`
-chega ao modelo (fica no transcript como `hook_additional_context`), mas é invisível ao
-usuário em `-p`; `--settings` **soma** às configurações do projeto; existem
-`--setting-sources`, `--disallowedTools`, `disableAllHooks` e `CLAUDE_PROJECT_DIR`.
-**Premissa ainda não verificada:** que `systemMessage` de um `UserPromptSubmit` com
-`exit 0` é exibido ao usuário no modo interativo — Task 4 verifica antes de depender dela.
+chega ao modelo (fica no transcript como `hook_additional_context`); `systemMessage` com
+`exit 0` chega ao usuário como notice (`{"type":"system","subtype":"informational"}`);
+`--settings` **soma** às configurações do projeto; `env` do settings **vence** o shell;
+`claude -p` lançado de dentro de uma sessão herda `CLAUDE_CODE_SESSION_ID`; o hook dispara
+também para slash commands; existem `--setting-sources`, `--disallowedTools`,
+`disableAllHooks`, `CLAUDE_PROJECT_DIR` e `uvx ruff@0.14.14` (1,3 s).
 
 ### Contrato `Resultado` (fixo antes da Task 1)
 
@@ -112,7 +130,9 @@ class Resultado:
 | `multi_tarefa` | ≥ 3 itens numerados/marcados ou ≥ 3 orações imperativas coordenadas | 1º prompt | aviso sugerindo plano |
 
 Isenções (`/cmd`, termina em `?`, ≤ 6 palavras, prefixo `!!`) valem **só** para as regras
-de qualidade.
+de qualidade e **não** consomem a vaga de primeiro prompt avaliado. Promoção a bloqueio é
+por regra, via `PROMPT_GATE_BLOCK_RULES=<id>,<id>` (vazio por padrão), definido em
+`.claude/settings.local.json` — nunca no shell, porque o `env` do settings vence.
 
 ## Agents e skills — quem faz o quê
 
@@ -146,8 +166,9 @@ passando no branch.
 ### Task 1 — Núcleo `avaliar` e regras de qualidade (TDD)
 
 `tests/test_prompt_gate.py` primeiro; `tools/prompt_gate.py` só stdlib.
-`avaliar(prompt: str, raiz: Path, primeiro_prompt: bool) -> Resultado`.
+`avaliar(prompt: str, raiz: Path, primeiro_prompt: bool, bloquear: frozenset[str]) -> Resultado`.
 - Isenções → `passa` sem regras; `primeiro_prompt=False` → `passa` sem regras.
+- Regra disparada que está em `bloquear` → `bloqueia`; senão `aviso`.
 - `alvo_ou_sintoma`: `"corrija worker.py"` (existe em `raiz`) → sem aviso;
   `"corrija xyz.py"` → aviso; `"o /health retorna 503"` → sem aviso.
 - `possui_dod`: lista de marcadores definida como constante e testada item a item.
@@ -175,30 +196,40 @@ nem `Bash`. Evidência manual registrada no PR: uma execução de
 
 ### Task 4 — Ligar o `UserPromptSubmit` (TDD)
 
-`main()`: todos os imports **dentro** do `try`; caminhos de saída explícitos:
+`main()` **inteiro** dentro de `try/except BaseException`; até a PII estar decidida,
+qualquer exceção → `exit 2`. Ordem e saídas:
 - `PROMPT_GATE_DISABLE=1` → `exit 0`.
-- PII → stderr com `motivo`, `exit 2`. Qualquer exceção na etapa de PII → `exit 2` com
-  "gate de PII falhou — PROMPT_GATE_DISABLE=1 desliga".
-- Estado da sessão em `${XDG_STATE_HOME:-~/.local/state}/pje-prompt-gate/<session_id>.json`
-  (HEAD atual via `git rev-parse HEAD`; existência do arquivo = não é o 1º prompt).
-- Qualidade: `PROMPT_GATE_MODE` (`advisory` padrão | `block`); advisory →
-  `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":…},"systemMessage":…}`;
+- Ler stdin e checar PII **antes** de qualquer `git` ou escrita em disco. PII → stderr com
+  `motivo`, `exit 2`. Exceção → `exit 2` com "gate de PII falhou — saia e relance com
+  `PROMPT_GATE_DISABLE=1 claude --continue`".
+- Snapshot do turno (todo prompt) em
+  `${XDG_STATE_HOME:-~/.local/state}/pje-prompt-gate/<session_id>/turno.json`: HEAD e
+  `{arquivo: sha256}` dos sujos e não rastreados. Estados com mais de 30 dias são apagados.
+- Vaga de primeiro prompt: arquivo `<session_id>/avaliado` criado só quando um prompt **não
+  isento** passa pelas regras de qualidade.
+- Qualidade: `PROMPT_GATE_BLOCK_RULES` decide aviso × bloqueio por regra; aviso →
+  `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":…},"systemMessage":"gate [<id>] <regras> — rotule: python3 tools/prompt_gate.py --label <id> fp|tp"}`;
   exceção → `exit 0` sem aviso.
 `.claude/settings.json`: comando `python3 "$CLAUDE_PROJECT_DIR/tools/prompt_gate.py"`,
-`timeout: 5`, `"env": {"PROMPT_GATE_MODE": "advisory"}`.
+`timeout: 10`; `env` **sem** `PROMPT_GATE_DISABLE` e sem `PROMPT_GATE_BLOCK_RULES`.
 `tests/test_prompt_gate_hook.py` (via `subprocess`, stdin JSON real; asserts só nas
-chaves usadas): cada caminho de saída; `ImportError` simulado; execução a partir de outro
-`cwd`; um teste que **carrega o `.claude/settings.json`**, valida o JSON e executa o comando
-nele definido com `CLAUDE_PROJECT_DIR` apontado para o repo.
-Smoke manual (registrado no PR): prompt com CPF gerado → `num_turns == 0`; verificar se
-`systemMessage` aparece ao usuário no modo interativo — se não aparecer, a rotulagem da
-Task 5 usa o id impresso pelo `--report` em vez do aviso. Medir a latência p95 (Goal).
-Commit.
+chaves usadas): cada caminho de saída; `ImportError`, stdin inválido e exceção simulados;
+PII decidida sem tocar `git` (git fora do PATH no teste); o `systemMessage` contém o `id` e
+o comando `--label`; prompt isento não consome a vaga; um teste que **carrega o
+`.claude/settings.json`**, valida o JSON, garante que `PROMPT_GATE_DISABLE` não está em
+`env` e executa o comando nele definido aplicando o `env` do settings e
+`CLAUDE_PROJECT_DIR` apontado para o repo.
+Smokes manuais (registrados no PR), sempre com `env -u CLAUDE_CODE_SESSION_ID`: na raiz,
+prompt com CPF gerado → `num_turns == 0`; o mesmo iniciado em `tests/` → registrar o
+resultado (esperado hoje: hook não carrega) e reconfirmar em sessão interativa no WSL;
+aviso visível no modo interativo. Medir a latência p95 (Goal). Commit.
 
 ### Task 5 — Telemetria rotulável, fora do repo (TDD)
 
 Append em `${XDG_STATE_HOME:-~/.local/state}/pje-prompt-gate/telemetria.jsonl`:
-`ts`, `id` (uuid4 curto, **sem hash do prompt**), `regras`, `decisao`, `latencia_ms`.
+`ts`, `id` (uuid4 curto, **sem hash do prompt**), `session_id`, `prompt_id`, `regras`,
+`decisao`, `latencia_ms`. `session_id` + `prompt_id` permitem ao próprio usuário abrir o
+transcript local e julgar o aviso, sem que a telemetria guarde texto.
 Registros de PII guardam só `regras` e `decisao`. Nunca texto, nunca hash.
 `--label <id> fp|tp` grava o rótulo; `--report` mostra, por regra: avisos, rotulados, FP.
 Testes: o texto do prompt e os dígitos do CPF não aparecem no arquivo; o arquivo fica fora
@@ -206,36 +237,43 @@ do repo. Commit.
 
 ### Task 6 — Stop hook (TDD, D3)
 
-`--stop`: `stop_hook_active` ou `PROMPT_GATE_DISABLE=1` → `exit 0`. Arquivos =
-`git diff --name-only <HEAD salvo na Task 4>` + `git ls-files -o --exclude-standard`
-(sem estado salvo → `HEAD`). Se há `.py`:
+`--stop`: `stop_hook_active` ou `PROMPT_GATE_DISABLE=1` → `exit 0`. Arquivos = os que
+mudaram **durante o turno**, comparando com o snapshot da Task 4: sujos/não rastreados cujo
+sha256 difere do snapshot (ou ausentes dele) e que ainda existem, mais os commitados no turno
+(`git diff --name-only --diff-filter=d <HEAD do snapshot>..HEAD`). Sem snapshot → não checa
+nada. Hook `Stop` com `timeout: 180` explícito no settings. Se há `.py`:
 - ruff: `uvx ruff@0.14.14 check <arquivos>`; sem `uvx` → pula com `systemMessage`.
 - pytest: `python3 -m pytest -q <tests/test_<mod>*.py e testes tocados>` com `timeout` de
   120 s no hook; exit 1 → `{"decision":"block","reason":<resumo de até 20 linhas>}`;
   exit 2–5, módulo ausente ou timeout → `exit 0` + `systemMessage` ("ambiente sem deps").
 Testes em repositório git temporário: arquivo staged, não rastreado e já commitado no turno
-são detectados; mudança anterior ao turno não é; mapeamento `worker.py` → todos os
+são detectados; edição não commitada e rascunho não rastreado **feitos antes do prompt** não
+são; arquivo apagado no turno não vai ao ruff; mapeamento `worker.py` → todos os
 `test_worker*.py`; exit 2 do pytest não bloqueia; `stop_hook_active` encerra. Commit.
 
 ### Task 7 — Negar leitura de autos (D5, só se aprovado)
 
-`.claude/settings.json` → `permissions.deny`: `Read(./downloads/**)`,
-`Read(./downloads_batch/**)`, `Read(//data/**)`. Teste estende o do settings (Task 4).
-Smoke: pedir ao Claude para ler um arquivo em `downloads/` → negado. Commit.
+`.claude/settings.json` → `permissions.deny`: `Read(/downloads/**)`,
+`Read(/downloads_batch/**)`, `Read(//data/**)` (`/x` é relativo ao arquivo de settings;
+`//` é absoluto). Teste estende o do settings (Task 4). Smoke: pedir ao Claude para ler um
+arquivo em `downloads/` → negado (da raiz; de subdiretório vale o modelo de ameaça). Commit.
 
 ### Task 8 — Documentação
 
 Seção "Prompt gate" no `CLAUDE.md`: modelo de ameaça resumido, "não digite PII",
-`!!`, `PROMPT_GATE_DISABLE=1`, `disableAllHooks` em `.claude/settings.local.json`,
+"abra o Claude Code na raiz do repo", `!!`, `PROMPT_GATE_DISABLE=1`,
+`PROMPT_GATE_BLOCK_RULES` em `.claude/settings.local.json`, `disableAllHooks`,
 **PR de fork se revisa com os hooks desligados** (o hook e os testes do PR rodariam
 sozinhos), `--label`/`--report`. Sem números de teste fixos. Rodar
 `python tools/verify_spec.py docs/specs/*.md`. Commit.
 
 ### Task 9 — Revisão D2 (datada: merge + 14 dias)
 
-`--report`. Para cada regra: ≥ 60 avisos rotulados **e** ≤ 3 FP → promover a bloqueio
-(nova chave em `PROMPT_GATE_MODE` por regra, com teste); menos dados → estender 14 dias;
-FP > 3 → ajustar a regra ou removê-la. Registrar a decisão nesta spec. Commit.
+`--report`. Para cada regra: ≥ 60 avisos rotulados **e** ≤ 2 FP → promover a bloqueio
+(acrescentar o id a `PROMPT_GATE_BLOCK_RULES` no `env` do `.claude/settings.json`, com o
+teste do settings atualizado); FP > 2 → ajustar a regra ou removê-la; menos dados → estender
+14 dias, **no máximo duas vezes** — depois disso, decidir com os dados que houver ou remover a
+regra. Registrar a decisão nesta spec. Commit.
 
 ## Correções vindas do premortem
 
@@ -247,7 +285,7 @@ FP > 3 → ajustar a regra ou removê-la. Registrar a decisão nesta spec. Commi
 | F4 isenções antes da PII | PII primeiro; teste parametrizado com todas as isenções |
 | F5 tasks não independentes | Contrato `Resultado` fixo; Task 1 → 2 sequenciais; Task 3 com teste próprio |
 | F6 fail-open em PII / caminho relativo | `$CLAUDE_PROJECT_DIR`; imports no `try`; PII fail-closed; testes de cwd e `ImportError` |
-| F7 metas não falsificáveis | Critérios em tabela; rotulagem `--label`; regra ≥ 60 / ≤ 3 FP; Task 9 datada; p95 medido de fora |
+| F7 metas não falsificáveis | Critérios em tabela; rotulagem `--label`; regra ≥ 60 / ≤ 3 FP (v3: ≤ 2, ver v2-F7); Task 9 datada; p95 medido de fora |
 | F8 fixtures barradas pelo pre-push | `.json`; CPFs gerados em teste; pre-push como critério de aceite |
 | F9 Stop no conjunto errado / ambiente | HEAD salvo + não rastreados; exit 2–5 não bloqueia; ruff 0.14.14; mapeamento por glob; sem promessa de DoD semântico |
 | F10 telemetria no repo / hash reversível | Fora do repo; uuid, sem hash; PII sem detalhes |
@@ -256,13 +294,22 @@ FP > 3 → ajustar a regra ou removê-la. Registrar a decisão nesta spec. Commi
 | F13 medição não isolada | Task 7 antiga (medição Haiku) removida; smoke da Task 4 só observa `num_turns` |
 | F14 `.claude/**` sem CI | Teste que carrega e executa o settings; resíduo declarado |
 | F15 contrato do stdin | Lista completa; testes só exigem chaves usadas |
+| v2-F1 subdiretório não carrega o settings | Smoke ponta-a-ponta em `tests/`; modelo de ameaça; regra "abra na raiz" |
+| v2-F2 timeout / exit ≠ 2 falham abertos | `main()` inteiro no `try`; PII antes de git; `timeout: 10`; declarado no modelo de ameaça |
+| v2-F3 Stop pega WIP anterior e arquivo apagado | Snapshot com sha256 a cada prompt; `--diff-filter=d`; teste de WIP anterior |
+| v2-F4 rotulagem sem vínculo | `id` + comando `--label` no `systemMessage` (testado); `session_id`/`prompt_id` na telemetria |
+| v2-F5 vaga gasta por isentos / session_id herdado | Vaga só consumida por prompt avaliado; smokes com `env -u CLAUDE_CODE_SESSION_ID`; Task 9 com no máximo 2 extensões |
+| v2-F6 `env` vence o shell / modo por regra | `PROMPT_GATE_BLOCK_RULES` em `settings.local.json`; teste garante ausência do kill switch no `env` |
+| v2-F7 regra estatística fraca | ≤ 2 FP em ≥ 60 |
+| v2-F8 Stop sem timeout | `timeout: 180` explícito |
 
 ## Fase 2 (fora desta spec)
 
 - **Classificador semântico advisory dentro do command hook** — Haiku via API ou
   `lex-prompt-gate` 1.5B local (central-ollama, treinado como o `lex-router`, com os rótulos
   da Task 5), recebendo a última mensagem do assistente lida do `transcript_path`.
-- **claude-skills:** promover a nível usuário, ao lado de `hooks/analysis-loop-detector.ts`.
+- **claude-skills:** promover a nível usuário, ao lado de `hooks/analysis-loop-detector.ts`
+  — isso também cobre sessões abertas em subdiretório (v2-F1), com guarda por `cwd`.
 - **kratos-case-pipeline / claude-agents:** gate antes de chamadas caras com
   `interrupt()` + `Command(resume=)` (review §3.2) e Claude Agent SDK.
 
@@ -272,14 +319,16 @@ FP > 3 → ajustar a regra ou removê-la. Registrar a decisão nesta spec. Commi
 |---|---|
 | Gate vira atrito e é desligado | Qualidade só avisa e só no 1º prompt; `!!`; kill switch |
 | PII sai mesmo bloqueada (título, transcript) | Declarado; regra "não digite PII"; o gate reduz, não elimina |
-| Checador de PII quebra e trava o trabalho | Mensagem diz como desligar (`PROMPT_GATE_DISABLE=1`) |
+| Checador de PII quebra e trava o trabalho | Mensagem diz como sair (`PROMPT_GATE_DISABLE=1 claude --continue`) |
+| Sessão em subdiretório roda sem nenhum gate | Regra "abra na raiz"; Fase 2 a nível usuário |
 | Stop hook lento ou ruidoso | Só testes dos módulos tocados; timeout 120 s; ambiente ausente não bloqueia |
 | Hooks versionados executam código de PR de fork | Regra no CLAUDE.md: revisar forks com hooks desligados |
 | CLI muda o contrato do hook | Testes com stdin real e só chaves usadas; re-smoke ao atualizar o CLI |
 
 ## References
 
-- Premortem: `.premortems/PREMORTEM-2026-10-03T14-58-00Z.md`
+- Premortems: `.premortems/PREMORTEM-2026-10-03T14-58-00Z.md` (v1, REWORK),
+  `.premortems/PREMORTEM-2026-10-03T16-05-00Z-v2.md` (v2, REFINE)
 - Review: `docs/research/2026-10-03-review-jev-claude-code-langgraph.md`
 - Claude Code hooks: https://code.claude.com/docs/en/hooks
 - PII: `tools/validate_br_pii.py`, `.gitleaks.toml`, `tools/git-hooks/pre-push`
