@@ -5,7 +5,8 @@
 (`.premortems/PREMORTEM-2026-10-03T16-05-00Z-v2.md`), cujos 8 achados esta v3 incorpora.
 Decisões vigentes:
 D1=**B** (só T0 determinístico; o usuário escolheu a opção "a" em 2026-10-03, revendo o
-D1=A anterior), D2=advisory, D3=sim, D4=só pje-download. D5 pendente. Nenhum código escrito.
+D1=A anterior), D2=advisory, D3=sim, D4=só pje-download, D5=sim (aprovado 2026-10-03).
+Implementação em andamento.
 **Origem:** `docs/research/2026-10-03-review-jev-claude-code-langgraph.md`.
 **Alvo:** `tools/prompt_gate.py`, `.claude/settings.json`,
 `.claude/skills/refine-prompt/SKILL.md`, `tests/test_prompt_gate.py`,
@@ -153,7 +154,7 @@ por regra, via `PROMPT_GATE_BLOCK_RULES=<id>,<id>` (vazio por padrão), definido
 | D2 | Modo inicial | **advisory** para qualidade; PII sempre bloqueia. Promoção por regra, via Task 9 |
 | D3 | Stop hook | **sim**, com as salvaguardas da Task 6 |
 | D4 | Escopo | **só pje-download** |
-| D5 | Negar `Read` em `downloads/`, `downloads_batch/` e `/data/` via `permissions.deny` | **pendente** — recomendação: sim; Task 7 só executa se aprovado |
+| D5 | Negar `Read` em `downloads/`, `downloads_batch/` e `/data/` via `permissions.deny` | **sim** (aprovado 2026-10-03) |
 
 ## Tasks
 
@@ -251,7 +252,7 @@ são detectados; edição não commitada e rascunho não rastreado **feitos ante
 são; arquivo apagado no turno não vai ao ruff; mapeamento `worker.py` → todos os
 `test_worker*.py`; exit 2 do pytest não bloqueia; `stop_hook_active` encerra. Commit.
 
-### Task 7 — Negar leitura de autos (D5, só se aprovado)
+### Task 7 — Negar leitura de autos (D5)
 
 `.claude/settings.json` → `permissions.deny`: `Read(/downloads/**)`,
 `Read(/downloads_batch/**)`, `Read(//data/**)` (`/x` é relativo ao arquivo de settings;
