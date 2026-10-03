@@ -167,7 +167,8 @@ def test_roda_de_outro_cwd_usando_claude_project_dir(estado, tmp_path):
 def test_session_id_hostil_nao_escapa_do_diretorio_de_estado(estado):
     _rodar(VAGO, estado, sessao="../../fora")
     base = estado / "pje-prompt-gate"
-    assert [d.name for d in base.iterdir()] == ["fora"]  # só o nome, sem "../"
+    sessoes = [d.name for d in base.iterdir() if d.is_dir()]
+    assert sessoes == ["fora"]  # só o nome, sem "../"
     assert not (estado.parent.parent / "fora").exists()
     assert all(p.is_relative_to(estado) for p in estado.rglob("*"))
 

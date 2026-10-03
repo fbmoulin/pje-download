@@ -25,6 +25,13 @@ Como hook `UserPromptSubmit` (stdin = JSON do Claude Code), `main()`:
 - qualidade so na vaga de "primeiro prompt avaliado" da sessao; aviso -> exit 0 com
   `additionalContext` (modelo) e `systemMessage` (usuario, com id para rotular);
   regra em `PROMPT_GATE_BLOCK_RULES` -> exit 2. Excecao aqui -> exit 0 (fail-open).
+
+Telemetria (fora do repo, sem texto nem hash do prompt) em
+`${XDG_STATE_HOME:-~/.local/state}/pje-prompt-gate/telemetria.jsonl`; registros de PII
+guardam so `ts`, `regras` e `decisao`. Uso manual:
+
+    python3 tools/prompt_gate.py --label <id> fp|tp   # rotula um aviso
+    python3 tools/prompt_gate.py --report             # avisos/rotulos por regra
 """
 
 from __future__ import annotations
@@ -270,8 +277,33 @@ def _gravar_snapshot(sessao: Path, raiz: Path) -> None:
         (sessao / "turno.json").unlink(missing_ok=True)
 
 
+def _agora() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _anexar(nome: str, registro: dict) -> None:
+    base = _base_estado()
+    base.mkdir(parents=True, exist_ok=True)
+    with open(base / nome, "a", encoding="utf-8") as f:
+        f.write(json.dumps(registro, ensure_ascii=False) + "\n")
+
+
+def _ler_jsonl(nome: str) -> list[dict]:
+    arq = _base_estado() / nome
+    if not arq.exists():
+        return []
+    registros = []
+    for linha in arq.read_text("utf-8").splitlines():
+        try:
+            registros.append(json.loads(linha))
+        except ValueError:
+            continue  # linha truncada por escrita concorrente: ignora
+    return registros
+
+
 def _hook_prompt() -> int:
     pii_decidida = False
+    inicio = time.perf_counter()
     try:
         if os.environ.get("PROMPT_GATE_DISABLE") == "1":
             return 0
@@ -280,6 +312,10 @@ def _hook_prompt() -> int:
         pii = detectar_pii(prompt)
         if pii:
             print(f"prompt gate: {_motivo(pii)}", file=sys.stderr)
+            _anexar(
+                "telemetria.jsonl",
+                {"ts": _agora(), "regras": list(pii), "decisao": "bloqueia"},
+            )
             return 2
         pii_decidida = True
 
@@ -292,12 +328,25 @@ def _hook_prompt() -> int:
         vaga = sessao / "avaliado"
         primeiro = not vaga.exists()
         resultado = avaliar(prompt, raiz, primeiro, _regras_bloqueadas())
-        if primeiro and not eh_isento(prompt):
+        avaliado = primeiro and not eh_isento(prompt)
+        rotulo = uuid.uuid4().hex[:8]
+        if avaliado:
             vaga.touch()
+            _anexar(
+                "telemetria.jsonl",
+                {
+                    "ts": _agora(),
+                    "id": rotulo,
+                    "session_id": str(dados.get("session_id") or ""),
+                    "prompt_id": str(dados.get("prompt_id") or ""),
+                    "regras": list(resultado.regras),
+                    "decisao": resultado.decisao,
+                    "latencia_ms": round((time.perf_counter() - inicio) * 1000, 1),
+                },
+            )
         if resultado.decisao == "passa":
             return 0
 
-        rotulo = uuid.uuid4().hex[:8]
         if resultado.decisao == "bloqueia":
             print(
                 f"prompt gate [{rotulo}]: {resultado.motivo}. Comece com !! para "
@@ -333,7 +382,54 @@ def _hook_prompt() -> int:
         return 0
 
 
+# --- uso manual: --label / --report -----------------------------------------
+
+
+def _rotular(args: list[str]) -> int:
+    if len(args) != 2 or args[1] not in ("fp", "tp"):
+        print("uso: prompt_gate.py --label <id> fp|tp", file=sys.stderr)
+        return 1
+    rotulo, valor = args
+    ids = {r.get("id") for r in _ler_jsonl("telemetria.jsonl")}
+    if rotulo not in ids:
+        print(f"id desconhecido: {rotulo}", file=sys.stderr)
+        return 1
+    _anexar("rotulos.jsonl", {"ts": _agora(), "id": rotulo, "rotulo": valor})
+    print(f"rotulado: {rotulo} = {valor}")
+    return 0
+
+
+REGRAS_DE_QUALIDADE = ("alvo_ou_sintoma", "possui_dod", "multi_tarefa")
+
+
+def _relatorio() -> int:
+    telemetria = _ler_jsonl("telemetria.jsonl")
+    rotulos = {r["id"]: r["rotulo"] for r in _ler_jsonl("rotulos.jsonl")}  # ultimo vale
+    avaliados = [r for r in telemetria if "id" in r]
+    pii = sum(1 for r in telemetria if "id" not in r)
+    print(f"prompts avaliados: {len(avaliados)}")
+    print(f"bloqueios por PII: {pii}")
+    print(f"{'regra':<16} avisos rotulados fp tp")
+    for regra in REGRAS_DE_QUALIDADE:
+        com = [r for r in avaliados if regra in r.get("regras", [])]
+        rot = [rotulos[r["id"]] for r in com if r["id"] in rotulos]
+        print(f"{regra:<16} {len(com)} {len(rot)} {rot.count('fp')} {rot.count('tp')}")
+    pendentes = [r for r in avaliados if r.get("regras") and r["id"] not in rotulos]
+    print(f"pendentes de rotulo ({len(pendentes)}; mais recentes primeiro):")
+    for r in reversed(pendentes[-20:]):
+        print(
+            f"  {r['id']}  {r['ts']}  sessao={r.get('session_id')} "
+            f"prompt={r.get('prompt_id')}  {','.join(r['regras'])}"
+        )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if args[:1] == ["--label"]:
+        return _rotular(args[1:])
+    if args[:1] == ["--report"]:
+        return _relatorio()
     return _hook_prompt()
 
 
