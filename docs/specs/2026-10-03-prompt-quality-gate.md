@@ -308,6 +308,24 @@ teste do settings atualizado); FP > 2 → ajustar a regra ou removê-la; menos d
 14 dias, **no máximo duas vezes** — depois disso, decidir com os dados que houver ou remover a
 regra. Registrar a decisão nesta spec. Commit.
 
+## Correções vindas do `/code-review` (2026-10-03, nível high)
+
+Dez achados no diff das Tasks 1–8, todos corrigidos com teste de regressão visto falhando
+antes:
+
+| # | Achado | Correção |
+|---|---|---|
+| 1 | `ruff format --check` falhava no CI (teste do D5 sem formatar) | Formatado; o Stop agora também roda `format --check` (#7) |
+| 2 | Prompt bloqueado por regra promovida consumia a vaga; reenviar passava | Bloqueio não consome a vaga |
+| 3 | CPF `NNNNNNNNN-DD`, com espaços ou sem traço; CNPJ alfanumérico minúsculo; CNPJ numérico com espaços passavam | Regex com separadores opcionais; CNPJ alfa sem caixa (sem espaços — casaria frase comum). Resíduo: token alfanumérico de 14 caracteres com DV válido por acaso (~1%) bloqueia |
+| 4 | Timeouts internos do Stop (60+30+120 s) > 180 s registrados | Prazo único `STOP_ORCAMENTO_S=165`, cada etapa usa o restante |
+| 5 | Import do projeto quebrado pelo turno saía como "ambiente" (exit 2) e não bloqueava | Exit 2 só avisa se todos os `No module named` forem externos ao repo; senão bloqueia |
+| 6 | Limpeza de 30 dias apagava a pasta da própria sessão retomada | Pula a sessão atual e renova o mtime dela |
+| 7 | Stop rodava só `ruff check` | `check` + `format --check`, como o CI |
+| 8 | Caminho absoluto inventado (`/src/x.py`) passava como endpoint | Endpoint não pode ter extensão nem continuar em caminho |
+| 9 | `git` sem `-z` quebrava caminhos com espaço/acento | `-z` em `diff` e `ls-files` |
+| 10 | Mudança em `tests/conftest.py` não rodava teste nenhum | Arquivo de `tests/` que não é `test_*` roda a pasta `tests/` inteira |
+
 ## Correções vindas do premortem
 
 | Finding | Mudança nesta v2 |

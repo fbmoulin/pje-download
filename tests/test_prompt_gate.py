@@ -85,6 +85,11 @@ def test_sem_caminho_nem_sintoma_dispara_alvo():
     assert "alvo_ou_sintoma" in r.regras
 
 
+def test_caminho_absoluto_inexistente_nao_conta_como_endpoint():
+    r = _avaliar("corrija o parser em /src/soap_parser_novo.py; deve passar no pytest")
+    assert "alvo_ou_sintoma" in r.regras
+
+
 @pytest.mark.parametrize(
     "sintoma",
     [
@@ -263,6 +268,38 @@ def test_motivo_nunca_contem_o_documento(forma):
     assert valor not in r.motivo
     assert digitos not in r.motivo
     assert digitos[:3] not in r.motivo and digitos[-2:] not in r.motivo
+
+
+@pytest.mark.parametrize(
+    "formatar",
+    [
+        lambda c: f"{c[:9]}-{c[9:]}",
+        lambda c: f"{c[:3]} {c[3:6]} {c[6:9]} {c[9:]}",
+        lambda c: f"{c[:3]}.{c[3:6]}.{c[6:9]}{c[9:]}",
+        lambda c: f"{c[:3]}.{c[3:6]}.{c[6:9]} {c[9:]}",
+    ],
+    ids=["traco-so-no-dv", "espacos", "sem-traco", "espaco-no-dv"],
+)
+def test_cpf_em_formatos_parciais_bloqueia(formatar):
+    assert detectar_pii(f"cliente {formatar(CPF)} aqui") == ("pii_cpf",)
+
+
+@pytest.mark.parametrize(
+    "valor",
+    [
+        CNPJ_ALFA.lower(),
+        _pontuar_cnpj(CNPJ_ALFA).lower(),
+        f"{CNPJ[:2]} {CNPJ[2:5]} {CNPJ[5:8]} {CNPJ[8:12]} {CNPJ[12:]}",
+    ],
+    ids=["alfa-minusculo", "alfa-minusculo-pontuado", "numerico-com-espacos"],
+)
+def test_cnpj_em_formatos_alternativos_bloqueia(valor):
+    assert detectar_pii(f"empresa {valor} no lote") == ("pii_cnpj",)
+
+
+def test_frase_comum_com_numeros_soltos_nao_vira_pii():
+    texto = "rode 3 vezes com 10 workers e 200 processos; timeout de 30 s"
+    assert detectar_pii(texto) == ()
 
 
 def test_cpf_e_cnpj_juntos_disparam_as_duas_regras_em_ordem():

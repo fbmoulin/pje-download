@@ -98,7 +98,9 @@ _RE_ARQUIVO = re.compile(rf"(?<![\w/.-])((?:[\w.-]+/)*[\w.-]+\.(?:{_EXTENSOES}))
 # Diretorio relativo terminado em "/" ("ops/monitoring/", "src/utils/").
 _RE_DIRETORIO = re.compile(r"(?<![\w/.-])((?:[\w.-]+/)+)(?=[\s,;:.)`'\"]|$)")
 # Endpoint HTTP ("/health", "/api/status") — alvo concreto, mesmo sem arquivo.
-_RE_ENDPOINT = re.compile(r"(?:^|[\s(`'\"])/(?:api/)?[a-z][\w-]*(?:/[\w-]+)*")
+_RE_ENDPOINT = re.compile(
+    r"(?:^|[\s(`'\"])/(?:api/)?[a-z][\w-]*(?:/[\w-]+)*(?![\w./-])"
+)
 _RE_SINTOMA = re.compile(
     r"\b\w*(?:Error|Exception)\b"
     r"|\bTraceback\b"
@@ -109,10 +111,20 @@ _RE_SINTOMA = re.compile(
 _RE_ITEM_LINHA = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+\S", re.MULTILINE)
 _RE_ITEM_INLINE = re.compile(r"(?:^|\s)\d+\)\s+\S")
 
-# Formas pontuadas. As nuas vem de validate_br_pii (RE_CPF_NU / RE_CNPJ_NU).
-_RE_CPF_PONTUADO = re.compile(r"(?<![\d.])\d{3}\.\d{3}\.\d{3}-\d{2}(?!\d)")
-_RE_CNPJ_PONTUADO = re.compile(
-    r"(?<![A-Z0-9.])[A-Z0-9]{2}\.[A-Z0-9]{3}\.[A-Z0-9]{3}/[A-Z0-9]{4}-\d{2}(?!\d)"
+# Formas com separadores. A nua vem de validate_br_pii (RE_CPF_NU / RE_CNPJ_NU); aqui
+# cobrimos ponto, espaco, traco so no DV, ponto sem traco etc. O DV filtra o resto.
+_RE_CPF_SEPARADO = re.compile(
+    r"(?<![\d.])\d{3}[.\s]?\d{3}[.\s]?\d{3}[-.\s]?\d{2}(?![\d])"
+)
+# CNPJ numerico com separadores (inclui espacos).
+_RE_CNPJ_SEPARADO = re.compile(
+    r"(?<![\d.])\d{2}[.\s]?\d{3}[.\s]?\d{3}[/\s]?\d{4}[-\s]?\d{2}(?!\d)"
+)
+# CNPJ alfanumerico (IN RFB 2.229/2024), nu ou pontuado, maiusculo ou minusculo. Sem
+# espacos: com letras, espaco opcional casaria trechos de frase comum.
+_RE_CNPJ_ALFA = re.compile(
+    r"(?<![A-Za-z0-9.])[A-Za-z0-9]{2}\.?[A-Za-z0-9]{3}\.?[A-Za-z0-9]{3}/?"
+    r"[A-Za-z0-9]{4}-?\d{2}(?![A-Za-z0-9])"
 )
 
 _MENSAGENS = {
@@ -139,10 +151,14 @@ def detectar_pii(prompt: str) -> tuple[str, ...]:
     """Ids das regras de PII disparadas, em ordem estavel. Nao devolve os valores."""
     v = _validadores()
     regras = []
-    cpfs = v.RE_CPF_NU.findall(prompt) + _RE_CPF_PONTUADO.findall(prompt)
+    cpfs = v.RE_CPF_NU.findall(prompt) + _RE_CPF_SEPARADO.findall(prompt)
     if any(v.cpf_valido(c) for c in cpfs):
         regras.append("pii_cpf")
-    cnpjs = v.RE_CNPJ_NU.findall(prompt) + _RE_CNPJ_PONTUADO.findall(prompt)
+    cnpjs = (
+        v.RE_CNPJ_NU.findall(prompt)
+        + _RE_CNPJ_SEPARADO.findall(prompt)
+        + _RE_CNPJ_ALFA.findall(prompt)
+    )
     if any(v.cnpj_valido(c) for c in cnpjs):
         regras.append("pii_cnpj")
     return tuple(regras)
@@ -232,10 +248,10 @@ def _dir_sessao(session_id: object) -> Path:
     return _base_estado() / nome
 
 
-def _limpar_estados_velhos(base: Path) -> None:
+def _limpar_estados_velhos(base: Path, atual: Path) -> None:
     limite = time.time() - ESTADO_MAX_DIAS * 86400
     for d in base.iterdir() if base.is_dir() else ():
-        if d.is_dir() and d.stat().st_mtime < limite:
+        if d != atual and d.is_dir() and d.stat().st_mtime < limite:
             shutil.rmtree(d, ignore_errors=True)
 
 
@@ -256,8 +272,9 @@ def _sha256(caminho: Path) -> str:
 def snapshot(raiz: Path) -> dict:
     """HEAD e sha256 dos .py sujos (vs HEAD) ou nao rastreados, relativos a raiz."""
     head = _git(raiz, "rev-parse", "HEAD").strip()
-    nomes = set(_git(raiz, "diff", "--name-only", "HEAD").split())
-    nomes |= set(_git(raiz, "ls-files", "-o", "--exclude-standard").split())
+    nomes = set(_git(raiz, "diff", "--name-only", "-z", "HEAD").split("\0"))
+    nomes |= set(_git(raiz, "ls-files", "-o", "-z", "--exclude-standard").split("\0"))
+    nomes.discard("")
     arquivos = {
         n: _sha256(raiz / n)
         for n in sorted(nomes)
@@ -331,7 +348,8 @@ def _hook_prompt() -> int:
         raiz = Path(os.environ.get("CLAUDE_PROJECT_DIR") or dados.get("cwd") or ".")
         sessao = _dir_sessao(dados.get("session_id"))
         sessao.mkdir(parents=True, exist_ok=True)
-        _limpar_estados_velhos(sessao.parent)
+        os.utime(sessao)  # sessao retomada (--resume) nao envelhece
+        _limpar_estados_velhos(sessao.parent, sessao)
         _gravar_snapshot(sessao, raiz)
 
         vaga = sessao / "avaliado"
@@ -339,8 +357,9 @@ def _hook_prompt() -> int:
         resultado = avaliar(prompt, raiz, primeiro, _regras_bloqueadas())
         avaliado = primeiro and not eh_isento(prompt)
         rotulo = uuid.uuid4().hex[:8]
+        if avaliado and resultado.decisao != "bloqueia":
+            vaga.touch()  # bloqueado nao consome a vaga: reenviar igual bloqueia de novo
         if avaliado:
-            vaga.touch()
             _anexar(
                 "telemetria.jsonl",
                 {
@@ -394,9 +413,14 @@ def _hook_prompt() -> int:
 # --- hook Stop ------------------------------------------------------------------
 
 RUFF_PADRAO = "uvx ruff@0.14.14"
+# Prazo unico para tudo o que o Stop roda; fica abaixo do timeout registrado no
+# settings (180 s), senao o Claude Code mata o hook antes de ele reportar.
+STOP_ORCAMENTO_S = 165
 PYTEST_TIMEOUT_S = 120
 RUFF_TIMEOUT_S = 60
+SONDA_TIMEOUT_S = 15
 RESUMO_MAX_LINHAS = 20
+_RE_MODULO_AUSENTE = re.compile(r"No module named '([\w.]+)'")
 
 
 def arquivos_do_turno(raiz: Path, anterior: dict) -> list[str]:
@@ -406,8 +430,13 @@ def arquivos_do_turno(raiz: Path, anterior: dict) -> list[str]:
     mudaram = {n for n, h in atual["arquivos"].items() if antes.get(n) != h}
     if anterior.get("head") and anterior["head"] != atual["head"]:
         commitados = _git(
-            raiz, "diff", "--name-only", "--diff-filter=d", f"{anterior['head']}..HEAD"
-        ).split()
+            raiz,
+            "diff",
+            "--name-only",
+            "-z",
+            "--diff-filter=d",
+            f"{anterior['head']}..HEAD",
+        ).split("\0")
         mudaram |= {n for n in commitados if n.endswith(".py")}
     return sorted(n for n in mudaram if (raiz / n).is_file())
 
@@ -416,7 +445,9 @@ def testes_para(raiz: Path, arquivos: list[str]) -> list[str]:
     testes = set()
     for nome in arquivos:
         caminho = Path(nome)
-        if caminho.parts[:1] == ("tests",) and caminho.name.startswith("test_"):
+        if caminho.parts[:1] == ("tests",):
+            if not caminho.name.startswith("test_"):
+                return ["tests"]  # conftest/helper compartilhado: a pasta inteira
             testes.add(nome)
             continue
         for t in (raiz / "tests").glob(f"test_{caminho.stem}*.py"):
@@ -428,36 +459,62 @@ def _resumo(texto: str) -> str:
     return "\n".join(texto.strip().splitlines()[-RESUMO_MAX_LINHAS:])
 
 
-def _checar_lint(raiz: Path, arquivos: list[str]) -> tuple[str | None, str | None]:
-    """(motivo de bloqueio, aviso)."""
+def _restante(prazo: float, teto: float) -> float:
+    return max(0.0, min(teto, prazo - time.monotonic()))
+
+
+def _checar_lint(
+    raiz: Path, arquivos: list[str], prazo: float
+) -> tuple[str | None, str | None]:
+    """(motivo de bloqueio, aviso). Roda `check` e `format --check`, como o CI."""
     cmd = shlex.split(os.environ.get("PROMPT_GATE_RUFF") or RUFF_PADRAO)
     if not shutil.which(cmd[0]):
         return None, f"ruff não rodou ({cmd[0]} ausente)"
-    try:
-        p = subprocess.run(
-            [*cmd, "check", *arquivos],
-            cwd=raiz,
-            capture_output=True,
-            text=True,
-            timeout=RUFF_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired:
-        return None, "ruff excedeu o tempo"
-    saida = p.stdout + p.stderr
-    if p.returncode == 1 and "Found" in saida:
-        return f"ruff encontrou problemas:\n{_resumo(saida)}", None
-    if p.returncode != 0:
-        return None, f"ruff não rodou (exit {p.returncode})"
-    return None, None
+    problemas, avisos = [], []
+    for sub, sinal in ((["check"], "Found"), (["format", "--check"], "Would reformat")):
+        tempo = _restante(prazo, RUFF_TIMEOUT_S)
+        if tempo < 1:
+            avisos.append("sem tempo para o ruff")
+            break
+        try:
+            p = subprocess.run(
+                [*cmd, *sub, *arquivos],
+                cwd=raiz,
+                capture_output=True,
+                text=True,
+                timeout=tempo,
+            )
+        except subprocess.TimeoutExpired:
+            avisos.append(f"ruff {sub[0]} excedeu o tempo")
+            continue
+        saida = p.stdout + p.stderr
+        if p.returncode == 1 and sinal in saida:
+            problemas.append(f"ruff {' '.join(sub)}:\n{_resumo(saida)}")
+        elif p.returncode != 0:
+            avisos.append(f"ruff {sub[0]} não rodou (exit {p.returncode})")
+    return ("\n\n".join(problemas) or None), ("; ".join(avisos) or None)
 
 
-def _checar_testes(raiz: Path, testes: list[str]) -> tuple[str | None, str | None]:
+def _modulo_do_projeto(raiz: Path, modulo: str) -> bool:
+    topo = modulo.split(".")[0]
+    return (raiz / f"{topo}.py").exists() or (raiz / topo).is_dir()
+
+
+def _checar_testes(
+    raiz: Path, testes: list[str], prazo: float
+) -> tuple[str | None, str | None]:
     py = os.environ.get("PROMPT_GATE_PYTHON") or sys.executable
     try:
-        if subprocess.run(
-            [py, "-c", "import pytest"], capture_output=True, timeout=30
-        ).returncode:
+        sonda = subprocess.run(
+            [py, "-c", "import pytest"],
+            capture_output=True,
+            timeout=_restante(prazo, SONDA_TIMEOUT_S) or 1,
+        )
+        if sonda.returncode:
             return None, f"pytest indisponível em {py} (defina PROMPT_GATE_PYTHON)"
+        tempo = _restante(prazo, PYTEST_TIMEOUT_S)
+        if tempo < 5:
+            return None, "sem tempo para o pytest"
         p = subprocess.run(
             [
                 py,
@@ -472,19 +529,25 @@ def _checar_testes(raiz: Path, testes: list[str]) -> tuple[str | None, str | Non
             cwd=raiz,
             capture_output=True,
             text=True,
-            timeout=PYTEST_TIMEOUT_S,
+            timeout=tempo,
         )
     except subprocess.TimeoutExpired:
-        return None, f"pytest excedeu {PYTEST_TIMEOUT_S} s"
+        return None, "pytest excedeu o tempo do hook"
     except OSError as erro:
         return None, f"pytest não rodou ({type(erro).__name__})"
+    saida = p.stdout + p.stderr
     if p.returncode == 1:
-        return f"testes falhando:\n{_resumo(p.stdout + p.stderr)}", None
+        return f"testes falhando:\n{_resumo(saida)}", None
+    if p.returncode == 2:
+        # Coleta interrompida: dependencia externa ausente e ambiente; import do proprio
+        # projeto quebrado (nome removido, modulo apagado) e defeito do turno.
+        ausentes = _RE_MODULO_AUSENTE.findall(saida)
+        if ausentes and not any(_modulo_do_projeto(raiz, m) for m in ausentes):
+            faltam = ", ".join(sorted(set(ausentes)))
+            return None, f"pytest sem dependências no ambiente ({faltam})"
+        return f"testes não coletam:\n{_resumo(saida)}", None
     if p.returncode not in (0, 5):  # 5 = nenhum teste coletado
-        return (
-            None,
-            f"pytest não rodou os testes (exit {p.returncode}: coleta/ambiente)",
-        )
+        return None, f"pytest não rodou os testes (exit {p.returncode})"
     return None, None
 
 
@@ -502,10 +565,11 @@ def _hook_stop() -> int:
         arquivos = arquivos_do_turno(raiz, json.loads(arq.read_text("utf-8")))
         if not arquivos:
             return 0
+        prazo = time.monotonic() + STOP_ORCAMENTO_S
         testes = testes_para(raiz, arquivos)
-        checagens = [_checar_lint(raiz, arquivos)]
+        checagens = [_checar_lint(raiz, arquivos, prazo)]
         if testes:
-            checagens.append(_checar_testes(raiz, testes))
+            checagens.append(_checar_testes(raiz, testes, prazo))
         bloqueios = [m for m, _ in checagens if m]
         avisos = [a for _, a in checagens if a]
         if bloqueios:

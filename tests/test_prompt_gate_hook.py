@@ -155,6 +155,13 @@ def test_block_rules_promove_regra_a_bloqueio(estado):
     assert "possui_dod" in p.stderr and "!!" in p.stderr
 
 
+def test_prompt_bloqueado_por_regra_promovida_nao_consome_a_vaga(estado):
+    promovido = {"PROMPT_GATE_BLOCK_RULES": "possui_dod"}
+    assert _rodar(VAGO, estado, env=promovido).returncode == 2
+    assert _rodar(VAGO, estado, env=promovido).returncode == 2  # reenviar não fura
+    assert not (estado / "pje-prompt-gate" / "s1" / "avaliado").exists()
+
+
 def test_roda_de_outro_cwd_usando_claude_project_dir(estado, tmp_path):
     p = _rodar(
         "ajuste worker.py para logar o jobId em todas as fases", estado, cwd=tmp_path
@@ -200,6 +207,33 @@ def test_snapshot_registra_head_e_py_sujos_e_nao_rastreados(estado, tmp_path):
     assert snap["head"] == head
     assert set(snap["arquivos"]) == {"a.py", "novo.py"}
     assert all(len(h) == 64 for h in snap["arquivos"].values())
+
+
+def test_sessao_atual_antiga_nao_e_apagada(estado):
+    _rodar(COMPLETO, estado)  # consome a vaga da sessão s1
+    sessao = estado / "pje-prompt-gate" / "s1"
+    antigo = time.time() - 31 * 86400
+    os.utime(sessao, (antigo, antigo))
+    _rodar(VAGO, estado)  # --resume da mesma sessão 31 dias depois
+    assert (sessao / "avaliado").exists()
+    assert (sessao / "turno.json").exists()
+    assert sessao.stat().st_mtime > antigo
+
+
+def test_snapshot_lida_com_espacos_e_acentos(estado, tmp_path):
+    repo = tmp_path / "repo2"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "x.py").write_text("x = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "init")
+    (repo / "ação.py").write_text("a = 1\n")
+    (repo / "meu modulo.py").write_text("b = 1\n")
+    _rodar(COMPLETO, estado, env={"CLAUDE_PROJECT_DIR": str(repo)})
+    snap = json.loads((estado / "pje-prompt-gate" / "s1" / "turno.json").read_text())
+    assert set(snap["arquivos"]) == {"ação.py", "meu modulo.py"}
 
 
 def test_estados_com_mais_de_30_dias_sao_apagados(estado):
@@ -278,4 +312,8 @@ def test_settings_registra_o_stop_hook_com_timeout_maior_que_o_do_pytest():
 def test_settings_nega_leitura_dos_autos_baixados():
     # D5: "/x" é relativo à raiz do projeto (verificado com o CLI 2.1.288); "//" é absoluto.
     deny = set(_config()["permissions"]["deny"])
-    assert {"Read(/downloads/**)", "Read(/downloads_batch/**)", "Read(//data/**)"} <= deny
+    assert {
+        "Read(/downloads/**)",
+        "Read(/downloads_batch/**)",
+        "Read(//data/**)",
+    } <= deny

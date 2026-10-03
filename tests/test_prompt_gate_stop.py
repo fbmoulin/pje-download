@@ -13,7 +13,8 @@ import sys
 
 import pytest
 
-from tests.test_prompt_gate_hook import SCRIPT
+from tests.test_prompt_gate_hook import SCRIPT, _config
+from tools import prompt_gate
 
 COMPLETO = "Em a.py, ajuste o valor; pronto quando o pytest passar"
 
@@ -41,6 +42,9 @@ def ambiente(tmp_path):
     fake.write_text(
         "#!/usr/bin/env bash\n"
         f'echo "$@" >> "{log}"\n'
+        'if [ "$1" = format ]; then\n'
+        '  echo "${FAKE_FMT_OUT:-1 file already formatted}"; exit "${FAKE_FMT_RC:-0}"\n'
+        "fi\n"
         'echo "${FAKE_RUFF_OUT:-All checks passed!}"\n'
         'exit "${FAKE_RUFF_RC:-0}"\n'
     )
@@ -154,6 +158,18 @@ def test_lint_com_violacao_bloqueia(ambiente):
     assert "F401" in saida["reason"]
 
 
+def test_arquivo_fora_do_formato_bloqueia(ambiente):
+    _prompt(ambiente)
+    (ambiente["repo"] / "a.py").write_text("X = 5\n")
+    saida = _stop(
+        ambiente, env={"FAKE_FMT_RC": "1", "FAKE_FMT_OUT": "Would reformat: a.py"}
+    )
+    assert saida["decision"] == "block"
+    assert "Would reformat" in saida["reason"]
+    recebidos = _ruff_recebeu(ambiente)
+    assert "format" in recebidos and "--check" in recebidos
+
+
 def test_falha_da_ferramenta_de_lint_so_avisa(ambiente):
     _prompt(ambiente)
     (ambiente["repo"] / "a.py").write_text("X = 5\n")
@@ -200,6 +216,52 @@ def test_erro_de_coleta_so_avisa(ambiente):
     saida = _stop(ambiente)
     assert "decision" not in saida
     assert "pytest" in saida["systemMessage"]
+
+
+def test_import_do_projeto_quebrado_no_turno_bloqueia(ambiente):
+    repo = ambiente["repo"]
+    _prompt(ambiente)
+    (repo / "a.py").write_text("Y = 1\n")  # o turno removeu X, que test_a usa
+    (repo / "tests" / "test_a.py").write_text(
+        "from a import X\n\n\ndef test_a():\n    assert X\n"
+    )
+    saida = _stop(ambiente)
+    assert saida["decision"] == "block"
+    assert "X" in saida["reason"]
+
+
+def test_submodulo_do_projeto_ausente_bloqueia(ambiente):
+    # "No module named 'c.sub'" cuja raiz "c" é um pacote do repo: quebra do turno.
+    repo = ambiente["repo"]
+    (repo / "c").mkdir()
+    _prompt(ambiente)
+    (repo / "tests" / "test_a.py").write_text("import c.sub\n")
+    saida = _stop(ambiente)
+    assert saida["decision"] == "block"
+
+
+def test_conftest_alterado_roda_a_pasta_de_testes(ambiente):
+    repo = ambiente["repo"]
+    (repo / "tests" / "test_z.py").write_text(
+        "def test_z(dado):\n    assert dado == 1\n"
+    )
+    (repo / "tests" / "conftest.py").write_text(
+        "import pytest\n\n\n@pytest.fixture\ndef dado():\n    return 1\n"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "conftest")
+    _prompt(ambiente)
+    (repo / "tests" / "conftest.py").write_text(
+        "import pytest\n\n\n@pytest.fixture\ndef dado():\n    return 2\n"
+    )
+    saida = _stop(ambiente)
+    assert saida["decision"] == "block"
+    assert "test_z" in saida["reason"]
+
+
+def test_orcamento_interno_cabe_no_timeout_registrado():
+    (hook,) = [h for b in _config()["hooks"]["Stop"] for h in b["hooks"]]
+    assert prompt_gate.STOP_ORCAMENTO_S + 10 <= hook["timeout"]
 
 
 def test_python_sem_pytest_so_avisa(ambiente, tmp_path):
