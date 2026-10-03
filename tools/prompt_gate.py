@@ -13,11 +13,31 @@ regras de qualidade.
 
 O `motivo` de um bloqueio por PII nao carrega o valor, nem mascarado: o stderr do hook
 vai para o transcript da sessao.
+
+Como hook `UserPromptSubmit` (stdin = JSON do Claude Code), `main()`:
+
+- `PROMPT_GATE_DISABLE=1` -> exit 0 (kill switch; nunca fixado no settings);
+- PII antes de qualquer git/disco; PII -> exit 2. Qualquer excecao ate a PII estar
+  decidida -> exit 2 (fail-closed). Timeout do hook e exit != 2 continuam falhando
+  abertos no Claude Code — limite declarado no modelo de ameaca da spec;
+- grava, fora do repo, o snapshot do turno (HEAD + sha256 dos .py sujos/nao
+  rastreados) que o Stop hook compara depois;
+- qualidade so na vaga de "primeiro prompt avaliado" da sessao; aviso -> exit 0 com
+  `additionalContext` (modelo) e `systemMessage` (usuario, com id para rotular);
+  regra em `PROMPT_GATE_BLOCK_RULES` -> exit 2. Excecao aqui -> exit 0 (fail-open).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
+import shutil
+import subprocess
+import sys
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -173,3 +193,149 @@ def avaliar(
 
 def _motivo(regras: tuple[str, ...]) -> str:
     return "; ".join(f"{r}: {_MENSAGENS[r]}" for r in regras)
+
+
+# --- hook UserPromptSubmit ---------------------------------------------------
+
+ESTADO_MAX_DIAS = 30
+_GIT_TIMEOUT_S = 3
+_FALHA_PII = (
+    "prompt gate: a checagem de PII falhou ({erro}); o prompt foi bloqueado por "
+    "seguranca. Para desligar o gate: saia e relance com "
+    "PROMPT_GATE_DISABLE=1 claude --continue"
+)
+
+
+def _base_estado() -> Path:
+    raiz = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(raiz) / "pje-prompt-gate"
+
+
+def _dir_sessao(session_id: object) -> Path:
+    nome = re.sub(r"[^A-Za-z0-9_-]", "", str(session_id or "")) or "sem-sessao"
+    return _base_estado() / nome
+
+
+def _limpar_estados_velhos(base: Path) -> None:
+    limite = time.time() - ESTADO_MAX_DIAS * 86400
+    for d in base.iterdir() if base.is_dir() else ():
+        if d.is_dir() and d.stat().st_mtime < limite:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def _git(raiz: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(raiz), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=_GIT_TIMEOUT_S,
+    ).stdout
+
+
+def _sha256(caminho: Path) -> str:
+    return hashlib.sha256(caminho.read_bytes()).hexdigest()
+
+
+def snapshot(raiz: Path) -> dict:
+    """HEAD e sha256 dos .py sujos (vs HEAD) ou nao rastreados, relativos a raiz."""
+    head = _git(raiz, "rev-parse", "HEAD").strip()
+    nomes = set(_git(raiz, "diff", "--name-only", "HEAD").split())
+    nomes |= set(_git(raiz, "ls-files", "-o", "--exclude-standard").split())
+    arquivos = {
+        n: _sha256(raiz / n)
+        for n in sorted(nomes)
+        if n.endswith(".py") and (raiz / n).is_file()
+    }
+    return {"head": head, "arquivos": arquivos}
+
+
+def _regras_bloqueadas() -> frozenset[str]:
+    bruto = os.environ.get("PROMPT_GATE_BLOCK_RULES", "")
+    return frozenset(r.strip() for r in bruto.split(",") if r.strip())
+
+
+def _ler_entrada() -> dict:
+    dados = json.loads(sys.stdin.read())
+    if not isinstance(dados, dict) or not isinstance(dados.get("prompt"), str):
+        raise ValueError("stdin sem campo 'prompt' textual")
+    return dados
+
+
+def _gravar_snapshot(sessao: Path, raiz: Path) -> None:
+    try:
+        (sessao / "turno.json").write_text(json.dumps(snapshot(raiz)), "utf-8")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        # Sem git/repo: o Stop hook simplesmente nao checa nada neste turno.
+        (sessao / "turno.json").unlink(missing_ok=True)
+
+
+def _hook_prompt() -> int:
+    pii_decidida = False
+    try:
+        if os.environ.get("PROMPT_GATE_DISABLE") == "1":
+            return 0
+        dados = _ler_entrada()
+        prompt = dados["prompt"]
+        pii = detectar_pii(prompt)
+        if pii:
+            print(f"prompt gate: {_motivo(pii)}", file=sys.stderr)
+            return 2
+        pii_decidida = True
+
+        raiz = Path(os.environ.get("CLAUDE_PROJECT_DIR") or dados.get("cwd") or ".")
+        sessao = _dir_sessao(dados.get("session_id"))
+        sessao.mkdir(parents=True, exist_ok=True)
+        _limpar_estados_velhos(sessao.parent)
+        _gravar_snapshot(sessao, raiz)
+
+        vaga = sessao / "avaliado"
+        primeiro = not vaga.exists()
+        resultado = avaliar(prompt, raiz, primeiro, _regras_bloqueadas())
+        if primeiro and not eh_isento(prompt):
+            vaga.touch()
+        if resultado.decisao == "passa":
+            return 0
+
+        rotulo = uuid.uuid4().hex[:8]
+        if resultado.decisao == "bloqueia":
+            print(
+                f"prompt gate [{rotulo}]: {resultado.motivo}. Comece com !! para "
+                "passar mesmo assim, ou use /refine-prompt para reescrever.",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "UserPromptSubmit",
+                        "additionalContext": (
+                            "Prompt gate (aviso, nao bloqueia): "
+                            f"{resultado.motivo}. Se faltar informacao para fazer "
+                            "a tarefa com seguranca, pergunte ao usuario antes de "
+                            "assumir."
+                        ),
+                    },
+                    "systemMessage": (
+                        f"gate [{rotulo}] {', '.join(resultado.regras)} — rotule: "
+                        f"python3 tools/prompt_gate.py --label {rotulo} fp|tp"
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    except BaseException as erro:  # noqa: BLE001 — o hook nunca pode vazar excecao
+        if not pii_decidida:
+            print(_FALHA_PII.format(erro=type(erro).__name__), file=sys.stderr)
+            return 2
+        return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    return _hook_prompt()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

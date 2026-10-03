@@ -226,6 +226,20 @@ prompt com CPF gerado → `num_turns == 0`; o mesmo iniciado em `tests/` → reg
 resultado (esperado hoje: hook não carrega) e reconfirmar em sessão interativa no WSL;
 aviso visível no modo interativo. Medir a latência p95 (Goal). Commit.
 
+**Evidência (2026-10-03, CLI 2.1.288, `env -u CLAUDE_CODE_SESSION_ID`, CPF gerado em
+tempo de execução):**
+
+| Smoke | Resultado |
+|---|---|
+| Raiz, prompt com CPF | `num_turns=0`; só `claude-haiku-4-5` (gerador de título) — modelo principal não rodou |
+| `tests/`, mesmo prompt | `num_turns=2`, `claude-sonnet-5-5` rodou — settings do projeto não carregado (como o modelo de ameaça declara) |
+| Raiz, prompt vago | notice `UserPromptSubmit says: gate [<id>] alvo_ou_sintoma, possui_dod — rotule: …`; modelo seguiu (`num_turns=1`) |
+| Latência, 50 execuções medidas de fora | p50 69–74 ms, **p95 96–98 ms**, máx. 113 ms |
+| Task 3: `/refine-prompt corrige o worker que às vezes perde resultado` | template preenchido com alvos reais (`worker._publish_result`, `dashboard_api._poll_results_loop`, testes existentes), DoD com ruff 0.14.14, uma pergunta sobre o sintoma; nenhuma edição |
+
+Pendente do usuário: reconfirmar o comportamento de subdiretório numa sessão
+**interativa** no WSL.
+
 ### Task 5 — Telemetria rotulável, fora do repo (TDD)
 
 Append em `${XDG_STATE_HOME:-~/.local/state}/pje-prompt-gate/telemetria.jsonl`:
