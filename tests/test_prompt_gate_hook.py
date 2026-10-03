@@ -265,3 +265,11 @@ def test_comando_do_settings_executa_e_bloqueia_cpf(estado, tmp_path):
         timeout=30,
     )
     assert p.returncode == 2, p.stderr
+
+
+def test_settings_registra_o_stop_hook_com_timeout_maior_que_o_do_pytest():
+    blocos = _config()["hooks"]["Stop"]
+    (hook,) = [h for b in blocos for h in b["hooks"]]
+    assert hook["type"] == "command"
+    assert "$CLAUDE_PROJECT_DIR" in hook["command"] and "--stop" in hook["command"]
+    assert hook["timeout"] >= 150  # pytest interno tem 120 s

@@ -32,6 +32,14 @@ guardam so `ts`, `regras` e `decisao`. Uso manual:
 
     python3 tools/prompt_gate.py --label <id> fp|tp   # rotula um aviso
     python3 tools/prompt_gate.py --report             # avisos/rotulos por regra
+
+Como hook `Stop` (`--stop`): compara o repo com o snapshot do turno e, se algum .py
+mudou DURANTE o turno, roda ruff (o do CI, `uvx ruff@0.14.14`) nesses arquivos e pytest
+em `tests/test_<mod>*.py` + testes tocados. Violacao de lint ou teste falhando ->
+`{"decision": "block"}`; ferramenta ausente, erro de coleta ou timeout -> so
+`systemMessage`. `stop_hook_active`, kill switch, sem snapshot ou qualquer excecao ->
+exit 0. `PROMPT_GATE_PYTHON` escolhe o interpretador do pytest (ex.: o do venv) e
+`PROMPT_GATE_RUFF` o comando do ruff.
 """
 
 from __future__ import annotations
@@ -40,6 +48,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -382,6 +391,138 @@ def _hook_prompt() -> int:
         return 0
 
 
+# --- hook Stop ------------------------------------------------------------------
+
+RUFF_PADRAO = "uvx ruff@0.14.14"
+PYTEST_TIMEOUT_S = 120
+RUFF_TIMEOUT_S = 60
+RESUMO_MAX_LINHAS = 20
+
+
+def arquivos_do_turno(raiz: Path, anterior: dict) -> list[str]:
+    """.py que existem e mudaram desde o snapshot do UserPromptSubmit."""
+    atual = snapshot(raiz)
+    antes = anterior.get("arquivos", {})
+    mudaram = {n for n, h in atual["arquivos"].items() if antes.get(n) != h}
+    if anterior.get("head") and anterior["head"] != atual["head"]:
+        commitados = _git(
+            raiz, "diff", "--name-only", "--diff-filter=d", f"{anterior['head']}..HEAD"
+        ).split()
+        mudaram |= {n for n in commitados if n.endswith(".py")}
+    return sorted(n for n in mudaram if (raiz / n).is_file())
+
+
+def testes_para(raiz: Path, arquivos: list[str]) -> list[str]:
+    testes = set()
+    for nome in arquivos:
+        caminho = Path(nome)
+        if caminho.parts[:1] == ("tests",) and caminho.name.startswith("test_"):
+            testes.add(nome)
+            continue
+        for t in (raiz / "tests").glob(f"test_{caminho.stem}*.py"):
+            testes.add(str(t.relative_to(raiz)))
+    return sorted(testes)
+
+
+def _resumo(texto: str) -> str:
+    return "\n".join(texto.strip().splitlines()[-RESUMO_MAX_LINHAS:])
+
+
+def _checar_lint(raiz: Path, arquivos: list[str]) -> tuple[str | None, str | None]:
+    """(motivo de bloqueio, aviso)."""
+    cmd = shlex.split(os.environ.get("PROMPT_GATE_RUFF") or RUFF_PADRAO)
+    if not shutil.which(cmd[0]):
+        return None, f"ruff não rodou ({cmd[0]} ausente)"
+    try:
+        p = subprocess.run(
+            [*cmd, "check", *arquivos],
+            cwd=raiz,
+            capture_output=True,
+            text=True,
+            timeout=RUFF_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "ruff excedeu o tempo"
+    saida = p.stdout + p.stderr
+    if p.returncode == 1 and "Found" in saida:
+        return f"ruff encontrou problemas:\n{_resumo(saida)}", None
+    if p.returncode != 0:
+        return None, f"ruff não rodou (exit {p.returncode})"
+    return None, None
+
+
+def _checar_testes(raiz: Path, testes: list[str]) -> tuple[str | None, str | None]:
+    py = os.environ.get("PROMPT_GATE_PYTHON") or sys.executable
+    try:
+        if subprocess.run(
+            [py, "-c", "import pytest"], capture_output=True, timeout=30
+        ).returncode:
+            return None, f"pytest indisponível em {py} (defina PROMPT_GATE_PYTHON)"
+        p = subprocess.run(
+            [
+                py,
+                "-m",
+                "pytest",
+                "-q",
+                "--no-header",
+                "-p",
+                "no:cacheprovider",
+                *testes,
+            ],
+            cwd=raiz,
+            capture_output=True,
+            text=True,
+            timeout=PYTEST_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"pytest excedeu {PYTEST_TIMEOUT_S} s"
+    except OSError as erro:
+        return None, f"pytest não rodou ({type(erro).__name__})"
+    if p.returncode == 1:
+        return f"testes falhando:\n{_resumo(p.stdout + p.stderr)}", None
+    if p.returncode not in (0, 5):  # 5 = nenhum teste coletado
+        return (
+            None,
+            f"pytest não rodou os testes (exit {p.returncode}: coleta/ambiente)",
+        )
+    return None, None
+
+
+def _hook_stop() -> int:
+    try:
+        if os.environ.get("PROMPT_GATE_DISABLE") == "1":
+            return 0
+        dados = json.loads(sys.stdin.read())
+        if dados.get("stop_hook_active"):
+            return 0
+        raiz = Path(os.environ.get("CLAUDE_PROJECT_DIR") or dados.get("cwd") or ".")
+        arq = _dir_sessao(dados.get("session_id")) / "turno.json"
+        if not arq.exists():
+            return 0
+        arquivos = arquivos_do_turno(raiz, json.loads(arq.read_text("utf-8")))
+        if not arquivos:
+            return 0
+        testes = testes_para(raiz, arquivos)
+        checagens = [_checar_lint(raiz, arquivos)]
+        if testes:
+            checagens.append(_checar_testes(raiz, testes))
+        bloqueios = [m for m, _ in checagens if m]
+        avisos = [a for _, a in checagens if a]
+        if bloqueios:
+            razao = "Prompt gate (Stop): corrija antes de encerrar.\n" + "\n\n".join(
+                bloqueios
+            )
+            print(
+                json.dumps({"decision": "block", "reason": razao}, ensure_ascii=False)
+            )
+        elif avisos:
+            msg = "prompt gate (Stop): " + "; ".join(avisos)
+            print(json.dumps({"systemMessage": msg}, ensure_ascii=False))
+        return 0
+    except BaseException:  # noqa: BLE001 — Stop falha aberto
+        return 0
+
+
 # --- uso manual: --label / --report -----------------------------------------
 
 
@@ -430,6 +571,8 @@ def main(argv: list[str] | None = None) -> int:
         return _rotular(args[1:])
     if args[:1] == ["--report"]:
         return _relatorio()
+    if args[:1] == ["--stop"]:
+        return _hook_stop()
     return _hook_prompt()
 
 

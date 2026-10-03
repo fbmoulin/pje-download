@@ -10,6 +10,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/tools/prompt_gate.py\" --stop",
+            "timeout": 180
+          }
+        ]
+      }
     ]
   }
 }

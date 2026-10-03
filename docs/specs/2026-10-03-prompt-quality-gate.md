@@ -267,6 +267,18 @@ são detectados; edição não commitada e rascunho não rastreado **feitos ante
 são; arquivo apagado no turno não vai ao ruff; mapeamento `worker.py` → todos os
 `test_worker*.py`; exit 2 do pytest não bloqueia; `stop_hook_active` encerra. Commit.
 
+**As built:** `PROMPT_GATE_PYTHON` escolhe o interpretador do pytest (o `python3` do hook
+pode não ter as deps; checa `import pytest` antes, porque `python -m pytest` sem pytest
+também sai 1) e `PROMPT_GATE_RUFF` o comando do ruff (padrão `uvx ruff@0.14.14`; os testes
+injetam um ruff falso). Lint só bloqueia com exit 1 **e** "Found" na saída (falha do `uvx`
+também pode sair ≠ 0). Exit 5 do pytest (nada coletado) não bloqueia.
+
+**Evidência (2026-10-03, CLI 2.1.288, repo descartável):** pedido "Em a.py mude X para 2 e
+não mexa em mais nada" com `tests/test_a.py` exigindo `X == 1` → hook `Stop` devolveu
+`decision: block` com o resumo do pytest; o Claude recebeu o feedback, respeitou o escopo
+(não alterou o teste) e explicou a falha; `stop_hook_active` encerrou o ciclo
+(`num_turns=4`).
+
 ### Task 7 — Negar leitura de autos (D5)
 
 `.claude/settings.json` → `permissions.deny`: `Read(/downloads/**)`,
