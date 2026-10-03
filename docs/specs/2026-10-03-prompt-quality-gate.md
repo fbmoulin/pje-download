@@ -1,6 +1,8 @@
 # Prompt Quality Gate para Claude Code (piloto no pje-download)
 
-**Status:** proposta — aguardando o USER VALIDATION GATE. Nenhum código escrito.
+**Status:** D1–D4 aprovadas (as recomendações) em 2026-10-03. Premortem `deep`
+(`.premortems/PREMORTEM-2026-10-03T14-58-00Z.md`) deu **REWORK** — 7 high, 6 medium.
+Revisão desta spec pendente antes de qualquer código; D1=A precisa ser revisto (Finding 2).
 **Origem:** review do relatório "JEV + Claude Code + LangGraph"
 (`docs/research/2026-10-03-review-jev-claude-code-langgraph.md`).
 **Alvo:** `tools/prompt_gate.py` (novo), `.claude/settings.json` (novo),
