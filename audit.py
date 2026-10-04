@@ -101,7 +101,7 @@ def log_document_saved(
     )
 
 
-def rotate_logs(max_days: int = 90) -> int:
+def rotate_logs(max_days: int = 120) -> int:
     """Delete audit files older than max_days. Returns count deleted."""
     cutoff = date.today() - timedelta(days=max_days)
     deleted = 0
