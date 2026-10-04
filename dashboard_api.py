@@ -914,6 +914,10 @@ class DashboardState:
             numero: json.dumps(self._batch_job_payload(job, numero), ensure_ascii=False)
             for numero in job.processos
         }
+        # Cancellation (dashboard shutdown/deploy) must NOT drop the reply queue:
+        # resume_active_batch re-enters with enqueue_jobs=False and relies on the
+        # undrained results still being there. Its TTL cleans it up if nobody resumes.
+        keep_reply_queue = False
 
         try:
             redis_client = await self.get_redis()
@@ -927,6 +931,9 @@ class DashboardState:
             await self._poll_results_loop(job, redis_client, state)
             self._finalize_batch(job)
 
+        except asyncio.CancelledError:
+            keep_reply_queue = True
+            raise
         except Exception as exc:
             job.status = "failed"
             job.error = str(exc)
@@ -944,7 +951,7 @@ class DashboardState:
             log.error("dashboard.batch.failed", batch_id=job.id, error=str(exc))
             self._evict_old_batches()
         finally:
-            if self._redis is not None:
+            if self._redis is not None and not keep_reply_queue:
                 try:
                     await self._redis.delete(reply_queue)
                 except Exception:
