@@ -235,6 +235,12 @@ MNI_HEALTH_CACHE_TTL_SECS = int(os.getenv("MNI_HEALTH_CACHE_TTL_SECS", "30"))
 RESULT_WAIT_TIMEOUT_SECS = int(os.getenv("RESULT_WAIT_TIMEOUT_SECS", "360"))
 RESULT_POLL_BLPOP_TIMEOUT_SECS = int(os.getenv("RESULT_POLL_BLPOP_TIMEOUT_SECS", "5"))
 
+# Worker side of the same path: how many times `_publish_result` tries a reply-queue
+# write before leaving the result only in the local log. Backoff is 1, 2, 4, 8, then
+# 10 s capped, so the default 8 attempts ride out ~45 s: enough for a Redis restart,
+# short enough not to hold the next job for long. Floor of 1 (a single try).
+RESULT_PUBLISH_MAX_ATTEMPTS = max(1, int(os.getenv("RESULT_PUBLISH_MAX_ATTEMPTS", "8")))
+
 # Redis socket read deadline. MUST exceed every blocking command issued on the
 # connection, or that command can never complete normally.
 #

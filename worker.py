@@ -70,6 +70,7 @@ from config import (
     PLAYWRIGHT_LOGIN_TIMEOUT_MS,
     REDIS_BLPOP_TIMEOUT_SECS,
     REDIS_RESULT_QUEUE_TTL_SECS,
+    RESULT_PUBLISH_MAX_ATTEMPTS,
     REDIS_SOCKET_TIMEOUT_SECS,
     REDIS_CIRCUIT_THRESHOLD,
     DISK_LOW_THRESHOLD_MB,
@@ -1856,11 +1857,19 @@ class PJeSessionWorker:
     async def _publish_result(
         self,
         result_data: dict,
-        max_retries: int = 3,
+        max_retries: int | None = None,
         queue_name: str = "kratos:pje:results",
     ) -> None:
-        """Publish job result to Redis with retry. Falls back to local log on failure."""
+        """Publish job result to Redis with retry. Falls back to local log on failure.
+
+        ``max_retries`` defaults to ``RESULT_PUBLISH_MAX_ATTEMPTS`` (~45 s of backoff):
+        a result lost to a short Redis blip leaves the files on disk while the
+        dashboard reports the processo as failed.
+        """
         from protocol import result_to_json
+
+        if max_retries is None:
+            max_retries = RESULT_PUBLISH_MAX_ATTEMPTS
 
         result_json = result_to_json(result_data)
         for attempt in range(max_retries):
