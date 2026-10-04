@@ -1,5 +1,13 @@
 # pje-download — CLAUDE.md
 
+## Scope — TJES only (decided 2026-10-03)
+
+The owner's focus is **TJES** (`MNI_TRIBUNAL=TJES`, the production deployment). The code still supports `TJES_2G`, `TJBA`, `TJBA_2G`, `TJCE` and `TRT17`, but they are **not a work target**: do not audit, measure, test against, expand or "complete" them, and do not list them as pending items.
+
+- **Why:** the 2026-09/10 sessions drifted into multi-tribunal work (the 6-tribunal SSRF expansion, per-tribunal WSDL re-checks) and the owner called it out: "o meu foco por enquanto e apenas no tjes. entao ja fizemos mais do que deveriamos".
+- **How to apply:** before proposing or starting a task, ask whether it changes the TJES path. If it only affects another tribunal, skip it and mention it in at most one line. Generic fixes that happen to live in shared code (MNI client, worker, dashboard) are fine — the test is the TJES path, not the file.
+- **Already in the code, harmless for TJES:** `MNI_FORBID_EXTERNAL_TRIBUNALS` defaults to all six tribunals (#54) and only acts when `MNI_TRIBUNAL` is one of them. To go back to the TJES-only setting without a code change, set `MNI_FORBID_EXTERNAL_TRIBUNALS=TJES` in the environment.
+
 ## Commands
 
 ```bash
@@ -299,7 +307,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 4. ~~**Sprint 4 (A1/A2)**~~ — DONE 2026-05-01. PR #20 squash-merged (`4be29fe`): A1 `protocol.py` (`JobMessage`/`ResultMessage`/`ProgressMessage`/`DeadLetterEntry` typed dataclasses, 122L) + worker `_publish_result` migration + `job_from_json` input validation; A2 `dashboard_api` 7 module globals collapsed into `AppContext` dataclass at `app[APP_CTX_KEY]`. +8 tests (416→424), wire format byte-identical, ruff clean.
    - ~~Follow-up (5-line): migrate `worker._try_official_api` to a typed `ResultMessage`~~ — **closed as mis-described 2026-09-29.** `_try_official_api` returns a list of files and never builds a result dict; the only result builder is `worker._result`, which already returns a `ResultMessage`, and the progress payload is already a `ProgressMessage`.
    - ~~Follow-up (typing): add `batchId` to `ProgressMessage`~~ — **already done** (`protocol.py`, `batchId: NotRequired[str | None]`).
-5. ~~**zeep SSRF hardening (defense-in-depth)**~~ — ✅ **MERGED 2026-09-26 (#49)** (spec `docs/specs/2026-09-25-zeep-forbid-external.md`). Bump para `zeep==4.3.3` já feito antes (`23d5e8a`, fecha Dependabot alert #1 / GHSA-4cc2-g9w2-fhf6). Escopo: **só TJES por enquanto** — `Settings(forbid_external=...)` agora é **por tribunal**, via `MNI_FORBID_EXTERNAL_TRIBUNALS` (`config.py`, default `{"TJES"}`, env-configurável). `mni_client.py:_get_client` passa `settings=Settings(forbid_external=self.tribunal in MNI_FORBID_EXTERNAL_TRIBUNALS)` ao `Client(...)`. Exceção é `zeep.exceptions.ExternalReferenceForbidden` direto — dispara **antes** de qualquer tentativa de rede. Prova via fixture WSDL local (`tests/fixtures/wsdl_external_schema_location.wsdl`) com `schemaLocation` externo em RFC 5737 TEST-NET-1 (`192.0.2.1`). Suite final: 599 passed (+4 testes novos, 2 skipped Redis). Task 4 (live verification pós-deploy): ✅ confirmado verde em produção (worker `/health` contra TJES). Expansão para outros 5 tribunais (`TJES_2G`, `TJBA`, `TJBA_2G`, `TJCE`, `TRT17`) — future sprint, sem PR de código novo (só adicionar à env var após auditar schemaLocation de cada tribunal).
+5. ~~**zeep SSRF hardening (defense-in-depth)**~~ — ✅ **MERGED 2026-09-26 (#49)** (spec `docs/specs/2026-09-25-zeep-forbid-external.md`). Bump para `zeep==4.3.3` já feito antes (`23d5e8a`, fecha Dependabot alert #1 / GHSA-4cc2-g9w2-fhf6). Escopo: **só TJES por enquanto** — `Settings(forbid_external=...)` agora é **por tribunal**, via `MNI_FORBID_EXTERNAL_TRIBUNALS` (`config.py`, default `{"TJES"}`, env-configurável). `mni_client.py:_get_client` passa `settings=Settings(forbid_external=self.tribunal in MNI_FORBID_EXTERNAL_TRIBUNALS)` ao `Client(...)`. Exceção é `zeep.exceptions.ExternalReferenceForbidden` direto — dispara **antes** de qualquer tentativa de rede. Prova via fixture WSDL local (`tests/fixtures/wsdl_external_schema_location.wsdl`) com `schemaLocation` externo em RFC 5737 TEST-NET-1 (`192.0.2.1`). Suite final: 599 passed (+4 testes novos, 2 skipped Redis). Task 4 (live verification pós-deploy): ✅ confirmado verde em produção (worker `/health` contra TJES). Expansão para outros 5 tribunais (`TJES_2G`, `TJBA`, `TJBA_2G`, `TJCE`, `TRT17`) — **fora do escopo: o foco é só o TJES (ver `## Scope`)**; já está no default de `MNI_FORBID_EXTERNAL_TRIBUNALS` desde o #54, mas não é alvo de trabalho.
 6. ~~**Achados de code-review sobre #46/#47 (já em produção)**~~ — ✅ **MERGED 2026-09-26 (#50)** — 4 real bugs fixed + 1 test-only issue cleaned. Origem: 2026-09-25, subagentes `/code-review` rodaram contra uma ref desatualizada, os achados eram reais mesmo após merge+deploy.
    - **4 Bugs Fixed (merged #50):**
      - `worker.py` `_download_document_api` — exception branches agora chamam `_audit_document_saved` também (+3 testes).
@@ -317,7 +325,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 - Parallel measurement: 5 subagents (Tasks 1.1–1.5), one per tribunal
 - Test suite: `test_every_supported_tribunal_gets_forbid_external_true` parametrized over the six tribunals, plus a gating test that patches the set to exclude one
 - Config default: `MNI_FORBID_EXTERNAL_TRIBUNALS = "TJES,TJES_2G,TJBA,TJBA_2G,TJCE,TRT17"` (env-configurable)
-- WSDL measurement: zero external schemaLocations for all 6, gathered by agents 2026-09-28 — **not re-verified from a BR IP; still to do from `pje-vps`** (the PJe hosts geo-block other IPs)
+- WSDL measurement: zero external schemaLocations for all 6, gathered by agents 2026-09-28 — not re-verified from a BR IP — **out of scope (focus is TJES only, see `## Scope`); TJES itself is verified in production** (the PJe hosts geo-block other IPs)
 - Status: deployed (deploy run #100, 2026-09-29). Rollback without a code change: set `MNI_FORBID_EXTERNAL_TRIBUNALS=TJES` (or any subset) in the environment
 
 ### Audit fixes 2026-10-01 (after the 5-agent + code-review sweep)
