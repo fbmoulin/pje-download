@@ -48,8 +48,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **683 tests** (measured 2026-10-01: 681 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
-  - ⚠️ **Without a reachable redis you get "681 passed, 2 skipped", and the 2 skips are silent.**
+- Test suite: pytest — **908 tests** (measured 2026-10-04: 906 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
+  - ⚠️ **Without a reachable redis you get "906 passed, 2 skipped", and the 2 skips are silent.**
     They are `tests/test_redis_socket_timeout.py` and `tests/test_result_queue_ttl.py` — the only
     real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
     publishes redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379
@@ -87,6 +87,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 - **aiohttp test client**: `async with TestClient(TestServer(create_app(tmp_path))) as client:`
 - **A test that evicts modules from `sys.modules` must restore the originals.** Tests that imported `dashboard_api`/`metrics` at collection time keep the OLD objects while `patch("dashboard_api.X")` and lazy imports resolve the NEW ones. Fixed in `test_image_dependency_pins.py` (2026-10-01): left unrestored, a dashboard test that takes 1.5 s alone spun until killed when run after it; alphabetical order was the only thing hiding it. Check with `pytest tests/test_image_dependency_pins.py tests/` (pins file first).
 - **A full disk must fail the job, and only a full disk.** `_save_document` raises `file_utils.DiskWriteError` (an `OSError` subclass); `download_documentos` phase 2 and `worker._try_mni_download` re-raise it so `download_process` fails the job with the real message instead of trying the API/browser fallbacks on the same disk. Do NOT broaden those `except` clauses to `OSError`: `requests.ConnectionError`/`Timeout` subclass it, and a network blip on one batch is meant to be survived (`test_network_oserror_in_one_batch_does_not_stop_the_next`).
+- **A batch the dashboard gives up on must stop being worked.** Every path that ends `_poll_results_loop` early (idle `RESULT_WAIT_TIMEOUT_SECS`, absolute `BATCH_MAX_DURATION_SECS`, fatal worker status) calls `_purge_pending_jobs`, which LREMs the still-queued payloads from `kratos:pje:jobs`; before 2026-10-04 only the fatal path did, so a batch reported `failed` kept being downloaded and the next batch queued behind its stale jobs. LREM cannot recall the job already running, and a resumed batch regenerates payloads with new ids, so those never match. A Redis error while purging is logged and ignored so it never hides the real cause.
+- **The reply-queue `blpop` survives Redis blips.** `redis.ConnectionError`/`TimeoutError` there back off (2, 4, 8, 10 s cap) and fall through to the idle check, so a real outage still ends as `Worker timeout` instead of looping; any other exception still propagates (`tests/test_batch_timeouts_and_redis_blips.py`). Not yet covered: the worker side (`_publish_result` gives up after ~3.5 s and the result then exists only in the local log).
 - **zeep `Transport(timeout=...)` is only the WSDL *load* timeout.** SOAP POSTs use `operation_timeout` (default `None` = no socket timeout); `mni_client._get_client` sets both. `asyncio.wait_for` around `to_thread` cancels only the awaiter, never the thread.
 
 ## Completed Sprints
@@ -236,6 +238,8 @@ evidence: `docs/specs/2026-10-03-prompt-quality-gate.md`; premortems in `.premor
 Local JSON-L remains the **source of truth**; Railway is a write-only redundant sink.
 Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
+**Retention:** `AUDIT_LOG_RETENTION_DAYS` defaults to **120** (raised from 90 on 2026-10-04 by the owner). Four places state it and `tests/test_audit_retention_default.py` keeps them equal: `config.py`, `audit.rotate_logs`' default, the `docker-compose.yml` default and the `.env` that `deploy.yml` writes on the VPS (the one production really uses). ⚠️ `rotate_logs` only runs when the dashboard starts, so a dashboard that stays up for months never rotates and a restart then deletes everything past the window at once; and with `AUDIT_SYNC_ENABLED` off, `/data/audit` has no copy anywhere in the repo's tooling. Both are open.
+
 **Required for production:**
 - Use an **append-only** Postgres role, not the admin role. One-time setup:
   ```sql
@@ -291,7 +295,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 **As of 2026-09-29:** All Phase 1 backlog items (1–6) are complete and merged, and Phase 2 T2.1 and T2.2A are merged and deployed (#54, #53). Remaining Phase 2 items are below.
 
-**Test suite status:** 681 passed, 2 skipped without Redis (no failures).
+**Test suite status:** 906 passed, 2 skipped without Redis (no failures).
 
 ### Phase 1 Completed Items (2026-04-04 → 2026-09-27)
 

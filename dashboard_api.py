@@ -123,6 +123,8 @@ MAX_BATCH_SIZE = 500  # máximo de processos por batch
 MAX_BATCH_HISTORY = 100  # max completed batches kept in memory
 # RESULT_WAIT_TIMEOUT_SECS moved to config.py (Sprint 2 Q4 — env-configurable)
 _RPUSH_MAX_ATTEMPTS = 3  # audit P1: transient Redis failure should not kill a batch
+# Longest pause between reply-queue BLPOP attempts while Redis is erroring.
+_POLL_REDIS_BACKOFF_CAP_SECS = 10
 
 TERMINAL_PROCESS_STATUSES = {"done", "failed", "partial"}
 
@@ -593,6 +595,32 @@ class DashboardState:
             "pending": max(total - done - failed - partial, 0),
         }
 
+    async def _purge_pending_jobs(
+        self, job: BatchJob, redis_client, state: BatchPollState
+    ) -> None:
+        """LREM the still-queued job payloads of a batch the dashboard gives up on.
+
+        Without this the worker keeps downloading processos of a batch already
+        reported ``failed``, and the next batch queues behind those stale jobs
+        (its own idle timeout can fire before the worker reaches it). LREM only
+        reaches jobs still in the queue: the one the worker is running is not
+        recalled. A Redis error here is logged and ignored so it can never hide
+        the real reason the batch ended.
+        """
+        for numero in state.pending:
+            payload = state.serialized_payloads.get(numero)
+            if not payload:
+                continue
+            try:
+                await redis_client.lrem("kratos:pje:jobs", 0, payload)
+            except (redis.ConnectionError, redis.TimeoutError) as exc:
+                log.warning(
+                    "dashboard.batch.purge_failed",
+                    batch_id=job.id,
+                    error=type(exc).__name__,
+                )
+                return
+
     def _fail_remaining_processes(
         self,
         job: BatchJob,
@@ -698,14 +726,19 @@ class DashboardState:
         - ``numeroProcesso`` NOT in pending: stale/unsolicited, ignore.
 
         Idle-timeout path: if no message arrives for RESULT_WAIT_TIMEOUT_SECS,
-        mark remaining processos as failed with a timeout message and return.
+        LREM the still-queued jobs, mark remaining processos as failed with a
+        timeout message and return. The absolute BATCH_MAX_DURATION_SECS ceiling
+        does the same. A Redis ConnectionError/TimeoutError on the BLPOP is retried
+        with a capped backoff and counts toward the idle timeout.
 
         Mutates ``state`` in place: pending, last_result_at, timed_out, fatal_error.
         """
         batch_start_time = time.monotonic()
+        redis_errors = 0  # consecutive BLPOP failures; reset on any success
         while state.pending:
             if time.monotonic() - batch_start_time > BATCH_MAX_DURATION_SECS:
                 abs_error = f"Batch absolute timeout ({BATCH_MAX_DURATION_SECS}s)"
+                await self._purge_pending_jobs(job, redis_client, state)
                 self._fail_remaining_processes(job, state.pending, abs_error)
                 job.error = abs_error
                 state.timed_out = True
@@ -716,15 +749,34 @@ class DashboardState:
                     pending=len(state.pending),
                 )
                 return
-            item = await redis_client.blpop(
-                state.reply_queue, timeout=RESULT_POLL_BLPOP_TIMEOUT_SECS
-            )
+            try:
+                item = await redis_client.blpop(
+                    state.reply_queue, timeout=RESULT_POLL_BLPOP_TIMEOUT_SECS
+                )
+            except (redis.ConnectionError, redis.TimeoutError) as exc:
+                # A blip must not end a batch the worker is still serving. Back off
+                # and fall through to the idle check below, so a real outage still
+                # ends as a timeout instead of looping forever.
+                redis_errors += 1
+                delay = min(2**redis_errors, _POLL_REDIS_BACKOFF_CAP_SECS)
+                log.warning(
+                    "dashboard.poll.redis_error",
+                    batch_id=job.id,
+                    attempt=redis_errors,
+                    retry_in_secs=delay,
+                    error=type(exc).__name__,
+                )
+                await asyncio.sleep(delay)
+                item = None
+            else:
+                redis_errors = 0
             if not item:
                 if time.monotonic() - state.last_result_at > RESULT_WAIT_TIMEOUT_SECS:
                     timeout_error = (
                         f"Worker timeout: batch sem resultados por "
                         f"{RESULT_WAIT_TIMEOUT_SECS}s"
                     )
+                    await self._purge_pending_jobs(job, redis_client, state)
                     self._fail_remaining_processes(job, state.pending, timeout_error)
                     job.error = timeout_error
                     state.timed_out = True
@@ -768,10 +820,7 @@ class DashboardState:
 
             if worker_status in _FATAL_WORKER_STATUSES and state.pending:
                 fatal_error = result.get("errorMessage") or worker_status
-                for pending_numero in state.pending:
-                    payload = state.serialized_payloads.get(pending_numero)
-                    if payload:
-                        await redis_client.lrem("kratos:pje:jobs", 0, payload)
+                await self._purge_pending_jobs(job, redis_client, state)
                 self._fail_remaining_processes(job, state.pending, fatal_error)
                 job.error = fatal_error
                 state.fatal_error = fatal_error

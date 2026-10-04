@@ -175,6 +175,7 @@ Todas as variaveis sao configuradas via ambiente (centralizadas em `config.py`):
 | `DASHBOARD_PORT` | `8007` | Porta da dashboard API |
 | `MNI_ENABLED` | `true` | Habilitar/desabilitar MNI SOAP |
 | `BATCH_DELAY_SECS` | `2.0` | Pausa entre processos no batch |
+| `AUDIT_LOG_RETENTION_DAYS` | `120` | Dias de retencao dos arquivos JSON-L de auditoria (CNJ 615/2025). A rotacao so roda quando a dashboard inicia |
 | `APP_ENV` | `development` | Quando `production`, exige `DASHBOARD_API_KEY` |
 | `DASHBOARD_API_KEY` | *(vazio)* | Chave obrigatoria para endpoints POST em producao |
 | `TRUST_X_FORWARDED_FOR` | `false` | So habilitar atras de proxy confiavel |

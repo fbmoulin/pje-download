@@ -132,7 +132,7 @@ jobs:
               printf 'DASHBOARD_PORT=8007\n'
               printf 'WORKER_HEALTH_HOST=worker\n'
               printf 'TRUST_X_FORWARDED_FOR=false\n'
-              printf 'AUDIT_LOG_RETENTION_DAYS=90\n'
+              printf 'AUDIT_LOG_RETENTION_DAYS=120\n'
             } > /opt/pje-download/.env
 
       - name: Restart services
