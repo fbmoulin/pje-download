@@ -3,7 +3,7 @@ prometheus_client>=0.26.0
 redis[hiredis]==8.1.0
 structlog==26.1.0
 zeep==4.3.3
-aiohttp==3.14.3
-gdown>=6.4.0
+aiohttp==3.14.4
+gdown>=6.4.1
 requests>=2.34.2
 asyncpg==0.31.0
