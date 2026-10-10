@@ -45,23 +45,24 @@ CLI offline:
 
 | Arquivo | Linhas | Funcao |
 |---------|--------|--------|
-| `worker.py` | ~1860 | Worker PJe com 3 estrategias em cascata (MNI > API > browser), reply queues por batch, downloads paralelos, dead-letter, circuit breaker no blpop, health detalhado |
-| `dashboard_api.py` | ~1560 | Control plane aiohttp — valida batches, publica jobs Redis com retry, agrega resultados (3-phase `_run_batch` split: enqueue/poll/finalize), recupera batch ativo, `api_key` em todo `/api/*`, spawn do audit syncer |
-| `batch_downloader.py` | ~915 | Download em lote via CLI com progresso atomico, retomada e relatorio |
-| `mni_client.py` | ~876 | Cliente SOAP para MNI — download em 2 fases com dedup por checksum |
-| `gdrive_downloader.py` | ~696 | Download de pastas Google Drive (processos antigos escaneados) + `extract_gdrive_link_from_pje` |
-| `audit_sync.py` | ~490 | Background syncer: tails `/data/audit/*.jsonl` → Railway Postgres (CNJ 615/2025 Phase 2). Correctness: `_coerce_utc` normaliza ts naive/aware, `_verify_pg_version` exige PG 15+, `rows_total{success}` só incrementa post-cursor-save. ON CONFLICT dedupe, TLS sslmode-aware |
-| `pje_session.py` | ~440 | Login interativo PJe (Playwright), persistencia de sessao Keycloak, API REST + browser fallback |
-| `metrics.py` | ~216 | Registry Prometheus dedicado — MNI, GDrive, worker, control plane, audit sync (6 series) |
-| `config.py` | ~165 | Configuracao centralizada — todas as variaveis env-configuraveis (incl. audit sync + 7 runtime timeouts extraidos em Sprint 13) |
+| `worker.py` | ~2390 | Worker PJe com 3 estrategias em cascata (MNI > API > browser), reply queues por batch, downloads paralelos, dead-letter, circuit breaker no blpop, health detalhado |
+| `dashboard_api.py` | ~1740 | Control plane aiohttp — valida batches, publica jobs Redis com retry, agrega resultados (3-phase `_run_batch` split: enqueue/poll/finalize), recupera batch ativo, `api_key` em todo `/api/*`, spawn do audit syncer |
+| `batch_downloader.py` | ~920 | Download em lote via CLI com progresso atomico, retomada e relatorio |
+| `mni_client.py` | ~1100 | Cliente SOAP para MNI — download em 2 fases com dedup por checksum |
+| `gdrive_downloader.py` | ~815 | Download de pastas Google Drive (processos antigos escaneados) + `extract_gdrive_link_from_pje` |
+| `audit_sync.py` | ~740 | Background syncer: tails `/data/audit/*.jsonl` → Railway Postgres (CNJ 615/2025 Phase 2). Correctness: `_coerce_utc` normaliza ts naive/aware, `_verify_pg_version` exige PG 15+, `rows_total{success}` só incrementa post-cursor-save. ON CONFLICT dedupe, TLS sslmode-aware |
+| `pje_session.py` | ~435 | Login interativo PJe (Playwright), persistencia de sessao Keycloak, API REST + browser fallback |
+| `metrics.py` | ~285 | Registry Prometheus dedicado — MNI, GDrive, worker, control plane, audit sync (6 series) |
+| `config.py` | ~335 | Configuracao centralizada — todas as variaveis env-configuraveis (incl. audit sync + 7 runtime timeouts extraidos em Sprint 13) |
 | `async_retry.py` | ~109 | `AsyncRetry` class — exponential backoff + jitter genérico, usado por worker Redis init e dashboard `_rpush_with_retry`. Re-raises on exhaustion, no-ops on CancelledError. 10 tests dedicados |
 | `protocol.py` | ~122 | Typed Redis queue protocol (Sprint 15 / v2.5.0) — `JobMessage`, `ResultMessage`, `ProgressMessage`, `DeadLetterEntry` TypedDicts + lossless `from_json`/`to_json` helpers. `job_from_json` rejects non-dict / missing required keys. Wire format byte-identical to pre-v2.5.0 — TypedDict é dict em runtime. 5 unit tests |
-| `file_utils.py` | ~77 | Helpers compartilhados — `total_bytes(files)` tolerante a missing/None/string values, `merge_file_lists(*groups)` com dedup por checksum. Usados em 17+ sites antes duplicados |
-| `audit.py` | ~100 | CNJ 615/2025 audit trail append-only (JSON-L) + `rotate_logs` com cleanup de sidecars `.cursor` |
-| `dashboard.html` | ~193 | Frontend HTML com Google Fonts, data-animate attrs e card de sessao PJe |
-| `static/css/style.css` | ~685 | Design system — glassmorphism, Oswald KPIs, dot-grid bg, staggered animations |
-| `static/js/app.js` | ~618 | Dashboard — adaptive polling, pipeline renderer (SVG), toasts, file upload, sessao PJe |
-| `migrations/` | 2 files | Schema SQL idempotente para `audit_entries` (Railway Postgres, requer PG 15+ para `UNIQUE NULLS NOT DISTINCT`) |
+| `file_utils.py` | ~113 | Helpers compartilhados — `total_bytes(files)` tolerante a missing/None/string values, `merge_file_lists(*groups)` com dedup por checksum. Usados em 17+ sites antes duplicados |
+| `audit.py` | ~126 | CNJ 615/2025 audit trail append-only (JSON-L) + `rotate_logs` com cleanup de sidecars `.cursor` |
+| `dashboard.html` | ~204 | Frontend HTML com Google Fonts, data-animate attrs e card de sessao PJe |
+| `static/css/style.css` | ~775 | Design system — glassmorphism, Oswald KPIs, dot-grid bg, staggered animations |
+| `static/js/app.js` | ~768 | Dashboard — adaptive polling, pipeline renderer (SVG), toasts, file upload, sessao PJe |
+| `migrations/` | 1 file | Schema SQL idempotente para `audit_entries` (Railway Postgres, requer PG 15+ para `UNIQUE NULLS NOT DISTINCT`) |
+| `tools/prompt_gate.py` | ~644 | Hooks do Claude Code (`.claude/settings.json`): bloqueia prompt com CPF/CNPJ válido antes do modelo principal, avisa sobre prompt vago no 1º prompt da sessão, e no `Stop` roda ruff + pytest só nos `.py` alterados no turno. Ver `CLAUDE.md` §"Prompt gate" |
 
 ## Estrategias de Download
 
@@ -152,6 +153,27 @@ um gate que falha aberto e indistinguivel de um gate ausente.
 Falso positivo se resolve com `.gitleaksignore` usando o *fingerprint* especifico
 do achado, nunca desligando a regra. Limite conhecido: **nome de pessoa nao e
 detectavel por regex** e continua descoberto.
+
+### Desenvolvimento com Claude Code (prompt gate)
+
+O repo traz hooks do Claude Code em `.claude/settings.json` (`tools/prompt_gate.py`):
+prompt com CPF/CNPJ válido é bloqueado, prompt vago recebe um aviso, e ao fim de cada
+turno o ruff e os testes dos arquivos alterados rodam. **Abra o Claude Code na raiz do
+repo** — sessão aberta em subdiretório não carrega os hooks. Configuração local (ignorada
+pelo git):
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements.txt pytest pytest-asyncio ruff==0.14.14
+python3 - <<'PY'
+import json, pathlib
+venv = pathlib.Path(".venv/bin").absolute()   # absolute(), NAO resolve(): o link leva ao Python base sem pytest
+pathlib.Path(".claude/settings.local.json").write_text(json.dumps({"env": {
+    "PROMPT_GATE_PYTHON": str(venv / "python"), "PROMPT_GATE_RUFF": str(venv / "ruff")}}, indent=2) + "\n")
+PY
+```
+
+Detalhes, limites e escapes (`!!`, `PROMPT_GATE_DISABLE=1`): `CLAUDE.md` §"Prompt gate".
 
 ## Configuracao
 
@@ -521,7 +543,7 @@ ssh -i <chave_deploy> -L 8007:localhost:8007 <VPS_USER>@<VPS_HOST>
 
 | Workflow | Trigger | Etapas |
 |----------|---------|--------|
-| `ci.yml` | push / PR | ruff lint (**pinado em `0.14.14`**) → pytest (**463 testes** em master) — badge acima |
+| `ci.yml` | push / PR | ruff lint (**pinado em `0.14.14`**) → pytest (**920 testes** em master, medido 2026-10-10 com Redis vivo) — badge acima |
 | `deploy.yml` | CI concluido com sucesso em `master` | rsync → `docker compose up --build` no VPS → healthcheck worker/dashboard → smoke test da fila + validação MNI |
 | `dependabot.yml` | semanal | atualiza actions + pip deps |
 

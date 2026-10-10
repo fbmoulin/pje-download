@@ -2,6 +2,18 @@
 
 > Itens acionáveis abertos. Nada aqui bloqueia o uso: o app está em produção (São Paulo) com MNI `healthy`. Histórico e backlog completo em `CLAUDE.md`.
 
+## ▶ Aberto agora (revisão de 2026-10-10)
+
+Escopo: **só TJES** (decisão de 2026-10-03, `CLAUDE.md` §Scope). Itens de outros tribunais não entram aqui.
+
+- [ ] **Revisão D2 do prompt gate — 2026-10-17** (merge do #66 + 14 dias). `python3 tools/prompt_gate.py --report`; promover uma regra a bloqueio só com ≥ 60 avisos rotulados e ≤ 2 FP; no máximo duas extensões de 14 dias, depois decidir ou remover a regra. Até lá, rotular cada aviso com `--label <id> fp|tp`. Spec: `docs/specs/2026-10-03-prompt-quality-gate.md` (Task 9).
+- [ ] **Job perdido no deploy.** O worker faz `BLPOP` sem ack e o compose não tem `stop_grace_period`: o processo em execução quando o container para é perdido (`CLAUDE.md` §Test Patterns). Maior risco de perda de dado hoje. Correção candidata: fila de processamento (`BLMOVE` + requeue no boot) e/ou `stop_grace_period`. Precisa de spec + premortem.
+- [ ] **Rotação do audit log só no start da dashboard.** Uma dashboard ligada por meses nunca rotaciona e o restart seguinte apaga de uma vez tudo além de 120 dias; com `AUDIT_SYNC_ENABLED` desligado, `/data/audit` não tem cópia (`CLAUDE.md` §Audit Sync → Retention).
+- [ ] **Dependabot #70** (aiohttp 3.14.4, gdown 6.4.1) aberto. Antes do merge: `update_pull_request_branch` e suíte com Redis vivo.
+- [ ] **Rotacionar a chave SSH de deploy e a `DASHBOARD_API_KEY`** — adiado pelo Felipe em 2026-07-25 (item abaixo); status não reverificado desde então.
+- [x] **Prompt gate do Claude Code** — ✅ #66 (2026-10-03, deploy #111), #71 (`.gitignore` de `.claude/settings.local.json` e `.venv/`, deploy #114), #72 (docs). Confirmado em sessão interativa no macOS que sessão aberta em subdiretório não carrega os hooks: **abrir o Claude Code na raiz**.
+- [x] **Cópia de trabalho migrada para o Mac mini** (`/Users/felipemoulin/pje-download`, 2026-10-10): `.venv` Python 3.12 via `uv`, `settings.local.json` com `PROMPT_GATE_PYTHON`/`PROMPT_GATE_RUFF`, pre-push com gitleaks do Homebrew; 918 passed, 2 skipped (sem Redis). O WSL foi aposentado.
+
 ## ✅ Bug do Redis — RESOLVIDO 2026-07-18 (PR #32, `2b6a784`)
 
 - [x] **`Timeout reading from redis:6379`** — causa-raiz = **regressão do redis-py 8.0.0**, não pool/cancelamento.
@@ -123,7 +135,7 @@ Contexto completo, com medições: `~/.claude/docs/handoff/2026-07-25-pje-downlo
     **sem imprimir nada**, e é essa mudez que impede fechar a causa.
   - ✅ **Falha segura:** o passo é anterior a qualquer escrita, então uma falha aqui **não deixa
     estado parcial** — nada sincroniza e produção permanece no código anterior.
-- [ ] **Mesclar Dependabot #36 e #41.** ⚠️ **O #37 não existe mais** — o Dependabot o FECHOU e
+- [x] ✅ **Resolvido 2026-10-01:** #36 mesclado; #41 fechado sem merge (substituído pelo #45, mesclado). ~~**Mesclar Dependabot #36 e #41.**~~ ⚠️ **O #37 não existe mais** — o Dependabot o FECHOU e
   abriu o **#41** com 5 updates (um `prometheus_client` a mais), então a validação local registrada
   no handoff de 25/07, que era sobre o #37, **não transfere**. O que vale agora é o CI, que rodou
   nos dois: **463 passed, 0 skipped**. Ambos rebasados sobre o master atual.
@@ -141,7 +153,7 @@ Contexto completo, com medições: `~/.claude/docs/handoff/2026-07-25-pje-downlo
 ## Opcionais (hardening / operação)
 
 - [ ] **Sink de auditoria no Railway** — `AUDIT_SYNC_ENABLED=true` + `DATABASE_URL=<audit_writer>` (projeto `pje-audit`). A auditoria JSON-L local já grava no volume; o sink é redundância. Ver `CLAUDE.md` §"Audit Sync".
-- [ ] **zeep `forbid_external=True`** (`mni_client.py:178`) — defense-in-depth contra SSRF via `xsd:import`. **Testar antes:** WSDLs do MNI podem importar schemas externos legítimos → pode quebrar com `ExternalReferenceForbidden`. ✅ **Medido 2026-07-25 no TJES:** o WSDL vivo baixa com HTTP 200 (34,5 KB) de IP BR e tem **5 `xs:import`/`xs:include` com ZERO `schemaLocation`** — imports só de namespace, que não disparam fetch externo. ⚠️ Medido **só no TJES**; `TRIBUNAL_ENDPOINTS` tem 6 tribunais e basta um com `schemaLocation` externo para quebrar. Meça os outros 5 antes de ligar.
+- [x] ✅ **Feito:** TJES em #49 (2026-09-25); default para os 6 tribunais em #54 (2026-09-29) — fora do escopo atual, ver `CLAUDE.md` §Scope. ~~**zeep `forbid_external=True`**~~ (`mni_client.py:178`) — defense-in-depth contra SSRF via `xsd:import`. **Testar antes:** WSDLs do MNI podem importar schemas externos legítimos → pode quebrar com `ExternalReferenceForbidden`. ✅ **Medido 2026-07-25 no TJES:** o WSDL vivo baixa com HTTP 200 (34,5 KB) de IP BR e tem **5 `xs:import`/`xs:include` com ZERO `schemaLocation`** — imports só de namespace, que não disparam fetch externo. ⚠️ Medido **só no TJES**; `TRIBUNAL_ENDPOINTS` tem 6 tribunais e basta um com `schemaLocation` externo para quebrar. Meça os outros 5 antes de ligar.
 
 ## ✅ Auditoria completa de 2026-09-20 — 7 achados, todos corrigidos (PRs #46 e #47)
 

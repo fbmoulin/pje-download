@@ -48,8 +48,8 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **917 tests** (measured 2026-10-04: 915 pass + 2 Redis-socket tests that need a live Redis) — run with `pytest tests/ -q` before any commit
-  - ⚠️ **Without a reachable redis you get "915 passed, 2 skipped", and the 2 skips are silent.**
+- Test suite: pytest — **920 tests** (measured 2026-10-10: 920 passed with a live Redis) — run with `pytest tests/ -q` before any commit
+  - ⚠️ **Without a reachable redis you get "918 passed, 2 skipped", and the 2 skips are silent.**
     They are `tests/test_redis_socket_timeout.py` and `tests/test_result_queue_ttl.py` — the only
     real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
     publishes redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379
@@ -185,6 +185,12 @@ Post-v2.5.0 — Deploy Verifier + Spec Verifier (SDD) (2026-06-26 → 2026-07, H
 - Interstitial: dep bumps (aiohttp 3.14.1, python-deps group #24), added coverage (file_utils contract, concurrent rate-limit, worker shutdown-on-session-expiry), repo-wide `ruff check .`/`format .`, manual `workflow_dispatch` on CI.
 - Status: DONE — 424→441 tests. `v2.5.0` remains the latest tag (post-v2.5.0 work not yet tagged).
 
+Prompt gate for Claude Code (2026-10-03 → 2026-10-10, #66, #71, #72):
+- Spec: `docs/specs/2026-10-03-prompt-quality-gate.md` (v3, Tasks 1–8 done); premortems `.premortems/PREMORTEM-2026-10-03T14-58-00Z.md` (REWORK) and `-16-05-00Z-v2.md` (REFINE); review of the rejected JEV/LangGraph design in `docs/research/2026-10-03-review-jev-claude-code-langgraph.md`.
+- Scope: `tools/prompt_gate.py` + `.claude/settings.json` (`UserPromptSubmit` and `Stop` hooks, `permissions.deny` on downloaded case files), `/refine-prompt` skill, `.gitignore` for `.claude/settings.local.json` and `.venv/` (#71). How it works and its limits: section "Prompt gate" below.
+- Open: **Task 9 — D2 review on 2026-10-17** (merge + 14 days): `python3 tools/prompt_gate.py --report`; promote a rule to blocking only with ≥ 60 labeled warnings and ≤ 2 FP, at most two 14-day extensions.
+- Status: DONE (Tasks 1–8) — #66 added 211 tests (681→892 passed without Redis), #71 added 3; deployed (deploy #111 for #66, #114 for #71).
+
 ## Security
 
 - `DASHBOARD_API_KEY` env var required for POST endpoints in production (empty = dev mode, no auth)
@@ -297,7 +303,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 **As of 2026-09-29:** All Phase 1 backlog items (1–6) are complete and merged, and Phase 2 T2.1 and T2.2A are merged and deployed (#54, #53). Remaining Phase 2 items are below.
 
-**Test suite status:** 915 passed, 2 skipped without Redis (no failures).
+**Test suite status (2026-10-10):** 920 passed with a live Redis; 918 passed, 2 skipped without one (no failures).
 
 ### Phase 1 Completed Items (2026-04-04 → 2026-09-27)
 
