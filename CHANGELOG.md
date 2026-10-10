@@ -6,6 +6,55 @@ o projeto segue versionamento semântico.
 
 ## [Unreleased]
 
+### Added — prompt gate do Claude Code (2026-10-03 → 2026-10-10; #66, #71, #72)
+
+- **`tools/prompt_gate.py` registrado em `.claude/settings.json`** como hooks `UserPromptSubmit` e
+  `Stop`. Prompt digitado com CPF/CNPJ de dígito verificador válido (nu, pontuado, com espaços,
+  CNPJ alfanumérico) é bloqueado antes do modelo principal, sem isenção; no primeiro prompt
+  avaliado da sessão, avisa (sem bloquear) quando faltam alvo, critério de pronto ou há tarefas
+  empilhadas; no `Stop`, roda `ruff check` + `format --check` e pytest só nos `.py` alterados
+  durante o turno. Telemetria rotulável fora do repo, sem texto nem hash do prompt.
+- **`permissions.deny`** em `Read` para `downloads/`, `downloads_batch/` e `/data/` (autos baixados).
+- **Skill `/refine-prompt`**, só leitura, que reescreve um pedido no formato Objetivo / Alvo /
+  Definition of Done / Fora de escopo.
+- **`.gitignore`** passa a cobrir `.claude/settings.local.json` e `.venv/` (#71).
+- ⚠️ **Limites declarados:** prompt bloqueado ainda chega ao gerador de título e ao transcript
+  local; sessão aberta em subdiretório não carrega os hooks (confirmado em sessão interativa no
+  macOS, #72); timeout do hook falha aberto. Spec `docs/specs/2026-10-03-prompt-quality-gate.md`,
+  dois premortems em `.premortems/`, revisão do desenho JEV/LangGraph rejeitado em
+  `docs/research/2026-10-03-review-jev-claude-code-langgraph.md`.
+
+### Fixed — fila, Redis e auditoria (2026-10-04; #68, #69)
+
+- **Lote abandonado pela dashboard é removido da fila de jobs** em todo caminho que encerra o
+  `_poll_results_loop` cedo (antes, só o caminho fatal fazia isso, e um lote `failed` seguia sendo
+  baixado).
+- **Quedas curtas do Redis:** o `blpop` da fila de resposta recua (2, 4, 8, 10 s) em vez de
+  falhar, e o `_publish_result` do worker tenta `RESULT_PUBLISH_MAX_ATTEMPTS` vezes (padrão 8,
+  ~45 s) antes de cair no log local.
+- **Lote cancelado (deploy no meio) mantém a fila de resposta**, que o `resume_active_batch`
+  precisa.
+- **Retenção do audit log em 120 dias** (era 90), mantida igual em quatro lugares por
+  `tests/test_audit_retention_default.py`.
+
+### Fixed — auditoria de 2026-10-01 (#61, #62, #63, #64)
+
+- `deploy.yml` só deploya commits deste repositório (#61); timeout de socket nos POSTs SOAP via
+  `operation_timeout` do zeep (#62).
+- XSS na dashboard, validação de `PJE_BASE_URL` por hostname, dígitos Unicode no CNJ, arquivo de
+  sessão 0600 nos dois caminhos de escrita, disco cheio que era engolido (#63).
+- Download MNI parcial deixa de terminar como `success`: documentos perdidos viram
+  `partial_success` (#64).
+
+### Changed — fase 2 e manutenção (2026-09-20 → 2026-10-04)
+
+- Telemetria de espera de download do Playwright (#53); zeep `forbid_external` no TJES (#49) e
+  como default para os 6 tribunais (#54); timeout do login manual separado do teto de download
+  (#55); builder único para eventos `document_saved` (#56–#58); achados F1–F7 da auditoria de
+  2026-09-20 (#46, #47) e do backlog item 6 (#50).
+- Dependabot: actions 6→7 (#36) e grupo python-deps (#45), ambos em 2026-10-01.
+- Escopo de trabalho registrado como **só TJES** (#67).
+
 ### Added — identidade de build no `/health` (2026-07-27)
 
 - **`build_sha` no corpo do `/health` do worker e do `/healthz` da dashboard**, assado na imagem
