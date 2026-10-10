@@ -52,8 +52,8 @@ O gate é **rede de segurança, não sanitizador**. Fora do alcance de qualquer 
 - `UserPromptSubmit` não cobre prompts de subagentes nem chamadas via SDK.
 - **Sessão aberta em subdiretório não carrega o `.claude/settings.json` do projeto**
   (verificado 2026-10-03 com o CLI 2.1.288 em modo `-p`: o hook disparou na raiz e não em
-  `sub/`; reconfirmar em sessão interativa no WSL na Task 4). Nesse caso não há PII, Stop
-  nem deny.
+  `sub/`; **confirmado em sessão interativa** em 2026-10-10, macOS, CLI 2.1.296: o aviso
+  `gate [...]` aparece na raiz e não em `tests/`). Nesse caso não há PII, Stop nem deny.
 - **Falha aberta fora do processo:** se o hook estoura o `timeout`, se `python3` não está no
   PATH (`exit 127`) ou se o interpretador morre, o Claude Code trata como erro não
   bloqueante e o prompt segue (verificado: hook cancelado por timeout → modelo principal
@@ -223,7 +223,7 @@ o comando `--label`; prompt isento não consome a vaga; um teste que **carrega o
 `CLAUDE_PROJECT_DIR` apontado para o repo.
 Smokes manuais (registrados no PR), sempre com `env -u CLAUDE_CODE_SESSION_ID`: na raiz,
 prompt com CPF gerado → `num_turns == 0`; o mesmo iniciado em `tests/` → registrar o
-resultado (esperado hoje: hook não carrega) e reconfirmar em sessão interativa no WSL;
+resultado (esperado hoje: hook não carrega) e reconfirmar em sessão interativa;
 aviso visível no modo interativo. Medir a latência p95 (Goal). Commit.
 
 **Evidência (2026-10-03, CLI 2.1.288, `env -u CLAUDE_CODE_SESSION_ID`, CPF gerado em
@@ -237,8 +237,10 @@ tempo de execução):**
 | Latência, 50 execuções medidas de fora | p50 69–74 ms, **p95 96–98 ms**, máx. 113 ms |
 | Task 3: `/refine-prompt corrige o worker que às vezes perde resultado` | template preenchido com alvos reais (`worker._publish_result`, `dashboard_api._poll_results_loop`, testes existentes), DoD com ruff 0.14.14, uma pergunta sobre o sintoma; nenhuma edição |
 
-Pendente do usuário: reconfirmar o comportamento de subdiretório numa sessão
-**interativa** no WSL.
+**Sessão interativa (2026-10-10, macOS, CLI 2.1.296):** na raiz, o prompt vago mostrou
+`UserPromptSubmit says: gate [<id>] alvo_ou_sintoma, possui_dod — rotule: …`; o mesmo prompt
+numa sessão aberta em `tests/` não mostrou aviso nenhum. O comportamento de subdiretório
+fica confirmado fora do modo `-p`.
 
 ### Task 5 — Telemetria rotulável, fora do repo (TDD)
 

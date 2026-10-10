@@ -214,7 +214,8 @@ evidence: `docs/specs/2026-10-03-prompt-quality-gate.md`; premortems in `.premor
   interpreter fails open.
 - ⚠️ **Open Claude Code at the repo root.** A session started in a subdirectory (`cd tests &&
   claude`) does not load the project `.claude/settings.json` — no PII gate, no Stop hook, no
-  deny (verified with CLI 2.1.288 in `-p` mode; re-check interactively on WSL).
+  deny (verified with CLI 2.1.288 in `-p` mode, and confirmed 2026-10-10 in an interactive
+  session on macOS with CLI 2.1.296: the `gate [...]` notice shows at the root, not in `tests/`).
 - ⚠️ **Review fork PRs with hooks off.** The hooks run the checked-out `tools/prompt_gate.py`
   and the tests on every prompt/Stop, and `config.py` loads `.env` on import. Use
   `"disableAllHooks": true` in `.claude/settings.local.json` (not committed) while reviewing.
@@ -389,11 +390,8 @@ Candidate items for next sprint(s):
 - **Known cosmetic issue:** Grafana 11.3 lands the dashboard in "General" folder rather than `pje-download` folder. Harmless; fix post-deploy via UI or pre-create folder via `POST /api/folders`.
 
 ## Paths
-- Working copy (current, native WSL fs): `/home/fbmoulin/projetos-26-2/pje-download` — matches `origin/master` HEAD. (The default branch is `master`; this line said `origin/main` until 2026-07-27, contradicting the repo's own top trap.)
-- **Three other copies exist on this machine. All are STALE — do not edit any of them.** Measured 2026-07-27:
-  - `/mnt/c/projetos-2026/pje-download` — HEAD `123433f`, pre-v2.5.0.
-  - `~/projetos-2026/pje-download` — an **empty** git repo (branch `master`, zero commits) that merely contains the next one.
-  - `~/projetos-2026/pje-download/pje-download` — HEAD `1a772ec` (2026-06-27), **32 commits behind** `master`. Predates the Redis fixes (PRs #32/#33/#35), the ruff pin and the pre-push PII hook.
-  - Re-clone or `git pull` before using any of them; prefer the working copy above.
+- Working copy (current, macOS on the Mac mini, since 2026-10-10): `/Users/felipemoulin/pje-download`, cloned from `origin/master`. The default branch is `master`.
+  - Local setup there (all git-ignored): `.venv` with Python 3.12 (`uv venv --python 3.12 .venv`, then `uv pip install -r requirements.txt pytest pytest-asyncio ruff==0.14.14`), and `.claude/settings.local.json` setting `PROMPT_GATE_PYTHON` and `PROMPT_GATE_RUFF` to `.venv/bin/python` and `.venv/bin/ruff` (absolute paths, **not** symlink-resolved: the resolved `python` is uv's base interpreter, which has no pytest). Pre-push hook installed with `bash tools/install-git-hooks.sh` and `GITLEAKS_BIN` pointing to Homebrew's `gitleaks`.
+- The WSL machine is no longer used. Its copies (`/home/fbmoulin/projetos-26-2/pje-download` and the stale ones under `/mnt/c/projetos-2026/` and `~/projetos-2026/`) are not working copies anymore.
 - Dashboard: `:8007`, Worker health: `:8006`, Metrics: `:8007/metrics`
 - Downloads output: `/data/downloads` (Docker) or `./downloads` (local)
