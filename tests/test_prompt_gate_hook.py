@@ -317,3 +317,30 @@ def test_settings_nega_leitura_dos_autos_baixados():
         "Read(/downloads_batch/**)",
         "Read(//data/**)",
     } <= deny
+
+
+@pytest.mark.parametrize(
+    "caminho", [".claude/settings.local.json", ".venv/bin/python", ".venv/"]
+)
+def test_gitignore_do_repo_ignora_configuracao_local(tmp_path, caminho):
+    # CLAUDE.md manda pôr os knobs do gate em .claude/settings.local.json e o
+    # PROMPT_GATE_PYTHON costuma apontar para um .venv local: nenhum dos dois pode
+    # entrar num commit deste repo público. Repo isolado: só o .gitignore versionado
+    # conta (sem .git/info/exclude nem excludesFile global da máquina).
+    repo = tmp_path / "isolado"
+    repo.mkdir()
+    shutil.copy(RAIZ / ".gitignore", repo / ".gitignore")
+    ambiente = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    subprocess.run(["git", "init", "-q"], cwd=repo, env=ambiente, check=True)
+    p = subprocess.run(
+        ["git", "check-ignore", "-q", "--no-index", caminho],
+        cwd=repo,
+        env=ambiente,
+        capture_output=True,
+    )
+    assert p.returncode == 0, f"{caminho} não é ignorado pelo .gitignore do repo"
