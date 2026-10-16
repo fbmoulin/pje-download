@@ -16,3 +16,8 @@ ops/monitoring/stack/docker-compose.override.yml
 
 # Agent worktrees (harness-managed, local-only; .claude/agents/ stays tracked)
 .claude/worktrees/
+
+# Local Claude Code settings (prompt-gate knobs, disableAllHooks) and the local venv
+# PROMPT_GATE_PYTHON usually points to — machine-specific, never committed.
+.claude/settings.local.json
+.venv/

@@ -13,7 +13,8 @@
 - `python dashboard_api.py --port 8007 --output ./downloads` starts the dashboard.
 - `python worker.py` starts the Redis consumer; the dashboard is not the execution path anymore without it.
 - `pytest tests/test_config.py tests/test_dashboard_api.py tests/test_worker.py tests/test_pje_session.py tests/test_batch_downloader.py -q` is the focused regression suite for orchestration and integrations.
-- `ruff check config.py dashboard_api.py worker.py tests/test_config.py tests/test_dashboard_api.py tests/test_worker.py tests/test_pje_session.py tests/test_batch_downloader.py` keeps lint tight on the critical path.
+- `pytest tests/ -q` is the full suite (920 tests with a live Redis; without one, 2 real-socket tests skip silently).
+- `uvx ruff@0.14.14 check .` and `uvx ruff@0.14.14 format --check .` match CI exactly: CI pins ruff 0.14.14 and lints the whole repo, not a file list.
 - `python tools/verify_spec.py docs/specs/*.md` is the canonical verifier for Markdown specification documents (SDD specs).
 
 ## Coding Style & Naming Conventions
@@ -34,3 +35,5 @@
 - Production requires `APP_ENV=production`, `DASHBOARD_API_KEY`, and a non-default `REDIS_PASSWORD`; the deploy workflow now fails when those secrets are missing.
 - Do not hard-code credentials or fallback to open production defaults in workflow files, compose files, or source code.
 - Treat `TRUST_X_FORWARDED_FOR` as opt-in only behind a trusted reverse proxy.
+- The repo is public and handles court records: never commit CPF/CNPJ/CNJ-shaped literals (the pre-push gate and gitleaks block them). Tests build such values at runtime.
+- Claude Code sessions get project hooks from `.claude/settings.json` (`tools/prompt_gate.py`) only when opened at the repo root; see `CLAUDE.md` "Prompt gate".
