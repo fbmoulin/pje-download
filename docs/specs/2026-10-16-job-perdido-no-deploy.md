@@ -1,7 +1,8 @@
 # Spec — Job em execução não se perde quando o worker para (deploy, OOM, crash)
 
 **Status:** decisões aprovadas pelo Felipe em 2026-10-17 (D1 = A + B, D3 = 2, D4 fora deste
-trabalho; D2 espera a medição da Task 1, provisório 120 s). Nada implementado. Falta o premortem.
+trabalho; D2 espera a medição da Task 1, provisório 120 s). Premortem feito em 2026-10-17
+(REFINE, achados incorporados). Nada implementado.
 **Origem:** `TODO.md` §"Aberto agora (revisão de 2026-10-10)", item "Job perdido no deploy";
 `CLAUDE.md` §Test Patterns ("Still open: the job the worker is running when the container stops
 is lost").
@@ -53,12 +54,16 @@ que a A não cobre: job mais longo que o prazo de graça, OOM e crash.
   (Redis ≥ 6.2; produção usa `redis:7.4-alpine`, e o redis-py 8.1 tem `blmove`).
 - Depois de publicar o resultado, ou de mandar para a dead-letter, ou no `except Exception` do
   loop: `LREM kratos:pje:jobs:processing 1 <job_json>` com os **bytes exatos** retirados.
-- No boot, antes de `consume_queue`: cada item que ficou em `processing` volta para a **cabeça**
-  de `kratos:pje:jobs` (`LMOVE processing jobs RIGHT LEFT`) e conta uma tentativa em
-  `HINCRBY kratos:pje:jobs:attempts <jobId> 1`.
+- No boot, **depois de `load_session` dar certo** e imediatamente antes de `consume_queue`
+  (premortem F2): cada item que ficou em `processing` volta para a **cabeça** de
+  `kratos:pje:jobs` (`LMOVE processing jobs RIGHT LEFT`) e conta uma tentativa em
+  `HINCRBY kratos:pje:jobs:attempts <sha256 dos bytes do payload> 1`. A chave é o hash, não o
+  `jobId`, porque um payload inválido não tem `jobId` e escaparia do limite (premortem F1).
 - Com mais de `JOB_MAX_REDELIVERIES` (D3) tentativas, o job vai para a dead-letter com motivo
   `redelivery_exhausted`, e o worker publica um resultado `failed` na `replyQueue` do job, para
-  a dashboard não esperar 360 s. Isso impede que um job que derruba o worker (OOM) entre em loop.
+  a dashboard não esperar 360 s (para payload sem `replyQueue` parseável, só a dead-letter).
+  Isso impede que um job que derruba o worker (OOM) entre em loop; a fila espera no máximo
+  `JOB_MAX_REDELIVERIES + 1` execuções dele (premortem F8).
 - A dashboard, ao desistir de um lote (`_purge_pending_jobs`), faz o `LREM` também em
   `kratos:pje:jobs:processing`, para que um job de lote abandonado não seja reentregue no próximo
   boot.
@@ -82,7 +87,7 @@ Task 1 trazer p50/p95/máximo; a parte B não depende dela e pode andar antes.
 | # | Pergunta | Recomendação |
 |---|---|---|
 | D1 | Só a parte A, ou A + B? | **A + B.** A sozinha não cobre OOM, crash, nem job mais longo que o prazo. Se o D2 mostrar que quase todo job cabe no prazo, dá para entregar a A primeiro, num PR próprio. |
-| D2 | Qual `stop_grace_period`? | Medir antes de escolher: duração dos jobs nos logs da VPS (intervalo entre `pje.queue.job_received` e o resultado publicado). Valor provisório: **120 s**. |
+| D2 | Qual `stop_grace_period`? | Medir antes de escolher: duração dos jobs nos logs da VPS (intervalo entre `pje.queue.job_received` e o resultado publicado). Valor provisório: **120 s**; teto de **300 s** por causa do passo de restart do deploy (premortem F5). |
 | D3 | `JOB_MAX_REDELIVERIES` | **2.** O deploy reentrega uma vez. A segunda reentrega já indica um job que derruba o worker. |
 | D4 | Redis com `maxmemory-policy allkeys-lru` (`docker-compose.yml`) pode descartar `kratos:pje:jobs` e a lista de processamento sob pressão de memória. Tratar aqui? | **Não neste PR.** É um risco anterior a este trabalho e independente dele. Fica registrado como item separado no `TODO.md`. |
 
@@ -116,8 +121,9 @@ jobs entraram na amostra. Sem código. Quem roda é o Felipe, porque precisa de 
 
 Teste estático em `tests/test_compose_worker_grace.py`: o serviço `worker` declara
 `stop_grace_period` maior ou igual ao valor escolhido no D2. Mudança de uma linha no
-`docker-compose.yml`. Conferir que o `deploy.yml` não tem timeout menor que o novo prazo no
-passo de restart.
+`docker-compose.yml`. No `deploy.yml`, declarar `command_timeout` explícito no passo
+`Restart services` (o padrão do `appleboy/ssh-action` é 10 min), com folga para rebuild +
+D2 + espera de health (premortem F5).
 
 ### Task 3 — Consumo com `BLMOVE` e `LREM` no fim do job
 
@@ -125,7 +131,15 @@ Testes contra Redis real, no padrão de `tests/test_result_queue_ttl.py`:
 - (a) durante `download_process`, o job está em `processing` e não está em `jobs`;
 - (b) depois do resultado publicado, `processing` fica vazia;
 - (c) idem depois de dead-letter (JSON inválido, campos faltando) e do `except Exception`;
-- (d) um `CancelledError` no meio do job **deixa** o job em `processing`.
+- (d) um `CancelledError` no meio do job **deixa** o job em `processing`;
+- (e) migrar no mesmo commit todos os mocks de `blpop` **do consumidor** (cerca de 25 referências,
+  sobretudo em `tests/test_worker.py`, `tests/test_worker_publish_error_containment.py` e
+  `tests/test_worker_consume_queue_session_expired.py`; conferir arquivo a arquivo) para `blmove`, e cada teste afirma que `blmove` foi chamado com
+  `("kratos:pje:jobs", "kratos:pje:jobs:processing", ...)`. Um `AsyncMock` responde a qualquer
+  método, então um mock esquecido vira "job" e o teste passa sem exercitar nada. Os `blpop` da
+  reply queue da dashboard não mudam (premortem F3);
+- (f) em `tests/test_redis_socket_timeout.py`, caso novo: `BLMOVE` em fila vazia devolve
+  `None`, não `TimeoutError` (premortem F4).
 
 ### Task 4 — Reentrega no boot com limite de tentativas
 
@@ -133,7 +147,10 @@ Testes:
 - (a) um item deixado em `processing` volta para a cabeça de `jobs` e é o próximo a ser consumido;
 - (b) a terceira reentrega (com D3 = 2) vai para a dead-letter com `redelivery_exhausted`, e a
   reply queue recebe um resultado `failed` com o `numeroProcesso` do job;
-- (c) a reentrega não altera os bytes do payload (o `LREM` posterior precisa casar).
+- (c) a reentrega não altera os bytes do payload (o `LREM` posterior precisa casar);
+- (d) um payload **inválido** deixado em `processing` vai para a dead-letter no máximo
+  `JOB_MAX_REDELIVERIES + 1` vezes (premortem F1; o `deploy.yml` empurra um em todo deploy);
+- (e) sessão que falha no boot não altera `processing` nem `attempts` (premortem F2).
 
 ### Task 5 — Purge da dashboard também na lista de processamento
 
@@ -170,8 +187,10 @@ ao lote, sem "Worker timeout".
 ## USER VALIDATION GATE
 
 Antes de qualquer código:
-1. O Felipe responde D1–D4.
-2. Rodar o premortem desta spec (catálogo de 10 categorias) e incorporar os achados.
+1. ~~O Felipe responde D1–D4.~~ Feito em 2026-10-17 (D2 espera a Task 1).
+2. ~~Rodar o premortem desta spec e incorporar os achados.~~ Feito em 2026-10-17:
+   `.premortems/PREMORTEM-2026-10-17T06-30-00Z.md`, veredito **REFINE** (1 high, 4 medium,
+   3 low). F1–F5 e F8 entraram nas seções acima; F6 e F7 já eram non-goals.
 3. Task 1 medida.
 
 Depois disso, o plano detalhado sai pela skill writing-plans, a execução por
