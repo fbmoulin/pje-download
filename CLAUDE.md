@@ -188,7 +188,7 @@ Post-v2.5.0 — Deploy Verifier + Spec Verifier (SDD) (2026-06-26 → 2026-07, H
 Prompt gate for Claude Code (2026-10-03 → 2026-10-10, #66, #71, #72):
 - Spec: `docs/specs/2026-10-03-prompt-quality-gate.md` (v3, Tasks 1–8 done); premortems `.premortems/PREMORTEM-2026-10-03T14-58-00Z.md` (REWORK) and `-16-05-00Z-v2.md` (REFINE); review of the rejected JEV/LangGraph design in `docs/research/2026-10-03-review-jev-claude-code-langgraph.md`.
 - Scope: `tools/prompt_gate.py` + `.claude/settings.json` (`UserPromptSubmit` and `Stop` hooks, `permissions.deny` on downloaded case files), `/refine-prompt` skill, `.gitignore` for `.claude/settings.local.json` and `.venv/` (#71). How it works and its limits: section "Prompt gate" below.
-- Open: **Task 9 — D2 review on 2026-10-17** (merge + 14 days): `python3 tools/prompt_gate.py --report`; promote a rule to blocking only with ≥ 60 labeled warnings and ≤ 2 FP, at most two 14-day extensions.
+- Open: **Task 9 — D2 review, extended on 2026-10-17 to 2026-10-31** (1 warning, 0 labeled; one extension left, to 2026-11-14): `python3 tools/prompt_gate.py --report`; promote a rule to blocking only with ≥ 60 labeled warnings and ≤ 2 FP, at most two 14-day extensions.
 - Status: DONE (Tasks 1–8) — #66 added 211 tests (681→892 passed without Redis), #71 added 3; deployed (deploy #111 for #66, #114 for #71).
 
 ## Security
