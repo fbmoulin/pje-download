@@ -602,10 +602,11 @@ class DashboardState:
 
         Without this the worker keeps downloading processos of a batch already
         reported ``failed``, and the next batch queues behind those stale jobs
-        (its own idle timeout can fire before the worker reaches it). LREM only
-        reaches jobs still in the queue: the one the worker is running is not
-        recalled. A Redis error here is logged and ignored so it can never hide
-        the real reason the batch ended.
+        (its own idle timeout can fire before the worker reaches it). The job the
+        worker is running cannot be recalled, but it is also removed from the
+        worker's processing list, so a worker that dies on it now does not
+        redeliver it on the next boot. A Redis error here is logged and ignored
+        so it can never hide the real reason the batch ended.
         """
         for numero in state.pending:
             payload = state.serialized_payloads.get(numero)
@@ -613,6 +614,7 @@ class DashboardState:
                 continue
             try:
                 await redis_client.lrem("kratos:pje:jobs", 0, payload)
+                await redis_client.lrem("kratos:pje:jobs:processing", 0, payload)
             except (redis.ConnectionError, redis.TimeoutError) as exc:
                 log.warning(
                     "dashboard.batch.purge_failed",

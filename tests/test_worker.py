@@ -260,12 +260,10 @@ class TestResultHelper:
     def test_success_result(self):
         w = _load_worker_module()
         worker = w.PJeSessionWorker()
-        r = worker._result(
-            "job1", "5000001-00.2024.8.08.0001", "success", [{"nome": "doc.pdf"}]
-        )
+        r = worker._result("job1", "PROC-5000001", "success", [{"nome": "doc.pdf"}])
         assert r["status"] == "success"
         assert r["jobId"] == "job1"
-        assert r["numeroProcesso"] == "5000001-00.2024.8.08.0001"
+        assert r["numeroProcesso"] == "PROC-5000001"
         assert len(r["arquivosDownloaded"]) == 1
 
     def test_failed_result_with_error(self):
@@ -300,7 +298,7 @@ class TestResultHelper:
     def test_result_has_timestamp(self):
         w = _load_worker_module()
         worker = w.PJeSessionWorker()
-        r = worker._result("j", "5000001-00.2024.8.08.0001", "success")
+        r = worker._result("j", "PROC-5000001", "success")
         assert "downloadedAt" in r
         assert "T" in r["downloadedAt"]  # ISO format
 
@@ -312,7 +310,7 @@ class TestLogJobResult:
         w.DOWNLOAD_BASE_DIR = tmp_path
         worker = w.PJeSessionWorker()
         files = [{"nome": "doc.pdf", "tamanhoBytes": 1024}]
-        await worker._log_job_result("j1", "5000001-00.2024.8.08.0001", files)
+        await worker._log_job_result("j1", "PROC-5000001", files)
         log_file = tmp_path / "_logs" / "j1.json"
         assert log_file.exists()
         import json
@@ -456,7 +454,7 @@ class TestConsumeQueueShutdown:
         w = _load_worker_module()
         worker = w.PJeSessionWorker()
         mock_r = AsyncMock()
-        mock_r.blpop = AsyncMock(return_value=None)
+        mock_r.blmove = AsyncMock(return_value=None)
         worker.redis = mock_r
 
         shutdown = asyncio.Event()
@@ -478,13 +476,14 @@ class TestConsumeQueueShutdown:
         call_count = 0
 
         async def fail_twice_then_stop(*args, **kwargs):
+            assert args[:2] == (w.JOB_QUEUE, w.PROCESSING_QUEUE), args
             nonlocal call_count
             call_count += 1
             if call_count >= 3:
                 raise asyncio.CancelledError
             raise RedisConnectionError("down")
 
-        mock_r.blpop = fail_twice_then_stop
+        mock_r.blmove = fail_twice_then_stop
         worker.redis = mock_r
         worker.mni_client = MagicMock()  # prevent session expiry check
 
@@ -513,7 +512,7 @@ class TestConsumeQueueShutdown:
     ):
         """Audit P2: sem ceiling, um Redis permanentemente morto deixa
         ``/health`` retornando ``consuming`` para sempre. Após N falhas
-        consecutivas de blpop, o health state flips para
+        consecutivas de leitura da fila (blmove), o health state flips para
         ``redis_unreachable`` (health check retorna 503 e o orquestrador
         pode reiniciar o container).
         """
@@ -524,7 +523,7 @@ class TestConsumeQueueShutdown:
         _patch_redis_exceptions(w)
         worker = w.PJeSessionWorker()
         mock_r = AsyncMock()
-        mock_r.blpop = AsyncMock(side_effect=RedisConnectionError("dead"))
+        mock_r.blmove = AsyncMock(side_effect=RedisConnectionError("dead"))
         worker.redis = mock_r
         worker.mni_client = MagicMock()
 
@@ -552,6 +551,9 @@ class TestConsumeQueueShutdown:
         assert worker._health_status == "redis_unreachable", (
             f"circuit breaker never flipped — got {worker._health_status!r}"
         )
+        mock_r.blmove.assert_awaited_with(
+            w.JOB_QUEUE, w.PROCESSING_QUEUE, ANY, "LEFT", "RIGHT"
+        )
 
     @pytest.mark.asyncio
     async def test_invalid_json_is_sent_to_dead_letter_queue(self):
@@ -562,11 +564,12 @@ class TestConsumeQueueShutdown:
         mock_r = AsyncMock()
         shutdown = asyncio.Event()
 
-        async def blpop(*args, **kwargs):
+        async def blmove(*args, **kwargs):
+            assert args[:2] == (w.JOB_QUEUE, w.PROCESSING_QUEUE), args
             shutdown.set()
-            return ("kratos:pje:jobs", "{invalid")
+            return "{invalid"
 
-        mock_r.blpop = blpop
+        mock_r.blmove = blmove
         worker.redis = mock_r
         worker.mni_client = MagicMock()
 
@@ -587,11 +590,12 @@ class TestConsumeQueueShutdown:
         mock_r = AsyncMock()
         shutdown = asyncio.Event()
 
-        async def blpop(*args, **kwargs):
+        async def blmove(*args, **kwargs):
+            assert args[:2] == (w.JOB_QUEUE, w.PROCESSING_QUEUE), args
             shutdown.set()
-            return ("kratos:pje:jobs", json.dumps({"jobId": "J1"}))
+            return json.dumps({"jobId": "J1"})
 
-        mock_r.blpop = blpop
+        mock_r.blmove = blmove
         worker.redis = mock_r
         worker.mni_client = MagicMock()
 
@@ -612,27 +616,25 @@ class TestConsumeQueueShutdown:
         mock_r = AsyncMock()
         shutdown = asyncio.Event()
 
-        async def blpop(*args, **kwargs):
+        async def blmove(*args, **kwargs):
+            assert args[:2] == (w.JOB_QUEUE, w.PROCESSING_QUEUE), args
             shutdown.set()
-            return (
-                "kratos:pje:jobs",
-                json.dumps(
-                    {
-                        "jobId": "J1",
-                        "batchId": "batch-1",
-                        "replyQueue": "kratos:pje:results:batch-1",
-                        "numeroProcesso": "5000001-00.2024.8.08.0001",
-                    }
-                ),
+            return json.dumps(
+                {
+                    "jobId": "J1",
+                    "batchId": "batch-1",
+                    "replyQueue": "kratos:pje:results:batch-1",
+                    "numeroProcesso": "PROC-5000001",
+                }
             )
 
-        mock_r.blpop = blpop
+        mock_r.blmove = blmove
         worker.redis = mock_r
         worker.mni_client = MagicMock()
         worker.download_process = AsyncMock(
             return_value={
                 "jobId": "J1",
-                "numeroProcesso": "5000001-00.2024.8.08.0001",
+                "numeroProcesso": "PROC-5000001",
                 "status": "success",
                 "arquivosDownloaded": [],
                 "errorMessage": None,
@@ -734,7 +736,7 @@ class TestPublishResult:
             await worker._publish_result(
                 {
                     "jobId": "J1",
-                    "numeroProcesso": "5000001-00.2024.8.08.0001",
+                    "numeroProcesso": "PROC-5000001",
                     "arquivosDownloaded": [{"nome": "doc.pdf"}],
                 },
                 max_retries=2,
@@ -742,7 +744,7 @@ class TestPublishResult:
             )
         local_log.assert_awaited_once_with(
             "J1",
-            "5000001-00.2024.8.08.0001",
+            "PROC-5000001",
             [{"nome": "doc.pdf"}],
         )
 
@@ -757,7 +759,7 @@ class TestPublishResult:
             {
                 "jobId": "J1",
                 "batchId": "batch-1",
-                "numeroProcesso": "5000001-00.2024.8.08.0001",
+                "numeroProcesso": "PROC-5000001",
                 "replyQueue": "kratos:pje:results:batch-1",
             },
             "mni_metadata",
@@ -882,7 +884,7 @@ class TestDownloadProcess:
         result = await worker.download_process(
             {
                 "jobId": "J1",
-                "numeroProcesso": "5000001-00.2024.8.08.0001",
+                "numeroProcesso": "PROC-5000001",
                 "includeAnexos": True,
             }
         )
@@ -1210,7 +1212,7 @@ class TestDocumentSavedAudit:
             result = await worker._download_document_api(
                 {"id": "d1", "nome": "sentenca.pdf", "tipo": "sentenca"},
                 tmp_path,
-                "5000001-00.2024.8.08.0001",
+                "PROC-5000001",
             )
 
         assert result is not None
@@ -1219,7 +1221,7 @@ class TestDocumentSavedAudit:
         assert entry.event_type == "document_saved"
         assert entry.status == "success"
         assert entry.fonte == "pje_api"
-        assert entry.processo_numero == "5000001-00.2024.8.08.0001"
+        assert entry.processo_numero == "PROC-5000001"
         assert entry.documento_id == "d1"
         assert entry.documento_tipo == "sentenca"
         assert entry.tamanho_bytes == len(b"pdf-bytes")
@@ -1713,7 +1715,7 @@ class TestMniCancelledPropagation:
 
         with pytest.raises(asyncio.CancelledError):
             await worker._try_mni_download(
-                "5000001-00.2024.8.08.0001",
+                "PROC-5000001",
                 tmp_path,
                 incluir_anexos=True,
             )
@@ -1731,7 +1733,7 @@ class TestMniCancelledPropagation:
         )
 
         files, anexos, total = await worker._try_mni_download(
-            "5000001-00.2024.8.08.0001",
+            "PROC-5000001",
             tmp_path,
             incluir_anexos=True,
         )
@@ -1773,9 +1775,7 @@ class TestDownloadViaBrowser:
         worker.page = None
         worker.context = None
 
-        result = await worker._download_via_browser(
-            "5000001-00.2024.8.08.0001", tmp_path
-        )
+        result = await worker._download_via_browser("PROC-5000001", tmp_path)
         assert result is None
 
     @pytest.mark.asyncio
@@ -1796,7 +1796,7 @@ class TestDownloadViaBrowser:
         progress = AsyncMock()
 
         result = await worker._download_via_browser(
-            "5000001-00.2024.8.08.0001",
+            "PROC-5000001",
             tmp_path,
             progress_cb=progress,
         )
@@ -1826,7 +1826,7 @@ class TestDownloadViaBrowser:
         )
 
         result = await worker._download_via_browser(
-            "5000001-00.2024.8.08.0001",
+            "PROC-5000001",
             tmp_path,
             allow_full_download=False,
         )
@@ -1847,9 +1847,7 @@ class TestDownloadViaBrowser:
         worker._try_full_download_button = AsyncMock(return_value=None)
         worker._download_docs_individually = AsyncMock(return_value=[{"nome": "x.pdf"}])
 
-        result = await worker._download_via_browser(
-            "5000001-00.2024.8.08.0001", tmp_path
-        )
+        result = await worker._download_via_browser("PROC-5000001", tmp_path)
         assert result == [{"nome": "x.pdf"}]
         worker._download_docs_individually.assert_awaited_once()
 
@@ -1866,9 +1864,7 @@ class TestTryFullDownloadButton:
         worker.page.locator = MagicMock(return_value=_fake_locator())
         worker._detect_captcha = AsyncMock(return_value=True)
 
-        result = await worker._try_full_download_button(
-            "5000001-00.2024.8.08.0001", tmp_path
-        )
+        result = await worker._try_full_download_button("PROC-5000001", tmp_path)
         assert result is None
 
     @pytest.mark.asyncio
@@ -1885,9 +1881,7 @@ class TestTryFullDownloadButton:
         # _try_full_download_button does a couple of asyncio.sleep — shortcut
         monkeypatch.setattr(w.asyncio, "sleep", AsyncMock())
 
-        result = await worker._try_full_download_button(
-            "5000001-00.2024.8.08.0001", tmp_path
-        )
+        result = await worker._try_full_download_button("PROC-5000001", tmp_path)
         assert result is None
 
     @pytest.mark.asyncio
@@ -1900,9 +1894,7 @@ class TestTryFullDownloadButton:
         worker.page = AsyncMock()
         worker.page.goto = AsyncMock(side_effect=RuntimeError("net broke"))
 
-        result = await worker._try_full_download_button(
-            "5000001-00.2024.8.08.0001", tmp_path
-        )
+        result = await worker._try_full_download_button("PROC-5000001", tmp_path)
         assert result is None
 
 
@@ -1978,12 +1970,13 @@ class TestCircuitBreakerHealthRecovery:
 
         shutdown = _asyncio.Event()
 
-        async def fake_blpop(queue, timeout):
-            shutdown.set()  # stop after this one successful blpop
+        async def fake_blmove(*args, **kwargs):
+            assert args[:2] == (w.JOB_QUEUE, w.PROCESSING_QUEUE), args
+            shutdown.set()  # stop after this one successful blmove
             return None  # timeout (no job ready), but the call itself succeeded
 
         worker.redis = AsyncMock()
-        worker.redis.blpop = fake_blpop
+        worker.redis.blmove = fake_blmove
 
         worker.is_session_expired = MagicMock(return_value=False)
 
@@ -1992,7 +1985,7 @@ class TestCircuitBreakerHealthRecovery:
         assert worker._health_status == "consuming", (
             "BEFORE FIX: status stayed 'redis_unreachable' after Redis reconnected; "
             f"got '{worker._health_status}'. "
-            "After fix: successful blpop resets status to 'consuming'."
+            "After fix: successful blmove resets status to 'consuming'."
         )
 
 

@@ -134,3 +134,38 @@ async def test_blpop_on_empty_queue_returns_none_not_timeout():
         assert result is None, "empty-queue BLPOP must return None, not raise"
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_blmove_on_empty_queue_returns_none_not_timeout():
+    """The worker consumes with BLMOVE since 2026-10-17 (jobs -> processing list).
+
+    Same trap as BLPOP: a blocking timeout >= socket_timeout raises instead of
+    returning None. Without this case no real-socket test covers the command the
+    worker actually issues.
+    """
+    redis_asyncio = pytest.importorskip("redis.asyncio")
+
+    url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    client = redis_asyncio.from_url(
+        url,
+        decode_responses=True,
+        socket_timeout=config.REDIS_SOCKET_TIMEOUT_SECS,
+    )
+    try:
+        try:
+            await client.ping()
+        except Exception as exc:  # pragma: no cover - env without redis
+            pytest.skip(f"redis unreachable at {url}: {exc}")
+
+        source = "pje:test:definitely-empty-queue"
+        target = "pje:test:definitely-empty-queue:processing"
+        await client.delete(source, target)
+
+        result = await client.blmove(
+            source, target, config.REDIS_BLPOP_TIMEOUT_SECS, "LEFT", "RIGHT"
+        )
+        assert result is None, "empty-queue BLMOVE must return None, not raise"
+        assert await client.llen(target) == 0
+    finally:
+        await client.aclose()

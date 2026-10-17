@@ -2,7 +2,8 @@
 
 **Status:** decisões aprovadas pelo Felipe em 2026-10-17 (D1 = A + B, D3 = 2, D4 fora deste
 trabalho; D2 espera a medição da Task 1, provisório 120 s). Premortem feito em 2026-10-17
-(REFINE, achados incorporados). Nada implementado.
+(REFINE, achados incorporados). **Tasks 3–5 (parte B) implementadas em 2026-10-17**; Tasks 1–2
+(parte A) esperam a medição.
 **Origem:** `TODO.md` §"Aberto agora (revisão de 2026-10-10)", item "Job perdido no deploy";
 `CLAUDE.md` §Test Patterns ("Still open: the job the worker is running when the container stops
 is lost").

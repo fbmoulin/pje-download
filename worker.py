@@ -68,6 +68,7 @@ from config import (
     PLAYWRIGHT_FULL_DOWNLOAD_TIMEOUT_MS,
     PLAYWRIGHT_INDIVIDUAL_DOWNLOAD_TIMEOUT_MS,
     PLAYWRIGHT_LOGIN_TIMEOUT_MS,
+    JOB_MAX_REDELIVERIES,
     REDIS_BLPOP_TIMEOUT_SECS,
     REDIS_RESULT_QUEUE_TTL_SECS,
     RESULT_PUBLISH_MAX_ATTEMPTS,
@@ -81,6 +82,21 @@ from config import (
 
 DOWNLOAD_BASE_DIR.mkdir(parents=True, exist_ok=True)
 DEAD_LETTER_QUEUE = "kratos:pje:dead-letter"
+
+#: Jobs are taken with BLMOVE from JOB_QUEUE onto PROCESSING_QUEUE and LREM-ed from
+#: there once finished, dead-lettered or dropped. Whatever is still in PROCESSING_QUEUE
+#: when the worker boots was interrupted (deploy SIGKILL, OOM, crash) and goes back to
+#: the head of JOB_QUEUE, at most JOB_MAX_REDELIVERIES times; ATTEMPTS_KEY counts the
+#: redeliveries per sha256 of the payload (not per jobId: an unparseable payload has
+#: none). Assumes ONE worker: a second one booting would redeliver the first one's
+#: in-flight job. Spec: docs/specs/2026-10-16-job-perdido-no-deploy.md.
+JOB_QUEUE = "kratos:pje:jobs"
+PROCESSING_QUEUE = "kratos:pje:jobs:processing"
+ATTEMPTS_KEY = "kratos:pje:jobs:attempts"
+
+
+def _payload_digest(payload: str) -> str:
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _unique_filename(directory: Path, filename: str) -> str:
@@ -2033,6 +2049,107 @@ class PJeSessionWorker:
                 error=str(exc),
             )
 
+    async def _ack_job(self, job_json: str) -> None:
+        """Drop a finished (or dead-lettered, or dropped) job from PROCESSING_QUEUE.
+
+        Never raises: a failed ack only means the job is redelivered on the next
+        boot, which is retrabalho, not loss.
+        """
+        try:
+            await self.redis.lrem(PROCESSING_QUEUE, 1, job_json)
+            await self.redis.hdel(ATTEMPTS_KEY, _payload_digest(job_json))
+        except (
+            redis.ConnectionError,
+            redis.TimeoutError,
+            redis.ResponseError,
+            OSError,
+        ) as exc:
+            log.warning(
+                "pje.queue.ack_failed",
+                error=str(exc),
+                error_class=type(exc).__name__,
+                note="job will be redelivered on the next boot",
+            )
+
+    async def _redeliver_unacked_jobs(self) -> int:
+        """Put the jobs interrupted by the last shutdown back at the head of the queue.
+
+        Runs once per boot, after the session is up and before consuming (a boot
+        that dies earlier must not spend attempts). Returns how many were
+        redelivered. A payload interrupted more than JOB_MAX_REDELIVERIES times is
+        dead-lettered as ``redelivery_exhausted`` instead, with a ``failed`` result
+        on its reply queue so the dashboard does not wait RESULT_WAIT_TIMEOUT_SECS.
+        """
+        redelivered = 0
+        try:
+            while True:
+                job_json = await self.redis.lindex(PROCESSING_QUEUE, -1)
+                if job_json is None:
+                    return redelivered
+                digest = _payload_digest(job_json)
+                attempts = await self.redis.hincrby(ATTEMPTS_KEY, digest, 1)
+                await self.redis.expire(ATTEMPTS_KEY, REDIS_RESULT_QUEUE_TTL_SECS)
+                if attempts <= JOB_MAX_REDELIVERIES:
+                    await self.redis.lmove(PROCESSING_QUEUE, JOB_QUEUE, "RIGHT", "LEFT")
+                    redelivered += 1
+                    log.warning(
+                        "pje.queue.job_redelivered",
+                        attempt=attempts,
+                        max_redeliveries=JOB_MAX_REDELIVERIES,
+                    )
+                    continue
+                await self.redis.lrem(PROCESSING_QUEUE, -1, job_json)
+                await self.redis.hdel(ATTEMPTS_KEY, digest)
+                log.error(
+                    "pje.queue.redelivery_exhausted",
+                    attempts=attempts,
+                    max_redeliveries=JOB_MAX_REDELIVERIES,
+                )
+                await self._publish_dead_letter(
+                    job_json,
+                    "redelivery_exhausted",
+                    details={"attempts": attempts},
+                )
+                await self._publish_exhausted_result(job_json, attempts)
+        except (
+            redis.ConnectionError,
+            redis.TimeoutError,
+            redis.ResponseError,
+            OSError,
+        ) as exc:
+            # Whatever is left stays in PROCESSING_QUEUE for the next boot.
+            log.error(
+                "pje.queue.redelivery_failed",
+                error=str(exc),
+                error_class=type(exc).__name__,
+                redelivered=redelivered,
+            )
+            return redelivered
+
+    async def _publish_exhausted_result(self, job_json: str, attempts: int) -> None:
+        """Tell the job's reply queue it failed, when the payload says where that is."""
+        from protocol import job_from_json
+
+        try:
+            job = job_from_json(job_json)
+        except ValueError:  # json.JSONDecodeError is a ValueError
+            return
+        result_data = self._result(
+            job["jobId"],
+            job["numeroProcesso"],
+            "failed",
+            error=(
+                f"Job interrompido {attempts}x (deploy, OOM ou crash do worker); "
+                f"não foi reenviado de novo"
+            ),
+        )
+        if job.get("batchId"):
+            result_data["batchId"] = job["batchId"]
+        await self._publish_result(
+            result_data,
+            queue_name=job.get("replyQueue", "kratos:pje:results"),
+        )
+
     async def consume_queue(self, shutdown_event: asyncio.Event | None = None) -> None:
         """
         Consome jobs da fila Redis (alimentada pelo n8n control plane).
@@ -2057,10 +2174,15 @@ class PJeSessionWorker:
                 self._health_status = "session_expired"
                 break
 
-            # BLPOP: aguarda até 5s por um job
+            # BLMOVE: aguarda até 5s por um job e o deixa em PROCESSING_QUEUE até
+            # o fim, para que um worker morto no meio não o perca (ver JOB_QUEUE).
             try:
-                result = await self.redis.blpop(
-                    "kratos:pje:jobs", timeout=REDIS_BLPOP_TIMEOUT_SECS
+                job_json = await self.redis.blmove(
+                    JOB_QUEUE,
+                    PROCESSING_QUEUE,
+                    REDIS_BLPOP_TIMEOUT_SECS,
+                    "LEFT",
+                    "RIGHT",
                 )
                 consecutive_errors = 0
                 if self._health_status == "redis_unreachable":
@@ -2080,10 +2202,9 @@ class PJeSessionWorker:
                 await asyncio.sleep(delay)
                 continue
 
-            if not result:
+            if not job_json:
                 continue
 
-            _, job_json = result
             from protocol import JobMessage, job_from_json
 
             try:
@@ -2095,6 +2216,7 @@ class PJeSessionWorker:
                     "invalid_json",
                     details={"error": str(exc)},
                 )
+                await self._ack_job(job_json)
                 continue
             except ValueError as exc:
                 log.error("pje.queue.missing_fields", error=str(exc))
@@ -2103,6 +2225,7 @@ class PJeSessionWorker:
                     "missing_fields",
                     details={"error": str(exc)},
                 )
+                await self._ack_job(job_json)
                 continue
 
             log.info(
@@ -2117,8 +2240,8 @@ class PJeSessionWorker:
             # point, since "someone enumerated every exception class correctly"
             # is exactly the assumption that failed here. Escaping this loop
             # exits main() (no `except` there) and the container restarts, so an
-            # uncaught error destroys the in-flight job: blpop already removed it
-            # and there is no ack or processing list to redeliver it.
+            # uncaught error interrupts the in-flight job; it stays in
+            # PROCESSING_QUEUE and is redelivered on the next boot.
             #
             # Do NOT widen this to BaseException. asyncio.CancelledError derives
             # from BaseException and must keep propagating, or graceful shutdown
@@ -2145,7 +2268,10 @@ class PJeSessionWorker:
                     exc_info=True,
                     note="job dropped; consumer continuing",
                 )
+                await self._ack_job(job_json)
                 continue
+
+            await self._ack_job(job_json)
 
             # Encerrar se sessão expirou e MNI não disponível
             if result_data["status"] == "session_expired" and self.mni_client is None:
@@ -2379,6 +2505,7 @@ async def main() -> None:
             return
 
         try:
+            await worker._redeliver_unacked_jobs()
             await worker.consume_queue(shutdown_event)
         finally:
             await worker.close()

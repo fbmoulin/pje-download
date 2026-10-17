@@ -241,6 +241,14 @@ RESULT_POLL_BLPOP_TIMEOUT_SECS = int(os.getenv("RESULT_POLL_BLPOP_TIMEOUT_SECS",
 # short enough not to hold the next job for long. Floor of 1 (a single try).
 RESULT_PUBLISH_MAX_ATTEMPTS = max(1, int(os.getenv("RESULT_PUBLISH_MAX_ATTEMPTS", "8")))
 
+# How many times a job interrupted mid-run (deploy, OOM, crash) goes back to the queue
+# when the worker boots. The deploy itself accounts for one; a second interruption of
+# the same payload already looks like a job that kills the worker. Past this it is
+# dead-lettered (`redelivery_exhausted`) and a `failed` result is published, so it
+# runs at most JOB_MAX_REDELIVERIES + 1 times. Floor of 0 (never redeliver).
+# Spec: docs/specs/2026-10-16-job-perdido-no-deploy.md (D3).
+JOB_MAX_REDELIVERIES = max(0, int(os.getenv("JOB_MAX_REDELIVERIES", "2")))
+
 # Redis socket read deadline. MUST exceed every blocking command issued on the
 # connection, or that command can never complete normally.
 #
