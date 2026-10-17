@@ -1,7 +1,7 @@
 # Spec — Job em execução não se perde quando o worker para (deploy, OOM, crash)
 
-**Status:** rascunho, 2026-10-16. Nada implementado. Falta o premortem e a aprovação no
-**USER VALIDATION GATE** (abaixo).
+**Status:** decisões aprovadas pelo Felipe em 2026-10-17 (D1 = A + B, D3 = 2, D4 fora deste
+trabalho; D2 espera a medição da Task 1, provisório 120 s). Nada implementado. Falta o premortem.
 **Origem:** `TODO.md` §"Aberto agora (revisão de 2026-10-10)", item "Job perdido no deploy";
 `CLAUDE.md` §Test Patterns ("Still open: the job the worker is running when the container stops
 is lost").
@@ -75,6 +75,9 @@ de novo e grava de novo `document_saved` no audit. Isso é correto para a CNJ 61
 segundo acesso, e ele fica registrado.
 
 ## Decisões para o Felipe
+
+**Respondidas em 2026-10-17:** o Felipe aprovou as recomendações abaixo. D2 continua aberta até a
+Task 1 trazer p50/p95/máximo; a parte B não depende dela e pode andar antes.
 
 | # | Pergunta | Recomendação |
 |---|---|---|
