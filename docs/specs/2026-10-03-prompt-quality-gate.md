@@ -6,7 +6,7 @@
 Decisões vigentes:
 D1=**B** (só T0 determinístico; o usuário escolheu a opção "a" em 2026-10-03, revendo o
 D1=A anterior), D2=advisory, D3=sim, D4=só pje-download, D5=sim (aprovado 2026-10-03).
-**Tasks 1–8 implementadas em 2026-10-03** (PR #66). Task 9 (revisão D2) é datada: merge + 14 dias.
+**Tasks 1–8 implementadas em 2026-10-03** (PR #66). Task 9 (revisão D2) é datada: merge + 14 dias; estendida em 2026-10-17 para 2026-10-31.
 **Origem:** `docs/research/2026-10-03-review-jev-claude-code-langgraph.md`.
 **Alvo:** `tools/prompt_gate.py`, `.claude/settings.json`,
 `.claude/skills/refine-prompt/SKILL.md`, `tests/test_prompt_gate.py`,
@@ -309,6 +309,16 @@ sozinhos), `--label`/`--report`. Sem números de teste fixos. Rodar
 teste do settings atualizado); FP > 2 → ajustar a regra ou removê-la; menos dados → estender
 14 dias, **no máximo duas vezes** — depois disso, decidir com os dados que houver ou remover a
 regra. Registrar a decisão nesta spec. Commit.
+
+**Revisão de 2026-10-17 → 1ª extensão, nova data 2026-10-31.** `--report` da cópia de
+trabalho (Mac, medido em 2026-10-10): 1 prompt avaliado, 1 aviso (`alvo_ou_sintoma` +
+`possui_dod`), 0 rotulados. Nenhuma regra chega perto de 60 avisos rotulados, então nenhuma é
+promovida nem ajustada. A telemetria do container de nuvem desta sessão tem 1 aviso
+`multi_tarefa` (2026-10-03), mas ele veio dos smokes de `claude -p` que herdaram o
+`session_id` da sessão (v2-F5): é artefato de teste e fica fora da contagem. A telemetria do
+WSL (2026-10-03 → 10-10) não foi trazida para o Mac. Causa estrutural do volume baixo: o gate
+avalia só o primeiro prompt de cada sessão. Resta **uma** extensão (até 2026-11-14); depois
+disso, decidir com os dados que houver ou remover a regra.
 
 ## Correções vindas do `/code-review` (2026-10-03, nível high)
 
