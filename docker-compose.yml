@@ -115,6 +115,12 @@ services:
         BUILD_SHA: ${BUILD_SHA:-unknown}
     container_name: pje-worker
     restart: unless-stopped
+    # SIGTERM stops the worker between jobs; this is how long the job in flight
+    # gets to finish before SIGKILL (Docker's default is 10 s). Measured
+    # 2026-10-17: 5-8 s per processo. A longer job is killed and redelivered on
+    # the next boot (processing list, worker.JOB_QUEUE). Capped at 300 s because
+    # deploy.yml's restart step waits for it. tests/test_compose_worker_grace.py
+    stop_grace_period: 60s
     mem_limit: 512m
     environment:
       APP_ENV: ${APP_ENV:-development}
