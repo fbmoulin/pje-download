@@ -50,20 +50,18 @@ async def test_consume_queue_exits_after_session_expired_without_mni():
     mock_redis = AsyncMock()
     calls = 0
 
-    async def blpop_one_job(*args, **kwargs):
+    async def blmove_one_job(*args, **kwargs):
+        assert args[:2] == (w.JOB_QUEUE, w.PROCESSING_QUEUE), args
         nonlocal calls
         calls += 1
-        return (
-            "kratos:pje:jobs",
-            json.dumps(
-                {
-                    "jobId": "J-expire",
-                    "numeroProcesso": "1234567-00.2024.8.08.0001",
-                }
-            ),
+        return json.dumps(
+            {
+                "jobId": "J-expire",
+                "numeroProcesso": "PROC-EXPIRE",
+            }
         )
 
-    mock_redis.blpop = blpop_one_job
+    mock_redis.blmove = blmove_one_job
     worker.redis = mock_redis
     worker.mni_client = None
     # The branch under test is the post-job session_expired result. Prevent the
@@ -73,7 +71,7 @@ async def test_consume_queue_exits_after_session_expired_without_mni():
     worker.download_process = AsyncMock(
         return_value={
             "jobId": "J-expire",
-            "numeroProcesso": "1234567-00.2024.8.08.0001",
+            "numeroProcesso": "PROC-EXPIRE",
             "status": "session_expired",
             "arquivosDownloaded": [],
             "errorMessage": "session expired",

@@ -85,19 +85,17 @@ def _two_job_queue(worker, shutdown):
     """Feed two jobs then block, so the test can prove job 2 was still reached."""
     seen: list[str] = []
 
-    async def blpop(*args, **kwargs):
+    async def blmove(*args, **kwargs):
+        assert args[:2] == ("kratos:pje:jobs", "kratos:pje:jobs:processing"), args
         if len(seen) >= 2:
             shutdown.set()
             return None
         job_id = f"J-{len(seen) + 1}"
-        return (
-            "kratos:pje:jobs",
-            json.dumps(
-                {
-                    "jobId": job_id,
-                    "numeroProcesso": f"100000{len(seen) + 1}-00.2024.8.08.0001",
-                }
-            ),
+        return json.dumps(
+            {
+                "jobId": job_id,
+                "numeroProcesso": f"100000{len(seen) + 1}-00.2024.8.08.0001",
+            }
         )
 
     async def download(job):
@@ -109,7 +107,7 @@ def _two_job_queue(worker, shutdown):
             "arquivosDownloaded": [{"nome": "doc.pdf"}],
         }
 
-    worker.redis.blpop = blpop
+    worker.redis.blmove = blmove
     worker.download_process = download
     worker.is_session_expired = MagicMock(return_value=False)
     return seen
@@ -163,18 +161,16 @@ class TestConsumerSurvivesPublishError:
         shutdown = asyncio.Event()
         seen: list[str] = []
 
-        async def blpop(*args, **kwargs):
+        async def blmove(*args, **kwargs):
+            assert args[:2] == (w.JOB_QUEUE, w.PROCESSING_QUEUE), args
             if len(seen) >= 2:
                 shutdown.set()
                 return None
-            return (
-                "kratos:pje:jobs",
-                json.dumps(
-                    {
-                        "jobId": f"J-{len(seen) + 1}",
-                        "numeroProcesso": "1000001-00.2024.8.08.0001",
-                    }
-                ),
+            return json.dumps(
+                {
+                    "jobId": f"J-{len(seen) + 1}",
+                    "numeroProcesso": "PROC-0001",
+                }
             )
 
         async def download(job):
@@ -189,7 +185,7 @@ class TestConsumerSurvivesPublishError:
                 "arquivosDownloaded": [],
             }
 
-        worker.redis.blpop = blpop
+        worker.redis.blmove = blmove
         worker.download_process = download
         worker.is_session_expired = MagicMock(return_value=False)
         worker._publish_result = AsyncMock()
@@ -267,10 +263,11 @@ class TestShutdownStillPropagates:
         worker.mni_client = None
         shutdown = asyncio.Event()
 
-        async def blpop(*args, **kwargs):
+        async def blmove(*args, **kwargs):
+            assert args[:2] == (w.JOB_QUEUE, w.PROCESSING_QUEUE), args
             raise asyncio.CancelledError()
 
-        worker.redis.blpop = blpop
+        worker.redis.blmove = blmove
         worker.is_session_expired = MagicMock(return_value=False)
 
         with patch.object(w, "log", MagicMock()):
