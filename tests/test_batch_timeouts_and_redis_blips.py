@@ -26,6 +26,7 @@ import dashboard_api
 from tests.test_dashboard_api import FakeRedis
 
 JOBS = "kratos:pje:jobs"
+PROCESSING = "kratos:pje:jobs:processing"
 NUMEROS = [
     "5000001-00.2024.8.08.0001",
     "5000002-00.2024.8.08.0001",
@@ -118,6 +119,32 @@ class TestTimeoutsPurgeTheJobQueue:
 
         assert job.status == "failed"
         assert redis_stub.queues[JOBS] == []
+
+    @pytest.mark.asyncio
+    async def test_the_job_in_flight_is_removed_from_processing_too(self, tmp_path):
+        """Since the worker consumes with BLMOVE, the job it holds sits in the
+        processing list. Purging it there means that, if the worker dies now, the
+        next boot does not redeliver a job of a batch already reported failed."""
+        job = _job(tmp_path, "inflight-processing")
+        ds = _state(tmp_path, job)
+        redis_stub = _silent_worker_redis()
+        original_rpush = redis_stub.rpush
+
+        async def rpush_then_worker_takes_one(key, *values):
+            result = await original_rpush(key, *values)
+            taken = redis_stub.queues[JOBS].pop(0)  # the worker's BLMOVE
+            redis_stub.queues.setdefault(PROCESSING, []).append(taken)
+            return result
+
+        redis_stub.rpush = rpush_then_worker_takes_one
+        ds.get_redis = AsyncMock(return_value=redis_stub)
+
+        with patch("dashboard_api.RESULT_WAIT_TIMEOUT_SECS", -1):
+            await ds._run_batch(job)
+
+        assert job.status == "failed"
+        assert redis_stub.queues[JOBS] == []
+        assert redis_stub.queues[PROCESSING] == []
 
     @pytest.mark.asyncio
     async def test_a_redis_error_while_purging_does_not_hide_the_timeout(
