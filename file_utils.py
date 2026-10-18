@@ -33,7 +33,7 @@ class DiskWriteError(OSError):
 
 
 class DownloadedFiles(list):
-    """The files saved by one MNI download, plus the documents that were NOT.
+    """The files saved by one document download, plus documents that were NOT.
 
     A plain ``list`` subclass so every existing caller (``len``, iteration,
     truthiness, ``merge_file_lists``) is unchanged. ``failed_ids`` lists documents
@@ -48,12 +48,14 @@ class DownloadedFiles(list):
         self.failed_ids: list[str] = list(failed_ids)
 
 
-def missing_docs_message(failed_ids: list[str], shown: int = 5) -> str:
-    """Short operator-facing text for documents MNI could not deliver."""
+def missing_docs_message(
+    failed_ids: list[str], shown: int = 5, *, source: str = "MNI"
+) -> str:
+    """Short operator-facing text for documents the source could not deliver."""
     head = ", ".join(failed_ids[:shown])
     more = "…" if len(failed_ids) > shown else ""
     return (
-        f"{len(failed_ids)} documento(s) não puderam ser baixados via MNI "
+        f"{len(failed_ids)} documento(s) não puderam ser baixados via {source} "
         f"(ex.: {head}{more})"
     )
 
@@ -92,22 +94,47 @@ def merge_file_lists(*groups: list[dict]) -> list[dict]:
     Identical behaviour to the previous ``_merge_downloaded_files`` copies in
     worker.py and batch_downloader.py (verbatim dedupe): if an item has a
     ``checksum``, that wins; otherwise the key is ``nome|tamanhoBytes|fonte``.
-    The first occurrence of a given key is kept, subsequent duplicates are
-    dropped.
+    The first blob for a key is kept; logical document references from later
+    occurrences are merged without counting the same bytes twice. Inputs are
+    not mutated.
 
     Called from download-strategy orchestration to merge results from GDrive,
     MNI SOAP, PJe official API, and Playwright-browser fallbacks.
     """
     merged: list[dict] = []
-    seen: set[str] = set()
+    by_key: dict[str, dict] = {}
     for group in groups:
         for item in group:
             key = (
                 item.get("checksum")
                 or f"{item.get('nome')}|{item.get('tamanhoBytes')}|{item.get('fonte')}"
             )
-            if key in seen:
+            if key in by_key:
+                merge_document_references(by_key[key], item.get("documentos", []))
                 continue
-            seen.add(key)
-            merged.append(item)
+            saved = dict(item)
+            if "documentos" in saved:
+                saved["documentos"] = []
+                merge_document_references(saved, item["documentos"])
+            by_key[key] = saved
+            merged.append(saved)
     return merged
+
+
+def merge_document_references(target: dict, incoming: Iterable[dict]) -> None:
+    """Attach distinct logical IDs to an owned blob metadata accumulator.
+
+    Copies references at the boundary so merged results never alias input
+    dictionaries. Existing first-source metadata is retained for the same ID.
+    Callers own ``target``; use :func:`merge_file_lists` for non-mutating merge.
+    """
+    references = target.get("documentos", [])
+    known = {str(reference["id"]) for reference in references}
+    for reference in incoming:
+        identifier = reference.get("id")
+        if identifier is None or str(identifier) in known:
+            continue
+        if "documentos" not in target:
+            target["documentos"] = references
+        references.append(dict(reference))
+        known.add(str(identifier))

@@ -36,8 +36,10 @@ from playwright.async_api import BrowserContext, Page, async_playwright
 import audit
 import metrics
 from async_retry import AsyncRetry
+from document_validation import atomic_write_document, validate_document_content
 from file_utils import (
     DiskWriteError,
+    DownloadedFiles,
     merge_file_lists,
     missing_docs_message,
     total_bytes,
@@ -168,6 +170,7 @@ class DownloadContext:
     # Documents MNI attempted but lost (see file_utils.DownloadedFiles); duplicates
     # skipped by checksum are not in here.
     mni_failed_ids: list[str] = field(default_factory=list)
+    api_failed_ids: list[str] = field(default_factory=list)
 
 
 # Padrões conhecidos de CAPTCHA no PJe
@@ -736,6 +739,13 @@ class PJeSessionWorker:
             incluir_principais=not (ctx.downloaded_files and ctx.anexos_pendentes > 0),
             progress_cb=self._make_progress_cb(ctx, "API REST"),
         )
+        # Read losses before merging: the merge returns a plain blob list.
+        # Keep this even for an empty/falsey result where every REST doc failed.
+        ctx.api_failed_ids = list(getattr(api_result, "failed_ids", None) or [])
+        if api_result is not None:
+            ctx.expected_total_docs = max(
+                ctx.expected_total_docs, len(api_result) + len(ctx.api_failed_ids)
+            )
         if api_result:
             ctx.downloaded_files = _merge_downloaded_files(
                 ctx.downloaded_files, api_result
@@ -990,6 +1000,10 @@ class PJeSessionWorker:
                     processo=ctx.numero_processo,
                     failed=len(ctx.mni_failed_ids),
                 )
+            if ctx.api_failed_ids:
+                final_status = "partial_success"
+                missing = missing_docs_message(ctx.api_failed_ids, source="API REST")
+                warning = f"{missing}; {warning}" if warning else missing
             await self._publish_progress(
                 job,
                 "partial" if final_status == "partial_success" else "done",
@@ -1261,6 +1275,7 @@ class PJeSessionWorker:
                 else:
                     docs_list = docs.get("content") or docs.get("documentos") or []
                 files: list[dict] = []
+                failed_ids: list[str] = []
                 local_bytes = 0
                 tipos_normalizados = (
                     {t.lower() for t in tipos_documento} if tipos_documento else None
@@ -1291,8 +1306,13 @@ class PJeSessionWorker:
                                 total=total_docs,
                                 local_bytes=local_bytes,
                             )
-                return files if files else None
+                    else:
+                        failed_ids.append(str(doc.get("id") or "unknown"))
+                return DownloadedFiles(files, failed_ids) if filtered_docs else None
 
+        except DiskWriteError:
+            # Every fallback writes to the same disk; stop the job immediately.
+            raise
         except Exception as exc:
             # Network-layer errors only; JSON parse failures handled above
             # without leaking body text into structured logs.
@@ -1322,8 +1342,30 @@ class PJeSessionWorker:
                 filename = _unique_filename(output_dir, raw_name)
                 dest = output_dir / filename
                 content = await response.body()
-                dest.write_bytes(content)
+                headers = response.headers
+                response_mime = (
+                    headers.get("content-type", "") if isinstance(headers, dict) else ""
+                )
+                mime_type = doc.get("mimeType") or doc.get("mimetype") or response_mime
+                if not mime_type:
+                    mime_type = (
+                        "application/pdf"
+                        if filename.lower().endswith(".pdf")
+                        else "application/octet-stream"
+                    )
+                validate_document_content(content, mime_type, filename)
+                atomic_write_document(dest, content)
                 checksum = hashlib.sha256(content).hexdigest()
+                parent_id = doc.get(
+                    "id_pai", doc.get("documentoPaiId", doc.get("parentId"))
+                )
+                reference = {
+                    "id": str(doc_id) if doc_id is not None else None,
+                    "nome": raw_name,
+                    "tipo": doc.get("tipo", "pdf"),
+                    "mimeType": mime_type,
+                    "parentId": str(parent_id) if parent_id is not None else None,
+                }
                 self._audit_document_saved(
                     numero_processo,
                     "pje_api",
@@ -1341,6 +1383,10 @@ class PJeSessionWorker:
                     "localPath": str(dest),
                     "checksum": checksum,
                     "fonte": "api_rest",
+                    "documentoId": reference["id"],
+                    "documentoPaiId": reference["parentId"],
+                    "mimeType": mime_type,
+                    "documentos": [reference],
                 }
             # Non-200: no exception raised, so this branch (not an `except`)
             # is the only place that ever sees it — must audit here too, or
@@ -1369,6 +1415,8 @@ class PJeSessionWorker:
                 erro=str(exc),
                 documento_id=str(doc_id) if doc_id is not None else None,
             )
+            if isinstance(exc, DiskWriteError):
+                raise
         return None
 
     # ──────────────────────

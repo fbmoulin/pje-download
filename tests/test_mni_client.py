@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+
+from tests.pdf_fixtures import minimal_pdf
 import hashlib
 import json
 from pathlib import Path
@@ -240,7 +242,7 @@ class TestSaveDocument:
         from mni_client import MNIDocumento
 
         client = _make_client()
-        content = b"PDF file content"
+        content = minimal_pdf(b"PDF file content")
         b64 = base64.b64encode(content).decode("ascii")
         doc = MNIDocumento(
             id="123",
@@ -262,7 +264,7 @@ class TestSaveDocument:
         from mni_client import MNIDocumento
 
         client = _make_client()
-        content = b"same content"
+        content = minimal_pdf(b"same content")
         b64 = base64.b64encode(content).decode("ascii")
         checksum = hashlib.sha256(content).hexdigest()
         seen: set[str] = {checksum}
@@ -364,7 +366,9 @@ class TestParseProcesso:
 class TestSaveDocumentAudit:
     """Verify audit.log_access is called with correct fields during _save_document."""
 
-    def _make_doc(self, content: bytes = b"PDF content", doc_id: str = "doc42"):
+    def _make_doc(
+        self, content: bytes = minimal_pdf(b"PDF content"), doc_id: str = "doc42"
+    ):
         from mni_client import MNIDocumento
 
         return MNIDocumento(
@@ -394,13 +398,13 @@ class TestSaveDocumentAudit:
         assert entry.documento_tipo == "peticao"
         assert entry.tribunal == "TJES"
         assert entry.fonte == "mni_soap"
-        assert entry.tamanho_bytes == len(b"PDF content")
+        assert entry.tamanho_bytes == len(minimal_pdf(b"PDF content"))
         assert entry.checksum_sha256 is not None
 
     def test_audit_called_on_duplicate_skip(self, tmp_path):
         """audit.log_access called with status='duplicate_skipped' for duplicates."""
         client = _make_client()
-        content = b"duplicate content"
+        content = minimal_pdf(b"duplicate content")
         doc = self._make_doc(content=content)
         checksum = hashlib.sha256(content).hexdigest()
         seen = {checksum}
@@ -856,7 +860,7 @@ class TestDownloadDocumentos:
         """Doc with content is saved directly without phase-2 fetch."""
         from mni_client import MNIProcesso, MNIDocumento
 
-        content = b"PDF binary data"
+        content = minimal_pdf(b"PDF binary data")
         doc = MNIDocumento(
             id="doc1",
             nome="Peticao",
@@ -891,7 +895,7 @@ class TestDownloadDocumentos:
             doc_ids = kwargs.get("documento_ids", [])
             fetched = []
             for did in doc_ids:
-                content = f"content-{did}".encode()
+                content = minimal_pdf(f"content-{did}".encode())
                 fetched.append(
                     MNIDocumento(
                         id=did,
@@ -933,7 +937,7 @@ class TestDownloadDocumentos:
         async def fake_consultar(numero, **kwargs):
             fetch_calls.append(kwargs.get("documento_ids", []))
             did = kwargs["documento_ids"][0]
-            content = f"content-{did}".encode()
+            content = minimal_pdf(f"content-{did}".encode())
             fetched = MNIDocumento(
                 id=did,
                 nome=f"Doc {did}",
@@ -981,7 +985,7 @@ class TestDownloadDocumentos:
             if len(calls) == 1:
                 raise requests.exceptions.ConnectionError("reset by peer")
             did = kwargs["documento_ids"][0]
-            content = b"ok"
+            content = minimal_pdf(b"ok")
             fetched = MNIDocumento(
                 id=did,
                 nome=did,
@@ -1009,8 +1013,8 @@ class TestDownloadDocumentos:
         """Progress callback receives cumulative doc count and bytes."""
         from mni_client import MNIProcesso, MNIDocumento
 
-        content_a = b"1234"
-        content_b = b"abcdef"
+        content_a = minimal_pdf(b"1234")
+        content_b = minimal_pdf(b"abcdef")
         docs = [
             MNIDocumento(
                 id="doc1",
@@ -1054,7 +1058,7 @@ class TestDownloadDocumentos:
         """Duplicate content across docs is skipped by checksum."""
         from mni_client import MNIProcesso, MNIDocumento
 
-        content = b"same content"
+        content = minimal_pdf(b"same content")
         b64 = base64.b64encode(content).decode("ascii")
         docs = [
             MNIDocumento(
@@ -1518,6 +1522,7 @@ class TestDownloadDocumentosReportsFailures:
 
         kw = {}
         if content is not None:
+            content = minimal_pdf(content)
             kw = {
                 "conteudo_base64": base64.b64encode(content).decode("ascii"),
                 "tamanho_bytes": len(content),
