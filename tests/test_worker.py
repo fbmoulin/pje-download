@@ -2142,3 +2142,161 @@ class TestMissingMniDocsOnTheSharedPath:
         assert result["status"] == "partial_success"
         assert "1 documento" in result["errorMessage"]
         assert len(result["arquivosDownloaded"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selection", [None, [], ["bad"], "12"])
+async def test_restricted_invalid_selection_never_enters_integral_paths(selection):
+    w = _load_worker_module()
+    worker = w.PJeSessionWorker()
+    worker._phase_gdrive = AsyncMock()
+    worker._phase_mni = AsyncMock()
+    worker._phase_api_fallback = AsyncMock()
+    worker._phase_browser_fallback = AsyncMock()
+    worker.mni_client = AsyncMock()
+    result = await worker.download_process(
+        {
+            "jobId": "restricted-invalid",
+            "numeroProcesso": "test-process",
+            "documentoIds": selection,
+        }
+    )
+    assert result["status"] == "error"
+    worker.mni_client.consultar_processo.assert_not_awaited()
+    for phase in (
+        worker._phase_gdrive,
+        worker._phase_mni,
+        worker._phase_api_fallback,
+        worker._phase_browser_fallback,
+    ):
+        phase.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_restricted_counts_document_references_and_pending_annex(tmp_path):
+    from file_utils import DownloadedFiles
+    from types import SimpleNamespace
+
+    w = _load_worker_module()
+    worker = w.PJeSessionWorker()
+    worker._resolve_output_dir = MagicMock(return_value=tmp_path)
+    worker._publish_progress = AsyncMock()
+    worker.mni_client = AsyncMock()
+    worker.mni_client.consultar_processo.return_value = SimpleNamespace(
+        success=True, processo=SimpleNamespace(numero="test-process")
+    )
+    worker.mni_client.download_documentos_restritos.return_value = DownloadedFiles(
+        [{"documentos": [{"id": "12"}, {"id": "14"}], "tamanhoBytes": 10}], ["13"]
+    )
+    result = await worker.download_process(
+        {
+            "jobId": "restricted-partial",
+            "numeroProcesso": "test-process",
+            "documentoIds": ["12", "13", "14"],
+            "includeAnexos": True,
+        }
+    )
+    assert result["status"] == "partial_success"
+    assert result["documentoIdsConcluidos"] == ["12", "14"]
+    assert result["documentoIdsPendentes"] == ["13"]
+    assert worker._publish_progress.await_args.args[1] == "partial"
+    assert worker._publish_progress.await_args.kwargs["docs_baixados"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_files, expected", [(True, "success"), (False, "error")])
+async def test_restricted_done_only_with_every_selected_id_accounted(
+    tmp_path, has_files, expected
+):
+    from file_utils import DownloadedFiles
+    from types import SimpleNamespace
+
+    w = _load_worker_module()
+    worker = w.PJeSessionWorker()
+    worker._resolve_output_dir = MagicMock(return_value=tmp_path)
+    worker._publish_progress = AsyncMock()
+    worker.mni_client = AsyncMock()
+    worker.mni_client.consultar_processo.return_value = SimpleNamespace(
+        success=True, processo=SimpleNamespace(numero="test-process")
+    )
+    worker.mni_client.download_documentos_restritos.return_value = DownloadedFiles(
+        [{"documentos": [{"id": "12"}, {"id": "14"}]}] if has_files else [],
+        [] if has_files else ["12", "14"],
+    )
+    result = await worker.download_process(
+        {
+            "jobId": "restricted-complete",
+            "numeroProcesso": "test-process",
+            "documentoIds": ["12", "14"],
+        }
+    )
+    assert result["status"] == expected
+    assert (worker._publish_progress.await_args.args[1] == "done") is has_files
+    assert result["documentoIdsPendentes"] == ([] if has_files else ["12", "14"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra",
+    [{"gdriveUrl": "https://example.invalid/file"}, {"tiposDocumento": ["pdf"]}],
+)
+async def test_restricted_conflicting_sources_rejected_before_mni(extra):
+    w = _load_worker_module()
+    worker = w.PJeSessionWorker()
+    worker.mni_client = AsyncMock()
+    worker._phase_gdrive = AsyncMock()
+    result = await worker.download_process(
+        {
+            "jobId": "restricted-conflict",
+            "numeroProcesso": "test-process",
+            "documentoIds": ["12"],
+            **extra,
+        }
+    )
+    assert result["status"] == "error"
+    worker.mni_client.consultar_processo.assert_not_awaited()
+    worker._phase_gdrive.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["unavailable", "metadata", "foreign-reference", "disk"]
+)
+async def test_restricted_failures_never_fall_back(tmp_path, failure):
+    from file_utils import DiskWriteError, DownloadedFiles
+    from types import SimpleNamespace
+
+    w = _load_worker_module()
+    worker = w.PJeSessionWorker()
+    worker._resolve_output_dir = MagicMock(return_value=tmp_path)
+    worker._publish_progress = AsyncMock()
+    worker._phase_mni = AsyncMock()
+    worker._phase_api_fallback = AsyncMock()
+    worker._phase_browser_fallback = AsyncMock()
+    client = AsyncMock()
+    client.consultar_processo.return_value = SimpleNamespace(
+        success=failure != "metadata", processo=SimpleNamespace(numero="test-process")
+    )
+    client.download_documentos_restritos.return_value = DownloadedFiles(
+        [{"documentos": [{"id": "99"}]}]
+    )
+    if failure == "disk":
+        client.download_documentos_restritos.side_effect = DiskWriteError("disk full")
+    worker.mni_client = None if failure == "unavailable" else client
+    result = await worker.download_process(
+        {
+            "jobId": "restricted-failure",
+            "numeroProcesso": "test-process",
+            "documentoIds": ["12"],
+        }
+    )
+    assert result["status"] == "error"
+    assert result["documentoIdsPendentes"] == ["12"]
+    if failure in {"unavailable", "metadata"}:
+        client.download_documentos_restritos.assert_not_awaited()
+    for phase in (
+        worker._phase_mni,
+        worker._phase_api_fallback,
+        worker._phase_browser_fallback,
+    ):
+        phase.assert_not_awaited()

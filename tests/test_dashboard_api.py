@@ -1934,3 +1934,158 @@ class TestSprintFiveBFixes:
         )
         body = json.loads(resp.body.decode())
         assert "grande" in body["error"].lower() or "10" in body["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [None, [], [""], [123], [True], [" 123"], "123"])
+async def test_restricted_api_rejects_invalid_ids_without_submission(ids):
+    state = MagicMock()
+    ctx = _make_ctx(state=state)
+    response = await dashboard_api.handle_download(
+        DummyRequest(
+            method="POST",
+            json_data={
+                "processos": ["-".join(["5" * 7, "01.2024.8.08.0001"])],
+                "documento_ids": ids,
+            },
+            ctx=ctx,
+        )
+    )
+    assert response.status == 400
+    state.submit_batch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_restricted_api_passes_allowlist_and_disables_attachments():
+    state = MagicMock()
+    state.current_batch_id = None
+    state.submit_batch = AsyncMock(
+        return_value=BatchJob(id="restricted", processos=["sample"])
+    )
+    ctx = _make_ctx(state=state)
+    process = "-".join(["5" * 7, "01.2024.8.08.0001"])
+    response = await dashboard_api.handle_download(
+        DummyRequest(
+            method="POST",
+            json_data={
+                "processos": [process],
+                "documento_ids": ["12", "7", "12"],
+                "include_anexos": True,
+            },
+            ctx=ctx,
+        )
+    )
+    assert response.status == 201
+    state.submit_batch.assert_awaited_once_with(
+        [process], False, {}, documento_ids=["12", "7"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_restricted_api_rejects_multiple_processes():
+    state = MagicMock()
+    ctx = _make_ctx(state=state)
+    process = "-".join(["5" * 7, "01.2024.8.08.0001"])
+    response = await dashboard_api.handle_download(
+        DummyRequest(
+            method="POST",
+            json_data={"processos": [process, process], "documento_ids": ["12"]},
+            ctx=ctx,
+        )
+    )
+    assert response.status == 400
+    state.submit_batch.assert_not_called()
+
+
+def test_restricted_filter_survives_persistence_restore_and_queue(tmp_path):
+    state = DashboardState(tmp_path)
+    job = BatchJob(
+        id="restricted",
+        processos=["sample"],
+        output_dir=str(tmp_path / "restricted"),
+        documento_ids=["12", "7"],
+    )
+    job.progress = state._build_initial_progress(job)
+    state._persist_active_batch(job)
+    state._persist_progress(job)
+    restored = DashboardState(tmp_path)
+    restored._load_active_batch()
+    recovered = restored.batches["restricted"]
+    assert recovered.documento_ids == ["12", "7"]
+    assert recovered.progress["documento_ids"] == ["12", "7"]
+    payload = restored._batch_job_payload(recovered, "sample")
+    assert payload["documentoIds"] == ["12", "7"]
+    assert payload["includeAnexos"] is False
+    restored._persist_report(recovered)
+    report = json.loads((tmp_path / "restricted" / "_report.json").read_text())
+    assert report["documento_ids"] == ["12", "7"]
+
+
+def test_restricted_invalid_restored_filter_never_becomes_full_collection(tmp_path):
+    state = DashboardState(tmp_path)
+    job = BatchJob(id="invalid", processos=["sample"], documento_ids=[])
+    with pytest.raises(ValueError):
+        state._batch_job_payload(job, "sample")
+
+
+@pytest.mark.asyncio
+async def test_restricted_api_rejects_google_drive():
+    state = MagicMock()
+    ctx = _make_ctx(state=state)
+    process = "-".join(["5" * 7, "01.2024.8.08.0001"])
+    response = await dashboard_api.handle_download(
+        DummyRequest(
+            method="POST",
+            json_data={
+                "processos": [process],
+                "documento_ids": ["12"],
+                "gdrive_map": {
+                    process: "https://drive.google.com/drive/folders/abc123"
+                },
+            },
+            ctx=ctx,
+        )
+    )
+    assert response.status == 400
+    state.submit_batch.assert_not_called()
+
+
+def test_legacy_queue_omits_document_allowlist(tmp_path):
+    state = DashboardState(tmp_path)
+    job = BatchJob(id="legacy", processos=["sample"])
+    assert "documentoIds" not in state._batch_job_payload(job, "sample")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("also_snake_case", [False, True])
+async def test_http_camel_case_document_filter_is_rejected(also_snake_case):
+    state = MagicMock()
+    body = {"processos": ["sample"], "documentoIds": ["12"]}
+    if also_snake_case:
+        body["documento_ids"] = ["7"]
+    response = await dashboard_api.handle_download(
+        DummyRequest(method="POST", json_data=body, ctx=_make_ctx(state=state))
+    )
+    assert response.status == 400
+    assert "documento_ids" in json.loads(response.body)["error"]
+    state.submit_batch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_batch_invalid_restored_filter_fails_without_publishing(tmp_path):
+    state = DashboardState(tmp_path)
+    job = BatchJob(
+        id="invalid-restored",
+        processos=["sample"],
+        status="running",
+        output_dir=str(tmp_path / "invalid-restored"),
+        documento_ids=[],
+    )
+    state.get_redis = AsyncMock()
+    await state._run_batch(job, enqueue_jobs=False)
+    assert job.status == "failed"
+    assert job.error
+    state.get_redis.assert_not_awaited()
+    report = json.loads((tmp_path / "invalid-restored" / "_report.json").read_text())
+    assert report["status"] == "failed"
+    assert report["documento_ids"] == []

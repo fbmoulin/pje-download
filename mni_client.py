@@ -666,6 +666,50 @@ class MNIClient:
     # DOWNLOAD DE DOCUMENTOS
     # ──────────────────────
 
+    async def download_documentos_restritos(
+        self, processo: MNIProcesso, output_dir: Path, documento_ids: list[str]
+    ) -> DownloadedFiles:
+        """Download only validated principal IDs; selected annexes remain pending.
+
+        Validate membership for the entire selection before any content request.
+        Never follow annexes or fall back to an integral collection.
+        """
+        from protocol import normalize_document_ids
+
+        selected = normalize_document_ids(documento_ids)
+        if selected is None:
+            raise ValueError("documentoIds é obrigatório na coleta restrita")
+        principals = {str(doc.id): doc for doc in processo.documentos}
+        known = set(principals)
+        pending = set()
+        stack = [child for doc in processo.documentos for child in doc.vinculados]
+        while stack:
+            child = stack.pop()
+            child_id = str(child.id)
+            if child_id in known:
+                continue
+            known.add(child_id)
+            pending.add(child_id)
+            stack.extend(child.vinculados)
+        unknown = set(selected) - known
+        if unknown:
+            raise ValueError("documentoIds sem pertinência confirmada nos metadados")
+        restricted = MNIProcesso(
+            numero=processo.numero,
+            documentos=[principals[i] for i in selected if i in principals],
+        )
+        files = await self.download_documentos(
+            restricted, output_dir, incluir_anexos=False
+        )
+        return DownloadedFiles(
+            files,
+            list(
+                dict.fromkeys(
+                    [*files.failed_ids, *[i for i in selected if i in pending]]
+                )
+            ),
+        )
+
     async def download_documentos(
         self,
         processo: MNIProcesso,

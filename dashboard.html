@@ -94,6 +94,14 @@
       ></textarea>
 
       <div class="checkbox-row">
+        <input type="checkbox" id="restricted-collection">
+        <label for="restricted-collection">Coleta restrita por IDs (um único processo)</label>
+      </div>
+      <label for="documento-ids">IDs dos documentos, separados por vírgula ou linha</label>
+      <textarea id="documento-ids" class="textarea" aria-label="IDs dos documentos"></textarea>
+      <p class="text-xs text-muted">No modo restrito, informe de 1 a 100 IDs numéricos. Somente os IDs indicados serão coletados, sem anexos automáticos nem Google Drive. IDs repetidos são deduplicados.</p>
+
+      <div class="checkbox-row">
         <input type="checkbox" id="skip-anexos">
         <label for="skip-anexos">Pular anexos (procuracao, docs pessoais)</label>
       </div>

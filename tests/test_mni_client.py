@@ -1658,3 +1658,54 @@ class TestDownloadDocumentosReportsFailures:
 
         assert len(saved) == 1
         assert saved.failed_ids == []
+
+
+@pytest.mark.asyncio
+async def test_restricted_unknown_id_prevents_all_content_requests(tmp_path):
+    from mni_client import MNIDocumento, MNIProcesso
+
+    client = _make_client()
+    client.download_documentos = AsyncMock()
+    process = MNIProcesso(
+        numero="test-process", documentos=[MNIDocumento("12", "a", "pdf")]
+    )
+    with pytest.raises(ValueError, match="pertinência"):
+        await client.download_documentos_restritos(process, tmp_path, ["12", "99"])
+    client.download_documentos.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_restricted_selection_preserves_duplicates_and_leaves_annex_pending(
+    tmp_path,
+):
+    from mni_client import MNIDocumento, MNIProcesso, MNIResult
+
+    client = _make_client()
+    encoded = base64.b64encode(minimal_pdf()).decode()
+    annex = MNIDocumento("13", "annex", "pdf", id_pai="12")
+    selected = MNIDocumento("12", "first", "pdf", vinculados=[annex])
+    other = MNIDocumento("14", "second", "pdf")
+    extra = MNIDocumento("15", "unselected", "pdf", conteudo_base64=encoded)
+    client.consultar_processo = AsyncMock(
+        return_value=MNIResult(
+            success=True,
+            processo=MNIProcesso(
+                numero="test-process",
+                documentos=[
+                    MNIDocumento("12", "first", "pdf", conteudo_base64=encoded),
+                    MNIDocumento("14", "second", "pdf", conteudo_base64=encoded),
+                    extra,
+                ],
+            ),
+        )
+    )
+    files = await client.download_documentos_restritos(
+        MNIProcesso(numero="test-process", documentos=[selected, other, extra]),
+        tmp_path,
+        ["12", "13", "14"],
+    )
+    assert len(files) == 1
+    assert files.failed_ids == ["13"]
+    assert {r["id"] for r in files[0]["documentos"]} == {"12", "14"}
+    assert client.consultar_processo.await_args.kwargs["documento_ids"] == ["12", "14"]
+    assert len(list(tmp_path.iterdir())) == 1
