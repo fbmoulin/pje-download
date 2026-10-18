@@ -391,6 +391,7 @@ Campos importantes:
 - `session_valid`: existe sessao PJe autenticada pronta para REST/browser
 - `fallback_ready`: o fallback Playwright/PJe esta realmente disponivel
 - com MNI disponivel, `session_valid=false` e `fallback_ready=false` podem coexistir com `healthy=true`
+- `checks.mni=healthy` confirma carregamento do WSDL, não autenticação nem acesso aos autos. Antes de renovar a sessão, siga o [diagnóstico MNI na VPS](docs/testing/tjes-diagnostico-mni-vps.md).
 
 ### GET /healthz (Dashboard)
 
