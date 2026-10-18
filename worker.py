@@ -850,6 +850,76 @@ class PJeSessionWorker:
         # falls through to shared success path in orchestrator
         return None  # sentinel: caller checks for None
 
+    async def _download_restricted(self, job: dict) -> dict:
+        """Fail-closed selection path: MNI metadata then selected content only."""
+        from protocol import normalize_document_ids
+
+        files = []
+        selected = []
+        self._health_status = "processing"
+        try:
+            selected = normalize_document_ids(job.get("documentoIds"))
+            if selected is None:
+                raise ValueError("documentoIds não pode ser nulo")
+            if job.get("gdriveUrl") or job.get("tiposDocumento"):
+                raise ValueError("Coleta restrita não aceita GDrive ou filtro por tipo")
+            if self.mni_client is None:
+                raise ValueError(
+                    "Coleta restrita exige MNI disponível; sem fallback integral"
+                )
+            metadata = await self.mni_client.consultar_processo(
+                job["numeroProcesso"], incluir_documentos=True
+            )
+            if not metadata.success or metadata.processo is None:
+                raise ValueError("Não foi possível confirmar metadados MNI")
+            if metadata.processo.numero != job["numeroProcesso"]:
+                raise ValueError(
+                    "Metadados MNI não correspondem ao processo solicitado"
+                )
+            files = await self.mni_client.download_documentos_restritos(
+                metadata.processo, self._resolve_output_dir(job), selected
+            )
+            completed = {
+                str(ref["id"])
+                for file in files
+                for ref in file.get("documentos", [])
+                if ref.get("id") is not None
+            }
+            if completed - set(selected):
+                raise ValueError("MNI retornou referências fora da seleção")
+            pending = [
+                i for i in selected if i not in completed or i in files.failed_ids
+            ]
+            status = ("partial_success" if files else "error") if pending else "success"
+            error = missing_docs_message(pending) if pending else None
+            await self._publish_progress(
+                job,
+                "partial" if pending else "done",
+                error or "Coleta restrita concluída",
+                total_docs=len(selected),
+                docs_baixados=len(selected) - len(pending),
+                tamanho_bytes=total_bytes(files),
+            )
+            result = self._result(
+                job["jobId"], job["numeroProcesso"], status, files, error
+            )
+            result.update(
+                documentoIds=selected,
+                documentoIdsConcluidos=[i for i in selected if i not in pending],
+                documentoIdsPendentes=pending,
+            )
+            return result
+        except Exception as exc:
+            result = self._result(
+                job["jobId"], job["numeroProcesso"], "error", files, str(exc)
+            )
+            result.update(
+                documentoIds=selected or [], documentoIdsPendentes=selected or []
+            )
+            return result
+        finally:
+            self._health_status = "ready"
+
     async def download_process(self, job: dict) -> dict:
         """
         Baixa documentos de um processo judicial no PJe.
@@ -860,6 +930,9 @@ class PJeSessionWorker:
         2. API REST do PJe (via browser autenticado)
         3. Browser automation com Playwright (fallback)
         """
+        if "documentoIds" in job:
+            return await self._download_restricted(job)
+
         ctx = DownloadContext(
             job=job,
             job_id=job["jobId"],

@@ -301,7 +301,19 @@ async function submitDownload() {
     return;
   }
 
-  const skipAnexos = $('#skip-anexos').checked;
+  const restricted = $('#restricted-collection').checked;
+  const idsRaw = $('#documento-ids').value;
+  let documentoIds;
+  if (restricted || idsRaw.trim()) {
+    documentoIds = idsRaw.split(/[,\n]/).map(id => id.trim());
+    if (processos.length !== 1 || !idsRaw.trim() || documentoIds.length > 100 ||
+        documentoIds.some(id => !/^[0-9]+$/.test(id))) {
+      toast('Coleta restrita exige um processo e 1 a 100 IDs numéricos válidos', 'warning');
+      return;
+    }
+    documentoIds = [...new Set(documentoIds)];
+  }
+  const skipAnexos = documentoIds !== undefined || $('#skip-anexos').checked;
   const btn = $('#btn-submit');
   btn.disabled = true;
 
@@ -309,10 +321,12 @@ async function submitDownload() {
     const data = await apiFetch('/api/download', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ processos, include_anexos: !skipAnexos }),
+      body: JSON.stringify({ processos, include_anexos: !skipAnexos, ...(documentoIds !== undefined ? { documento_ids: documentoIds } : {}) }),
     });
     toast(`Batch ${data.batch_id} criado com ${data.processos} processos`, 'success');
     textarea.value = '';
+    $('#documento-ids').value = '';
+    $('#restricted-collection').checked = false;
     startPolling();
   } catch (err) {
     toast(err.message, 'error');
@@ -322,6 +336,8 @@ async function submitDownload() {
 }
 
 function clearForm() {
+  $('#documento-ids').value = '';
+  $('#restricted-collection').checked = false;
   $('#processos-input').value = '';
   $('#file-label').textContent = '';
 }

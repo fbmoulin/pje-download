@@ -38,6 +38,7 @@ class JobMessage(TypedDict):
     outputSubdir: NotRequired[str | None]
     gdriveUrl: NotRequired[str | None]
     includeAnexos: NotRequired[bool]
+    documentoIds: NotRequired[list[str] | None]
     delayEntreProcessos: NotRequired[float]
 
 
@@ -91,6 +92,29 @@ class DeadLetterEntry(TypedDict):
 # ─────────────────────────────────────────────
 
 
+def normalize_document_ids(value: object) -> list[str] | None:
+    """Validate an optional allowlist; deduplicate in original order.
+
+    None is the legacy unrestricted mode. Any supplied list must contain 1–100
+    ASCII numeric strings without whitespace; invalid values fail closed.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list) or not 1 <= len(value) <= 100:
+        raise ValueError("documento_ids deve ser uma lista com 1 a 100 IDs")
+    if any(
+        not isinstance(item, str)
+        or not item
+        or not item.isascii()
+        or not item.isdecimal()
+        for item in value
+    ):
+        raise ValueError(
+            "documento_ids aceita somente strings numéricas ASCII sem espaços"
+        )
+    return list(dict.fromkeys(value))
+
+
 def job_from_json(raw: str | bytes) -> JobMessage:
     """Deserialise a ``JobMessage`` from JSON bytes/string.
 
@@ -104,6 +128,10 @@ def job_from_json(raw: str | bytes) -> JobMessage:
     missing = [key for key in ("jobId", "numeroProcesso") if key not in data]
     if missing:
         raise ValueError(f"JobMessage missing required fields: {missing}")
+    if "documentoIds" in data:
+        if data["documentoIds"] is None:
+            raise ValueError("documentoIds não pode ser null")
+        data["documentoIds"] = normalize_document_ids(data["documentoIds"])
     return data  # type: ignore[return-value]
 
 

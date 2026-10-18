@@ -279,6 +279,28 @@ python worker.py
 
 Respostas: `201` (criado), `400` (formato CNJ invalido), `409` (batch em execucao), `422` (>500 processos), `429` (rate limit).
 
+#### Coleta restrita por IDs
+
+Na interface, marque **Coleta restrita** e informe os IDs separados por vírgula
+ou quebra de linha. Pela API, acrescente `"documento_ids": ["12", "14"]` ao
+corpo de uma requisição com **um único processo**. IDs acima são fictícios.
+O campo aceita de 1 a 100 strings numéricas ASCII e remove duplicatas. Lista
+vazia, `null`, tipos inválidos e o nome de fila `documentoIds` são rejeitados.
+Sem o campo, permanece o modo integral legado.
+
+O filtro persiste em progresso, relatório e retomada. A fila usa `documentoIds`;
+anexos automáticos e GDrive são desabilitados. O worker exige MNI, valida os IDs
+contra a listagem do processo e solicita conteúdo apenas dos principais escolhidos.
+**Anexos vinculados selecionados ficam pendentes nesta versão**; não há fallback
+REST, browser ou download integral no ramo restrito. Sem arquivos, falha; com
+arquivos e IDs pendentes, resultado parcial. Só conclui com todas as referências
+selecionadas contabilizadas, inclusive quando compartilham um blob deduplicado.
+
+A listagem MNI é uma consulta de metadados do processo inteiro; o cliente não
+controla eventual conteúdo inline adicional que o tribunal inclua nessa resposta.
+Confirme que **dashboard e worker** executam a versão com este contrato antes
+de enfileirar: um worker antigo não conhece o novo filtro. Não há mudança na CLI.
+
 Observacoes operacionais:
 - a dashboard cria uma pasta por batch e consolida os resultados do worker nessa pasta
 - falhas de sessao/CAPTCHA no worker encerram o restante do batch como falha rastreavel

@@ -116,3 +116,30 @@ class TestDeadLetterToJson:
         assert recovered["payload"] == "{bad"
         assert recovered["details"]["error"] == "Expecting property name"
         assert "timestamp" in recovered
+
+
+@pytest.mark.parametrize(
+    "value", [[], [""], [" 12"], ["12 "], [12], [True], ["１２"], "12", ["1"] * 101]
+)
+def test_document_ids_fail_closed(value):
+    from protocol import normalize_document_ids
+
+    with pytest.raises(ValueError):
+        normalize_document_ids(value)
+
+
+def test_document_ids_optional_and_deduplicated():
+    from protocol import normalize_document_ids
+
+    assert normalize_document_ids(None) is None
+    assert normalize_document_ids(["12", "7", "12"]) == ["12", "7"]
+
+
+@pytest.mark.parametrize("ids", [None, [], [" 12"], [12]])
+def test_job_json_rejects_invalid_explicit_document_filter(ids):
+    with pytest.raises(ValueError):
+        job_from_json(
+            json.dumps(
+                {"jobId": "sample", "numeroProcesso": "sample", "documentoIds": ids}
+            )
+        )

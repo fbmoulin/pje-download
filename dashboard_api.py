@@ -71,6 +71,8 @@ from config import (
     atomic_write_text,
     sanitize_filename,
 )
+from protocol import normalize_document_ids
+
 import audit_sync
 
 AUDIT_SYNCER_KEY: web.AppKey = web.AppKey("audit_syncer", audit_sync.AuditSyncer)
@@ -98,6 +100,7 @@ class BatchJob:
     output_dir: str = ""
     include_anexos: bool = True
     gdrive_map: dict[str, str] = field(default_factory=dict)
+    documento_ids: list[str] | None = None
     progress: dict = field(default_factory=dict)
     error: str | None = None
 
@@ -249,6 +252,7 @@ class DashboardState:
                     finished_at=data.get("completed_at", ""),
                     output_dir=str(report_file.parent),
                     include_anexos=data.get("include_anexos", True),
+                    documento_ids=normalize_document_ids(data.get("documento_ids")),
                     progress=data,
                     error=data.get("error"),
                 )
@@ -282,8 +286,16 @@ class DashboardState:
         processos: list[str],
         include_anexos: bool = True,
         gdrive_map: dict[str, str] | None = None,
+        documento_ids: list[str] | None = None,
     ) -> BatchJob:
         """Submete um novo batch de download."""
+        documento_ids = normalize_document_ids(documento_ids)
+        if documento_ids is not None and (len(processos) != 1 or gdrive_map):
+            raise ValueError(
+                "Coleta restrita exige um processo e não permite Google Drive"
+            )
+        if documento_ids is not None:
+            include_anexos = False
         batch_id = (
             datetime.now(UTC).strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
         )
@@ -297,6 +309,7 @@ class DashboardState:
             output_dir=str(batch_dir),
             include_anexos=include_anexos,
             gdrive_map=gdrive_map or {},
+            documento_ids=documento_ids,
         )
         self.batches[batch_id] = job
 
@@ -338,6 +351,7 @@ class DashboardState:
             for numero in job.processos
         }
         return {
+            "documento_ids": job.documento_ids,
             "summary": {
                 "total": len(job.processos),
                 "done": 0,
@@ -359,6 +373,7 @@ class DashboardState:
             "output_dir": job.output_dir,
             "include_anexos": job.include_anexos,
             "gdrive_map": job.gdrive_map,
+            "documento_ids": job.documento_ids,
             "error": job.error,
         }
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -404,6 +419,7 @@ class DashboardState:
                         id=batch_id,
                         processos=list(data.get("processos", [])),
                         output_dir=str(output_dir),
+                        documento_ids=normalize_document_ids(data.get("documento_ids")),
                     )
                 )
 
@@ -417,6 +433,7 @@ class DashboardState:
                 output_dir=str(output_dir),
                 include_anexos=data.get("include_anexos", True),
                 gdrive_map=data.get("gdrive_map", {}),
+                documento_ids=normalize_document_ids(data.get("documento_ids")),
                 progress=progress,
                 error=data.get("error"),
             )
@@ -462,6 +479,7 @@ class DashboardState:
         return self._task is None or self._task.done()
 
     def _persist_progress(self, job: BatchJob) -> None:
+        job.progress["documento_ids"] = job.documento_ids
         Path(job.output_dir).mkdir(parents=True, exist_ok=True)
         atomic_write_text(
             self._progress_path(job),
@@ -479,6 +497,7 @@ class DashboardState:
             "include_anexos": job.include_anexos,
             "error": job.error,
             **job.progress,
+            "documento_ids": job.documento_ids,
         }
         atomic_write_text(
             self._report_path(job),
@@ -489,15 +508,23 @@ class DashboardState:
         from protocol import JobMessage
 
         safe_name = sanitize_filename(numero_processo)
-        return JobMessage(
+        documento_ids = normalize_document_ids(job.documento_ids)
+        if documento_ids is not None and (len(job.processos) != 1 or job.gdrive_map):
+            raise ValueError(
+                "Coleta restrita exige um processo e não permite Google Drive"
+            )
+        payload = JobMessage(
             jobId=f"{job.id}:{uuid.uuid4().hex[:8]}",
             batchId=job.id,
             numeroProcesso=numero_processo,
-            includeAnexos=job.include_anexos,
+            includeAnexos=False if documento_ids is not None else job.include_anexos,
             replyQueue=self._result_queue(job.id),
             outputSubdir=f"{job.id}/{safe_name}",
             gdriveUrl=job.gdrive_map.get(numero_processo),
         )
+        if documento_ids is not None:
+            payload["documentoIds"] = documento_ids
+        return payload
 
     def _apply_result(self, job: BatchJob, result: dict) -> str:
         numero = result.get("numeroProcesso", "")
@@ -912,16 +939,18 @@ class DashboardState:
         lands the batch in a consistent ``failed`` state with persisted progress.
         """
         reply_queue = self._result_queue(job.id)
-        serialized_payloads = {
-            numero: json.dumps(self._batch_job_payload(job, numero), ensure_ascii=False)
-            for numero in job.processos
-        }
         # Cancellation (dashboard shutdown/deploy) must NOT drop the reply queue:
         # resume_active_batch re-enters with enqueue_jobs=False and relies on the
         # undrained results still being there. Its TTL cleans it up if nobody resumes.
         keep_reply_queue = False
 
         try:
+            serialized_payloads = {
+                numero: json.dumps(
+                    self._batch_job_payload(job, numero), ensure_ascii=False
+                )
+                for numero in job.processos
+            }
             redis_client = await self.get_redis()
             state = await self._enqueue_batch(
                 job,
@@ -1130,10 +1159,29 @@ async def handle_download(request: web.Request) -> web.Response:
     if not isinstance(body, dict):
         return web.json_response({"error": "JSON deve ser um objeto"}, status=400)
 
+    try:
+        if "documentoIds" in body:
+            raise ValueError(
+                "Use documento_ids na API HTTP; documentoIds é reservado à fila"
+            )
+        if "documento_ids" in body and body["documento_ids"] is None:
+            raise ValueError(
+                "documento_ids não pode ser null; omita para coleta integral"
+            )
+        documento_ids = normalize_document_ids(body.get("documento_ids"))
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
     processos_raw = body.get("processos", [])
     if isinstance(processos_raw, str):
         processos_raw = [p.strip() for p in processos_raw.split(",") if p.strip()]
 
+    if not isinstance(processos_raw, list) or any(
+        not isinstance(p, str) for p in processos_raw
+    ):
+        return web.json_response(
+            {"error": "processos deve ser uma lista de strings"}, status=400
+        )
     if not processos_raw:
         return web.json_response({"error": "Nenhum processo informado"}, status=400)
 
@@ -1187,7 +1235,19 @@ async def handle_download(request: web.Request) -> web.Response:
             status=400,
         )
 
-    include_anexos = body.get("include_anexos", True)
+    if documento_ids is not None and (
+        len(processos) != 1 or invalidos or len(processos_raw) != 1 or gdrive_map
+    ):
+        return web.json_response(
+            {
+                "error": "Coleta restrita exige um processo válido e não permite Google Drive"
+            },
+            status=400,
+        )
+
+    include_anexos = (
+        False if documento_ids is not None else body.get("include_anexos", True)
+    )
 
     # ── Check + submit under lock (BUG-3) ──
     async with ctx.batch_lock:
@@ -1202,7 +1262,12 @@ async def handle_download(request: web.Request) -> web.Response:
                     status=409,
                 )
 
-        job = await state.submit_batch(processos, include_anexos, gdrive_map)
+        if documento_ids is None:
+            job = await state.submit_batch(processos, include_anexos, gdrive_map)
+        else:
+            job = await state.submit_batch(
+                processos, include_anexos, gdrive_map, documento_ids=documento_ids
+            )
 
     return web.json_response(
         {
@@ -1295,6 +1360,7 @@ async def handle_batch_detail(request: web.Request) -> web.Response:
             "output_dir": job.output_dir,
             "include_anexos": job.include_anexos,
             "gdrive_map": job.gdrive_map,
+            "documento_ids": job.documento_ids,
             "progress": job.progress,
             "error": job.error,
         }
