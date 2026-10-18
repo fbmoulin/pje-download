@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
+
+from tests.pdf_fixtures import minimal_pdf
 from prometheus_client import generate_latest
 
 import config
@@ -16,6 +18,7 @@ def _load_worker_module():
     import os
 
     import redis as _real_redis
+    import audit as _real_audit
 
     # Ensure DOWNLOAD_BASE_DIR points somewhere writable before module-level mkdir runs
     os.environ.setdefault("DOWNLOAD_BASE_DIR", "/tmp/pje-test-downloads")
@@ -34,6 +37,9 @@ def _load_worker_module():
     with patch.dict(
         "sys.modules",
         {
+            # Keep the same audit singleton when this file runs in isolation:
+            # patch.dict restores its sys.modules snapshot on exit.
+            "audit": _real_audit,
             "redis": mock_redis_module,
             "redis.asyncio": mock_redis_module,
             "playwright": mock_playwright_module,
@@ -1204,7 +1210,7 @@ class TestDocumentSavedAudit:
         worker = w.PJeSessionWorker()
         response = AsyncMock()
         response.status = 200
-        response.body = AsyncMock(return_value=b"pdf-bytes")
+        response.body = AsyncMock(return_value=minimal_pdf(b"pdf-bytes"))
         worker.page = AsyncMock()
         worker.page.request.get = AsyncMock(return_value=response)
 
@@ -1224,7 +1230,7 @@ class TestDocumentSavedAudit:
         assert entry.processo_numero == "PROC-5000001"
         assert entry.documento_id == "d1"
         assert entry.documento_tipo == "sentenca"
-        assert entry.tamanho_bytes == len(b"pdf-bytes")
+        assert entry.tamanho_bytes == len(minimal_pdf(b"pdf-bytes"))
         assert entry.checksum_sha256 is not None
 
     @pytest.mark.asyncio
@@ -1240,7 +1246,7 @@ class TestDocumentSavedAudit:
         worker = w.PJeSessionWorker()
         response = AsyncMock()
         response.status = 200
-        response.body = AsyncMock(return_value=b"pdf-bytes")
+        response.body = AsyncMock(return_value=minimal_pdf(b"pdf-bytes"))
         worker.page = AsyncMock()
         worker.page.request.get = AsyncMock(return_value=response)
 
@@ -1269,7 +1275,7 @@ class TestDocumentSavedAudit:
         worker = w.PJeSessionWorker()
         response = AsyncMock()
         response.status = 200
-        response.body = AsyncMock(return_value=b"pdf-bytes")
+        response.body = AsyncMock(return_value=minimal_pdf(b"pdf-bytes"))
         worker.page = AsyncMock()
         worker.page.request.get = AsyncMock(return_value=response)
 
@@ -1279,13 +1285,12 @@ class TestDocumentSavedAudit:
         monkeypatch.setattr(w.Path, "write_bytes", _raise_oserror)
 
         with patch("audit.log_access") as mock_audit:
-            result = await worker._download_document_api(
-                {"id": "d3", "nome": "sentenca.pdf"},
-                tmp_path,
-                "5000003-00.2024.8.08.0001",
-            )
-
-        assert result is None
+            with pytest.raises(w.DiskWriteError):
+                await worker._download_document_api(
+                    {"id": "d3", "nome": "sentenca.pdf"},
+                    tmp_path,
+                    "-".join(("5000003", "00.2024.8.08.0001")),
+                )
         mock_audit.assert_called_once()
         entry = mock_audit.call_args[0][0]
         assert entry.event_type == "document_saved"
@@ -1470,7 +1475,7 @@ class TestAuditTribunal:
         worker.mni_client = None
         response = AsyncMock()
         response.status = 200
-        response.body = AsyncMock(return_value=b"pdf-bytes")
+        response.body = AsyncMock(return_value=minimal_pdf(b"pdf-bytes"))
         worker.page = AsyncMock()
         worker.page.request.get = AsyncMock(return_value=response)
 
@@ -1493,7 +1498,7 @@ class TestAuditTribunal:
         worker.mni_client = MagicMock(tribunal="TJBA")
         response = AsyncMock()
         response.status = 200
-        response.body = AsyncMock(return_value=b"pdf-bytes")
+        response.body = AsyncMock(return_value=minimal_pdf(b"pdf-bytes"))
         worker.page = AsyncMock()
         worker.page.request.get = AsyncMock(return_value=response)
 

@@ -35,7 +35,12 @@ import structlog
 
 import audit
 import metrics
-from file_utils import DiskWriteError, DownloadedFiles
+from file_utils import DiskWriteError, DownloadedFiles, merge_document_references
+from document_validation import (
+    atomic_write_document,
+    decode_document_base64,
+    validate_document_content,
+)
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.mni-client")
 
@@ -698,7 +703,15 @@ class MNIClient:
         failed_ids: list[str] = []
         handled: set[str] = set()
         seen_checksums: set[str] = set()
+        files_by_checksum: dict[str, dict] = {}
         local_bytes = 0
+
+        def retain_duplicate(outcome: dict) -> None:
+            if outcome.get("status") != "duplicate":
+                return
+            blob = files_by_checksum.get(outcome["checksum"])
+            if blob is not None:
+                merge_document_references(blob, [outcome["documento"]])
 
         # Montar lista de docs principais (MNI só retorna conteúdo destes).
         # Documentos vinculados (anexos) NÃO são acessíveis via parâmetro
@@ -752,8 +765,10 @@ class MNIClient:
             handled.add(doc.id)
             if not saved and outcome.get("status") == "failed":
                 failed_ids.append(doc.id)
+            retain_duplicate(outcome)
             if saved:
                 saved_files.append(saved)
+                files_by_checksum[saved["checksum"]] = saved
                 local_bytes += int(saved.get("tamanhoBytes", 0) or 0)
                 if progress_cb is not None:
                     await progress_cb(
@@ -822,8 +837,10 @@ class MNIClient:
                             handled.add(doc_id)
                             if not saved and outcome.get("status") == "failed":
                                 failed_ids.append(doc_id)
+                            retain_duplicate(outcome)
                             if saved:
                                 saved_files.append(saved)
+                                files_by_checksum[saved["checksum"]] = saved
                                 local_bytes += int(saved.get("tamanhoBytes", 0) or 0)
                                 if progress_cb is not None:
                                     await progress_cb(
@@ -896,8 +913,19 @@ class MNIClient:
             filename = f"{safe_name}_{doc.id}{ext}"
             dest = output_dir / filename
 
-            content_bytes = base64.b64decode(doc.conteudo_base64)
+            content_bytes = decode_document_base64(doc.conteudo_base64)
+            validate_document_content(content_bytes, doc.mimetype, filename)
             checksum = hashlib.sha256(content_bytes).hexdigest()
+            reference = {
+                "id": str(doc.id),
+                "nome": doc.nome,
+                "tipo": doc.tipo,
+                "mimeType": doc.mimetype,
+                "parentId": str(doc.id_pai) if doc.id_pai is not None else None,
+            }
+            if outcome is not None:
+                outcome["checksum"] = checksum
+                outcome["documento"] = reference
 
             if checksum in seen_checksums:
                 log.info(
@@ -916,9 +944,8 @@ class MNIClient:
                 if outcome is not None:
                     outcome["status"] = "duplicate"
                 return None
+            atomic_write_document(dest, content_bytes)
             seen_checksums.add(checksum)
-
-            dest.write_bytes(content_bytes)
 
             log.info(
                 "mni.download.saved",
@@ -947,6 +974,10 @@ class MNIClient:
                 "localPath": str(dest),
                 "checksum": checksum,
                 "fonte": "mni_soap",
+                "documentoId": str(doc.id),
+                "documentoPaiId": reference["parentId"],
+                "mimeType": doc.mimetype,
+                "documentos": [reference],
             }
         except OSError as exc:
             log.error(
@@ -971,6 +1002,14 @@ class MNIClient:
                 doc_id=doc.id,
                 nome=doc.nome,
                 error=str(exc),
+            )
+            audit.log_document_saved(
+                processo_numero,
+                "mni_soap",
+                self.tribunal,
+                status="error",
+                documento_id=doc.id,
+                erro=str(exc),
             )
             return None
 
