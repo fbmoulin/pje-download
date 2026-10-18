@@ -176,7 +176,9 @@ class BatchProgress:
             ps.tamanho_bytes = info.get("tamanho_bytes", 0)
             ps.erro = info.get("erro")
             # Se já concluído, manter; senão, resetar para pending
-            if ps.status not in ("done", "skipped"):
+            if ps.status not in ("done", "skipped") or (
+                ps.status == "done" and ps.erro
+            ):
                 ps.status = "pending"
                 ps.phase = "waiting"
             progress.processos[num] = ps
@@ -394,6 +396,11 @@ async def download_batch(
             ps.status = "downloading"
             ps.phase = "starting"
             ps.phase_detail = ""
+            ps.erro = None
+            ps.total_docs = 0
+            ps.docs_baixados = 0
+            ps.tamanho_bytes = 0
+            ps.fim = None
             ps.inicio = time.monotonic()
             progress.save()
 
@@ -658,8 +665,8 @@ async def download_batch(
 
                 ps.docs_baixados = len(all_files)
                 ps.tamanho_bytes = total_bytes(all_files)
-                ps.status = "done"
-                ps.phase = "done"
+                ps.status = "failed" if anexos_warning else "done"
+                ps.phase = ps.status
                 ps.phase_detail = (
                     f"{ps.docs_baixados} docs, "
                     f"{round(ps.tamanho_bytes / 1024 / 1024, 1)} MB"
@@ -668,12 +675,14 @@ async def download_batch(
                     ps.phase_detail = f"{ps.phase_detail} ({anexos_warning})"
                     ps.erro = anexos_warning
                 ps.fim = time.monotonic()
-                metrics.batch_processos_total.labels(status="done").inc()
+                metrics.batch_processos_total.labels(status=ps.status).inc()
                 metrics.batch_docs_total.inc(ps.docs_baixados)
                 metrics.batch_bytes_total.inc(ps.tamanho_bytes)
 
                 log.info(
-                    "batch.processo.done",
+                    "batch.processo.incomplete"
+                    if anexos_warning
+                    else "batch.processo.done",
                     processo=numero,
                     docs=ps.docs_baixados,
                     size_mb=round(ps.tamanho_bytes / 1024 / 1024, 2),
@@ -732,7 +741,7 @@ async def download_batch(
             processo_numero=",".join(numeros),
             fonte="batch",
             tribunal=MNI_TRIBUNAL,
-            status="success",
+            status="error" if progress.failed else "success",
             duracao_s=round(elapsed, 1),
         )
     )
@@ -916,6 +925,9 @@ def main():
             if ps.status == "failed":
                 print(f"  ✗ {num}: {ps.erro}")
     print("=" * 60)
+
+    if progress.failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

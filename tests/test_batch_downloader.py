@@ -482,14 +482,15 @@ async def test_download_batch_reports_pending_annexes_without_session(
         )
 
     ps = progress.processos["1234567-89.2024.8.08.0001"]
-    assert ps.status == "done"
     assert "anexo" in ps.phase_detail.lower()
+    assert ps.status == "failed"
     assert ps.erro is not None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("raises", [False, True])
 async def test_download_batch_warns_when_annex_complement_returns_empty(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, raises
 ):
     """Annex-only complement must surface a warning when the session returns no files."""
     monkeypatch.setenv("MNI_USERNAME", "u")
@@ -528,6 +529,8 @@ async def test_download_batch_warns_when_annex_complement_returns_empty(
 
     mock_pje_client = AsyncMock()
     mock_pje_client.download_processo.return_value = []
+    if raises:
+        mock_pje_client.download_processo.side_effect = RuntimeError("session expired")
 
     with (
         patch("mni_client.MNIClient", return_value=mock_client),
@@ -546,9 +549,9 @@ async def test_download_batch_warns_when_annex_complement_returns_empty(
         )
 
     ps = progress.processos["1234567-89.2024.8.08.0001"]
-    assert ps.status == "done"
     assert ps.erro is not None
-    assert "não retornou anexos" in ps.erro
+    assert ("sessão PJe falhou" if raises else "não retornou anexos") in ps.erro
+    assert ps.status == "failed"
 
 
 # ─────────────────────────────────────────────
@@ -658,7 +661,7 @@ async def test_batch_audit_completed(tmp_path, monkeypatch):
     assert len(completed_calls) == 1
     entry = completed_calls[0][0][0]
     assert entry.fonte == "batch"
-    assert entry.status == "success"
+    assert entry.status == "error"
     assert entry.duracao_s is not None
     assert "2000001-01.2024.8.08.0001" in entry.processo_numero
 
@@ -785,9 +788,7 @@ async def test_B3_missing_tamanhoBytes_does_not_fail_processo(tmp_path, monkeypa
 
 @pytest.mark.asyncio
 async def test_download_batch_surfaces_docs_mni_lost(tmp_path, monkeypatch):
-    """This path has no `partial` status (progress file and metrics only know
-    done|failed), so lost documents are surfaced the way pending annexes already
-    are: in `erro` and `phase_detail`, instead of a clean "done"."""
+    """A loss is retryable failed, retaining the files already downloaded."""
     monkeypatch.setenv("MNI_USERNAME", "u")
     monkeypatch.setenv("MNI_PASSWORD", "p")
 
@@ -835,7 +836,125 @@ async def test_download_batch_surfaces_docs_mni_lost(tmp_path, monkeypatch):
         )
 
     ps = progress.processos["1234567-89.2024.8.08.0001"]
-    assert ps.status == "done"  # status vocabulary unchanged on this path
+    assert ps.status == "failed"
     assert ps.docs_baixados == 1
     assert "1 documento" in (ps.erro or "")
     assert "1 documento" in ps.phase_detail
+
+
+@pytest.mark.parametrize(
+    "status,error,expected",
+    [
+        ("done", "missing document", "pending"),
+        ("done", None, "done"),
+        ("skipped", "intentional", "skipped"),
+    ],
+)
+def test_resume_legacy_done_with_error_is_retryable(tmp_path, status, error, expected):
+    path = tmp_path / "_progress.json"
+    progress = BatchProgress(progress_file=path)
+    progress.add("synthetic-case")
+    progress.get("synthetic-case").status = status
+    progress.get("synthetic-case").erro = error
+    progress.save(force=True)
+    assert BatchProgress.load(path).get("synthetic-case").status == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_ids", [["missing-id"], []])
+async def test_cli_partial_persistence_metrics_and_recovery(
+    tmp_path, monkeypatch, failed_ids
+):
+    import batch_downloader as bd
+    import pje_session
+    from file_utils import DownloadedFiles
+
+    monkeypatch.setenv("MNI_USERNAME", "u")
+    monkeypatch.setenv("MNI_PASSWORD", "p")
+    monkeypatch.setattr(pje_session, "SESSION_FILE", tmp_path / "no-session")
+    saved_file = tmp_path / "piece.pdf"
+    saved_file.write_bytes(b"synthetic bytes retained")
+    client = AsyncMock()
+    client.health_check.return_value = {"status": "healthy"}
+    result = MagicMock(success=True)
+    result.processo.documentos = [MagicMock(vinculados=[]), MagicMock(vinculados=[])]
+    client.consultar_processo.return_value = result
+    client.download_documentos.return_value = DownloadedFiles(
+        [{"nome": "piece.pdf", "tamanhoBytes": 10, "checksum": "same"}], failed_ids
+    )
+    before_done = bd.metrics.batch_processos_total.labels(status="done")._value.get()
+    before_failed = bd.metrics.batch_processos_total.labels(
+        status="failed"
+    )._value.get()
+    with (
+        patch("mni_client.MNIClient", return_value=client),
+        patch("gdrive_downloader.is_processo_antigo", return_value=False),
+        patch("audit.log_access") as audit_log,
+    ):
+        progress = await bd.download_batch(
+            ["synthetic-case"], tmp_path, delay_entre_processos=0
+        )
+        expected = "failed" if failed_ids else "done"
+        assert progress.get("synthetic-case").status == expected
+        assert progress.done == int(not failed_ids)
+        assert progress.failed == int(bool(failed_ids))
+        assert bd.metrics.batch_processos_total.labels(
+            status="done"
+        )._value.get() - before_done == int(not failed_ids)
+        assert bd.metrics.batch_processos_total.labels(
+            status="failed"
+        )._value.get() - before_failed == int(bool(failed_ids))
+        persisted = json.loads((tmp_path / "_progress.json").read_text())
+        report = json.loads((tmp_path / "_report.json").read_text())
+        assert persisted["processos"]["synthetic-case"]["status"] == expected
+        assert report["processos"]["synthetic-case"]["status"] == expected
+        assert report["total_documentos"] == 1
+        assert report["total_bytes"] == 10
+        assert report["failed"] == int(bool(failed_ids))
+        assert saved_file.read_bytes() == b"synthetic bytes retained"
+        completed = [
+            c.args[0]
+            for c in audit_log.call_args_list
+            if c.args[0].event_type == "batch_completed"
+        ]
+        assert completed[-1].status == ("error" if failed_ids else "success")
+        if failed_ids:
+            # Older releases persisted exactly this incomplete run as done.
+            persisted["processos"]["synthetic-case"]["status"] = "done"
+            (tmp_path / "_progress.json").write_text(json.dumps(persisted))
+            client.download_documentos.return_value = DownloadedFiles(
+                [{"nome": "piece.pdf", "tamanhoBytes": 10}], []
+            )
+            recovered = await bd.download_batch(
+                ["synthetic-case"], tmp_path, delay_entre_processos=0
+            )
+            assert client.download_documentos.await_count == 2
+            assert recovered.done == 1
+            assert recovered.get("synthetic-case").erro is None
+            assert "missing" not in recovered.get("synthetic-case").phase_detail
+
+
+@pytest.mark.parametrize("failed", [True, False])
+def test_cli_exit_status_reflects_failed_processes(monkeypatch, failed):
+    import batch_downloader as bd
+
+    progress = BatchProgress()
+    progress.add("synthetic-case")
+    progress.get("synthetic-case").status = "failed" if failed else "done"
+    monkeypatch.setattr(
+        "sys.argv", ["batch_downloader.py", "--processos", "synthetic-case"]
+    )
+    with (
+        patch.object(bd, "_load_env"),
+        patch.object(
+            bd, "download_batch", new_callable=AsyncMock, return_value=progress
+        ),
+        patch("gdrive_downloader.is_processo_antigo", return_value=False),
+        patch("structlog.configure"),
+    ):
+        if failed:
+            with pytest.raises(SystemExit) as exc:
+                bd.main()
+            assert exc.value.code == 1
+        else:
+            bd.main()
