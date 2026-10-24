@@ -196,7 +196,7 @@ Prompt gate for Claude Code (2026-10-03 → 2026-10-10, #66, #71, #72):
 
 ## Security
 
-- `DASHBOARD_API_KEY` env var required for POST endpoints in production (empty = dev mode, no auth)
+- `DASHBOARD_API_KEY` env var required for POST endpoints in production (empty = dev mode, no auth). In fact `api_key_middleware` gates **every** `/api/*` route; only `/`, `/healthz`, `/metrics` and `/static/*` are public. So the page opens without the key but every call answers 401: the UI shows "Chave de API" (not "OFFLINE") and the key field reloads the status when saved (`statusFeedbackFor`, `applyApiKey`, `tests/test_dashboard_auth_feedback.py`). The "Sessão PJe" line is the dormant browser-fallback session, not MNI: "Sem sessão salva" is normal in production and "Fazer Login"/"Verificar" cannot work on the headless VPS.
 - Session file written with 0600 permissions — on BOTH write paths: `pje_session.interactive_login` and `worker.load_session` (`_ensure_owner_only_file` creates it 0600 *before* Playwright's `storage_state(path=...)` writes, which would otherwise use the umask → 0644)
 - `PJE_BASE_URL` validated by `config.validate_pje_base_url`: HTTPS and the parsed **hostname** must end in `.jus.br`. Never go back to `".jus.br" in url` — it accepts `https://evil.com/?x=.jus.br` and `https://pje.jus.br.evil.com`
 - `config.CNJ_PATTERN` is `re.ASCII`: without it `\d` matches Arabic-Indic/fullwidth digits
