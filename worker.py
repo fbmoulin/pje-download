@@ -24,6 +24,7 @@ import json
 import os
 import random
 import signal
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -92,6 +93,10 @@ DEAD_LETTER_QUEUE = "kratos:pje:dead-letter"
 #: redeliveries per sha256 of the payload (not per jobId: an unparseable payload has
 #: none). Assumes ONE worker: a second one booting would redeliver the first one's
 #: in-flight job. Spec: docs/specs/2026-10-16-job-perdido-no-deploy.md.
+# Alias do relógio monotônico para medir a duração dos jobs. Os testes trocam
+# `worker._monotonic`; patchar `time.monotonic` global quebraria o relógio do asyncio.
+_monotonic = time.monotonic
+
 JOB_QUEUE = "kratos:pje:jobs"
 PROCESSING_QUEUE = "kratos:pje:jobs:processing"
 ATTEMPTS_KEY = "kratos:pje:jobs:attempts"
@@ -2369,7 +2374,11 @@ class PJeSessionWorker:
             # breaks silently. Guarded by
             # tests/test_worker_publish_error_containment.py.
             try:
+                job_started = _monotonic()
                 result_data = await self.download_process(job)
+                # Duração do job em segundos, para o dashboard gravar em `duracao_s`.
+                # Em job reentregue (#78) mede só a última tentativa.
+                result_data["durationS"] = round(_monotonic() - job_started, 2)
                 if job.get("batchId"):
                     result_data["batchId"] = job["batchId"]
 
@@ -2464,8 +2473,6 @@ class PJeSessionWorker:
         healthy = self._health_status in ("ready", "consuming")
 
         # MNI connectivity (cached 30s — prevents 503 cascade during tribunal slowness)
-        import time
-
         now = time.monotonic()
         if self.mni_client is not None:
             if (
