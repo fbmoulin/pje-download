@@ -126,6 +126,8 @@ class BatchPollState:
 
 MAX_BATCH_SIZE = 500  # máximo de processos por batch
 MAX_BATCH_HISTORY = 100  # max completed batches kept in memory
+_INVALID_MAX_ITEMS = 100  # B1: rejected lines echoed back in the /api/download reply
+_INVALID_ITEM_MAX_CHARS = 64  # B1: each echoed line is cut to this length
 # RESULT_WAIT_TIMEOUT_SECS moved to config.py (Sprint 2 Q4 — env-configurable)
 _RPUSH_MAX_ATTEMPTS = 3  # audit P1: transient Redis failure should not kill a batch
 # Longest pause between reply-queue BLPOP attempts while Redis is erroring.
@@ -1239,22 +1241,41 @@ async def handle_download(request: web.Request) -> web.Response:
     from config import is_valid_processo
 
     processos = []
+    seen_processos: set[str] = set()
     invalidos = []
+    duplicados = 0
     for p in processos_raw:
         p = p.strip().strip('"').strip("'")
         if not p:
             continue
-        if is_valid_processo(p):
-            processos.append(p)
-        else:
+        if not is_valid_processo(p):
             invalidos.append(p)
+        elif p in seen_processos:
+            duplicados += 1
+        else:
+            seen_processos.add(p)
+            processos.append(p)
 
-    if invalidos:
-        log.warning("dashboard.invalid_processos", invalidos=invalidos)
+    # B1: the user is told what was dropped (reply fields below). Logs carry
+    # counts only: the raw lines may be personal data.
+    feedback = {
+        "invalidos": [
+            p[:_INVALID_ITEM_MAX_CHARS] for p in invalidos[:_INVALID_MAX_ITEMS]
+        ],
+        "invalidos_total": len(invalidos),
+        "duplicados": duplicados,
+    }
+    if invalidos or duplicados:
+        log.warning(
+            "dashboard.invalid_processos",
+            count=len(invalidos),
+            duplicados=duplicados,
+            aceitos=len(processos),
+        )
 
     if not processos:
         return web.json_response(
-            {"error": "Nenhum processo com formato CNJ válido", "invalidos": invalidos},
+            {"error": "Nenhum processo com formato CNJ válido", **feedback},
             status=400,
         )
 
@@ -1324,6 +1345,7 @@ async def handle_download(request: web.Request) -> web.Response:
             "batch_id": job.id,
             "processos": len(job.processos),
             "status": job.status,
+            **feedback,
         },
         status=201,
     )

@@ -288,6 +288,30 @@ async function apiFetch(path, opts = {}) {
 
 // ── Submit Download ──
 
+// Every non-blank line goes to the server, which is the one that validates and
+// reports what it rejected (B1). Filtering here by length made short lines vanish.
+function parseProcessoLines(text) {
+  return String(text).split('\n').map(l => l.trim()).filter(Boolean);
+}
+
+// Same normalisation the server applies before validating (strip + outer quotes),
+// cut to the 64 chars it echoes back in `invalidos`.
+function normalizeProcessoLine(line) {
+  return String(line).trim().replace(/^"+|"+$/g, '').replace(/^'+|'+$/g, '').slice(0, 64);
+}
+
+// Text the textarea should hold after a 201: only the lines the server rejected.
+// If the server's list was capped (invalidos_total > listed), we cannot tell which
+// lines were rejected, so keep everything the user typed.
+function remainingAfterSubmit(text, invalidos, invalidosTotal) {
+  const rejected = Array.isArray(invalidos) ? invalidos : [];
+  const total = typeof invalidosTotal === 'number' ? invalidosTotal : rejected.length;
+  if (!total) return '';
+  if (total > rejected.length) return String(text);
+  const set = new Set(rejected);
+  return parseProcessoLines(text).filter(l => set.has(normalizeProcessoLine(l))).join('\n');
+}
+
 async function submitDownload() {
   const textarea = $('#processos-input');
   const raw = textarea.value.trim();
@@ -296,7 +320,7 @@ async function submitDownload() {
     return;
   }
 
-  const processos = raw.split('\n').map(l => l.trim()).filter(l => l.length > 10);
+  const processos = parseProcessoLines(raw);
   if (!processos.length) {
     toast('Nenhum numero de processo valido encontrado', 'warning');
     return;
@@ -325,7 +349,16 @@ async function submitDownload() {
       body: JSON.stringify({ processos, include_anexos: !skipAnexos, ...(documentoIds !== undefined ? { documento_ids: documentoIds } : {}) }),
     });
     toast(`Batch ${data.batch_id} criado com ${data.processos} processos`, 'success');
-    textarea.value = '';
+    const rejeitados = typeof data.invalidos_total === 'number'
+      ? data.invalidos_total : (data.invalidos || []).length;
+    const duplicados = data.duplicados || 0;
+    if (rejeitados) {
+      toast(`${rejeitados} linha(s) com formato invalido nao foram enviadas e continuam na caixa de texto`, 'warning');
+    }
+    if (duplicados) {
+      toast(`${duplicados} numero(s) repetido(s) removido(s)`, 'warning');
+    }
+    textarea.value = remainingAfterSubmit(textarea.value, data.invalidos, data.invalidos_total);
     $('#documento-ids').value = '';
     $('#restricted-collection').checked = false;
     startPolling();
