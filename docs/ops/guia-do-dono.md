@@ -20,6 +20,7 @@ chaves ou IP**.
 
 | # | O que fazer | Onde | Tempo | Precisa? |
 |---|---|---|---|---|
+| 0 | Criar o apelido `pje-vps` no Mac | Mac mini | 10 min | Só se `ssh pje-vps` falhar |
 | 1 | Conferir a versão no ar e o arquivo de senhas | VPS | 5 min | Sim |
 | 2 | Rodar um lote pequeno e ler as durações | Navegador + VPS | 15 min | Sim |
 | 3 | Instalar ou atualizar o alarme no Telegram | Mac mini + VPS | 40 min | Sim |
@@ -29,6 +30,74 @@ chaves ou IP**.
 | 7 | Teste do "job perdido no deploy" | VPS | 20 min | Opcional |
 
 ---
+
+## Passo 0: criar o apelido `pje-vps` (Mac mini, uma vez só)
+
+`pje-vps` é um atalho: sem ele, o Mac não sabe qual servidor, usuário e chave usar. Se
+`ssh pje-vps` já conecta, pule para o Passo 1. O apelido mora só no seu `~/.ssh/config`
+e **não fica no repositório** de propósito (o repositório é público e o IP é reservado).
+
+1. **Descubra o IP da VPS.** No painel da Hostinger, abra a sua VPS: o painel mostra o
+   "Endereço IP". (O GitHub não deixa ler de volta o secret `VPS_HOST`.) Trate o IP como
+   reservado: não cole em chat nem no repositório.
+2. **Veja se a chave de deploy está neste Mac:**
+   ```bash
+   ls -l ~/.ssh/pje_deploy
+   ```
+   - **Existe:** rode `chmod 600 ~/.ssh/pje_deploy` e use `IdentityFile ~/.ssh/pje_deploy`
+     no passo 3.
+   - **Não existe** (ela ficou na máquina antiga, e a cópia no GitHub não pode ser lida de
+     volta): crie uma chave nova só do Mac mini e autorize-a na VPS:
+     ```bash
+     ssh-keygen -t ed25519 -f ~/.ssh/pje_mac -C mac-mini
+     cat ~/.ssh/pje_mac.pub
+     ```
+     Copie a linha impressa. No painel da Hostinger, abra o **terminal pelo navegador** da
+     VPS (procure "Terminal" no painel da VPS), entre como `root` e rode, trocando o
+     final pela linha que você copiou:
+     ```bash
+     echo 'ssh-ed25519 AAAA... mac-mini' >> /home/deploy/.ssh/authorized_keys
+     ```
+     No passo 3, use `IdentityFile ~/.ssh/pje_mac`. (Copiar a chave antiga de outra
+     máquina, por meio seguro, também serve.)
+3. **Crie a entrada no arquivo de configuração do ssh** (Mac mini):
+   ```bash
+   mkdir -p ~/.ssh && chmod 700 ~/.ssh
+   nano ~/.ssh/config
+   ```
+   Acrescente ao fim, trocando `IP_DA_VPS` pelo número do passo 1 e a chave pela que você
+   usa:
+   ```
+   Host pje-vps
+       HostName IP_DA_VPS
+       User deploy
+       IdentityFile ~/.ssh/pje_deploy
+       IdentitiesOnly yes
+   ```
+   Salve com Ctrl+O e Enter, saia com Ctrl+X e proteja o arquivo:
+   ```bash
+   chmod 600 ~/.ssh/config
+   ```
+4. **Primeira conexão.** Ela aceita a identidade do servidor; o vigia do Passo 3 exige isso:
+   ```bash
+   ssh pje-vps
+   ```
+   Responda `yes` à pergunta da impressão digital. **Deve aparecer** o prompt da VPS
+   (`deploy@...`). Saia com `exit`.
+5. **Teste curto:**
+   ```bash
+   ssh pje-vps 'echo ok'
+   ```
+   **Deve aparecer:** `ok`.
+
+*Se der errado:*
+
+- `Permission denied (publickey)`: a chave não está autorizada na VPS (refaça o passo 2)
+  ou o `IdentityFile` aponta para o arquivo errado.
+- `Connection timed out`: IP errado, ou o firewall da Hostinger foi alterado ou
+  desanexado (depois de uma mudança de região ele se desanexa). Peça ajuda.
+- `Could not resolve hostname pje-vps` de novo: a entrada `Host pje-vps` não foi salva.
+  Confira com `grep -A4 'Host pje-vps' ~/.ssh/config`.
 
 ## Passo 1: versão no ar e arquivo de senhas (VPS)
 
@@ -62,7 +131,7 @@ confirma que ficou protegido e que o servidor está na versão certa.
 5. Saia do servidor: `exit`.
 
 *Se der errado:* "Could not resolve hostname" significa que o apelido `pje-vps` não
-existe neste Mac. Peça para montar a linha do `~/.ssh/config`.
+existe neste Mac. Faça o **Passo 0**, acima, e volte aqui.
 
 ## Passo 2: lote pequeno de teste (navegador + VPS)
 
@@ -109,6 +178,8 @@ processo. O bloco `.timing` e a lista de segundos são seguros.
 Sem isso, **ninguém avisa** se o sistema cair. O vigia pergunta ao servidor a cada 5
 minutos se está tudo bem e só manda mensagem quando algo vai mal, mais um resumo todo dia
 às 8h. Detalhes técnicos: `docs/ops/hermes-watchdog.md`.
+
+Pré-requisito: o `ssh pje-vps` precisa funcionar neste Mac (Passo 0).
 
 **Primeiro descubra se já instalou.** No Mac mini: `hermes cron list`. Se aparecerem
 `pje-watchdog` e `pje-watchdog-digest`, vá para "Se já estava instalado", mais abaixo.
