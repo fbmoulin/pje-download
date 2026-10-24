@@ -24,6 +24,7 @@ collection time.
 from __future__ import annotations
 
 import math
+import sys
 from typing import Iterable
 
 
@@ -103,9 +104,13 @@ def valid_duration(value: object) -> float | None:
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if not math.isfinite(value) or value < 0:
+    try:
+        number = float(value)
+    except OverflowError:  # json parses ints like 10**400; they do not fit a float
         return None
-    return float(value)
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
 
 
 def duration_stats(values: Iterable[object]) -> dict:
@@ -129,7 +134,8 @@ def duration_stats(values: Iterable[object]) -> dict:
         "p50": round(rank(50), 2),
         "p95": round(rank(95), 2),
         "max": round(clean[-1], 2),
-        "sum": round(sum(clean), 2),
+        # Clamp: finite values can still sum to inf, which json.dumps writes as Infinity.
+        "sum": round(min(sum(clean), sys.float_info.max), 2),
     }
 
 
