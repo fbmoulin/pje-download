@@ -295,9 +295,12 @@ function parseProcessoLines(text) {
 }
 
 // Same normalisation the server applies before validating (strip + outer quotes),
-// cut to the 64 chars it echoes back in `invalidos`.
+// cut to the 64 characters it echoes back in `invalidos`. The server counts Unicode
+// code points (Python p[:64]); .slice() counts UTF-16 units and would cut emoji lines
+// at a different place, so cut by code points here too.
 function normalizeProcessoLine(line) {
-  return String(line).trim().replace(/^"+|"+$/g, '').replace(/^'+|'+$/g, '').slice(0, 64);
+  const s = String(line).trim().replace(/^"+|"+$/g, '').replace(/^'+|'+$/g, '');
+  return Array.from(s).slice(0, 64).join('');
 }
 
 // Text the textarea should hold after a 201: only the lines the server rejected.

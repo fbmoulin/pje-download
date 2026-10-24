@@ -259,3 +259,21 @@ def test_js_submit_no_longer_filters_by_length_or_clears_blindly():
     assert not re.search(r"length > 10\b(?!0)", submit)
     assert "textarea.value = ''" not in submit
     assert "remainingAfterSubmit" in submit
+
+
+@needs_node
+@pytest.mark.parametrize("n_emoji", [40, 70])
+def test_js_rejected_line_with_emoji_survives_like_the_servers_code_point_cut(n_emoji):
+    """The server cuts with Python's p[:64] (code points); JS .slice(0, 64) counts
+    UTF-16 units, so an emoji line stopped matching and was erased from the textarea
+    even though the warning said it stayed."""
+    line = "\U0001f600" * n_emoji
+    server_form = line[:64]  # what handle_download echoes in `invalidos`
+    text = f"{cnj(1)}\n{line}\n"
+    expr = f"remainingAfterSubmit({json.dumps(text)}, {json.dumps([server_form])}, 1)"
+    assert (
+        _run_js(
+            expr, "parseProcessoLines", "normalizeProcessoLine", "remainingAfterSubmit"
+        )
+        == line
+    )
