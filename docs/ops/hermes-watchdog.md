@@ -34,8 +34,9 @@ para `unhealthy`), então um reinício de deploy não gera alarme falso; eventos
 (lote com falha, dead-letter novo) são anunciados na hora; um problema que
 continua gera `[LEMBRETE]` a cada 6 h; quando some, `[NORMALIZOU]`.
 
-O worker responde `503` com `status: processing` enquanto executa um job. O
-watchdog não trata isso como falha (ver o achado no `TODO.md`).
+Antes da correção de 24/10/2026 o worker respondia `503` com `status:
+processing` enquanto executava um job; o watchdog nunca tratou `processing`
+como falha, então segue correto com qualquer versão do worker.
 
 Ajustes por variável de ambiente (opcionais, na VPS): `WATCHDOG_STUCK_MINUTES`,
 `WATCHDOG_REMIND_HOURS`, `WATCHDOG_STATE`.

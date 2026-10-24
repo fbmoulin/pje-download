@@ -97,6 +97,12 @@ DEAD_LETTER_QUEUE = "kratos:pje:dead-letter"
 # `worker._monotonic`; patchar `time.monotonic` global quebraria o relógio do asyncio.
 _monotonic = time.monotonic
 
+# Estados em que o worker está saudável. "processing" (job em andamento) conta:
+# sem ele o /health respondia 503 durante todo job, o healthcheck do Docker
+# oscilava e a dashboard descartava o corpo do 503 (_fetch_worker_health).
+# Os estados fatais (redis_unreachable, session_expired, captcha_required) ficam fora.
+HEALTHY_STATUSES = frozenset({"ready", "consuming", "processing"})
+
 JOB_QUEUE = "kratos:pje:jobs"
 PROCESSING_QUEUE = "kratos:pje:jobs:processing"
 ATTEMPTS_KEY = "kratos:pje:jobs:attempts"
@@ -2470,7 +2476,7 @@ class PJeSessionWorker:
         from aiohttp import web
 
         checks: dict = {}
-        healthy = self._health_status in ("ready", "consuming")
+        healthy = self._health_status in HEALTHY_STATUSES
 
         # MNI connectivity (cached 30s — prevents 503 cascade during tribunal slowness)
         now = time.monotonic()
