@@ -201,6 +201,7 @@ Prompt gate for Claude Code (2026-10-03 → 2026-10-10, #66, #71, #72):
 - `PJE_BASE_URL` validated by `config.validate_pje_base_url`: HTTPS and the parsed **hostname** must end in `.jus.br`. Never go back to `".jus.br" in url` — it accepts `https://evil.com/?x=.jus.br` and `https://pje.jus.br.evil.com`
 - `config.CNJ_PATTERN` is `re.ASCII`: without it `\d` matches Arabic-Indic/fullwidth digits
 - `static/js/app.js` `esc()` escapes `& < > " '` (it is used inside attributes). Never build an inline `on…="fn('${x}')"` handler from data — escaping cannot make that safe; use `data-*` + a delegated listener. Pinned by `tests/test_dashboard_js_escaping.py` (runs the real functions under `node`; skipped if node is absent).
+- `/opt/pje-download/.env` (MNI/Redis/dashboard secrets) is written by deploy.yml's "Write .env on VPS" step with `umask 077` before the write and an explicit `chmod 600` after (`>` keeps the mode of an existing file). Pinned by `tests/test_deploy_env_permissions.py`. ⚠️ Only takes effect from the next deploy; until then the file on the VPS keeps whatever mode it has.
 - Rate limiter parses `X-Forwarded-For` for real client IP behind proxy
 - Worker health bound to 127.0.0.1 (not exposed externally)
 - CNJ 615/2025 audit trail: `audit.py` logs every document access to JSON-L (`/data/audit/audit-YYYY-MM-DD.jsonl`, 0600 perms, append-only)

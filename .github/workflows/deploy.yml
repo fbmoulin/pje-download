@@ -114,6 +114,9 @@ jobs:
             : "${REDIS_PASSWORD:?missing REDIS_PASSWORD secret}"
             : "${DASHBOARD_API_KEY:?missing DASHBOARD_API_KEY secret}"
             : "${BUILD_SHA:?missing BUILD_SHA — refusing to deploy an unidentifiable build}"
+            # Secrets below: create the file owner-only (no readable window), and
+            # chmod afterwards because `>` keeps the mode of a pre-existing file.
+            umask 077
             {
               printf 'APP_ENV=production\n'
               printf 'BUILD_SHA=%s\n' "${BUILD_SHA}"
@@ -134,6 +137,7 @@ jobs:
               printf 'TRUST_X_FORWARDED_FOR=false\n'
               printf 'AUDIT_LOG_RETENTION_DAYS=120\n'
             } > /opt/pje-download/.env
+            chmod 600 /opt/pje-download/.env
 
       - name: Restart services
         uses: appleboy/ssh-action@v1.2.5
