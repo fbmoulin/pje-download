@@ -775,13 +775,16 @@ class TestHermesWrapper:
             "#!/bin/bash\n"
             'printf "%s\\n" "$@" > "$SSH_LOG"\n'
             'cat "$SSH_OUT" 2>/dev/null\n'
+            'cat "$SSH_ERR" >&2 2>/dev/null\n'
+            '[ -n "${SSH_SLEEP:-}" ] && exec sleep "$SSH_SLEEP"\n'
             'exit "${SSH_RC:-0}"\n'
         )
         fake.chmod(0o755)
         out = tmp_path / "out.txt"
-        return {"bin": bindir, "log": log, "out": out, "tmp": tmp_path}
+        err = tmp_path / "err.txt"
+        return {"bin": bindir, "log": log, "out": out, "err": err, "tmp": tmp_path}
 
-    def _run(self, sandbox, name="pje-watchdog.sh", out="", rc=0):
+    def _run(self, sandbox, name="pje-watchdog.sh", out="", rc=0, err="", extra=None):
         import shutil
         import subprocess
 
@@ -789,15 +792,18 @@ class TestHermesWrapper:
         shutil.copy(WRAPPER, script)
         script.chmod(0o755)
         sandbox["out"].write_text(out)
+        sandbox["err"].write_text(err)
         env = {
             "PATH": f"{sandbox['bin']}:/usr/bin:/bin",
             "HOME": str(sandbox["tmp"]),
             "SSH_LOG": str(sandbox["log"]),
             "SSH_OUT": str(sandbox["out"]),
             "SSH_RC": str(rc),
+            "SSH_ERR": str(sandbox["err"]),
+            **(extra or {}),
         }
         return subprocess.run(
-            ["bash", str(script)], capture_output=True, text=True, env=env, timeout=20
+            ["bash", str(script)], capture_output=True, text=True, env=env, timeout=30
         )
 
     def test_syntax(self):
@@ -830,3 +836,425 @@ class TestHermesWrapper:
         for opt in ("BatchMode=yes", "IdentitiesOnly=yes", "StrictHostKeyChecking=yes"):
             assert opt in args
         assert "StrictHostKeyChecking=no" not in WRAPPER.read_text()
+
+    def test_ssh_stderr_never_reaches_stdout_on_success(self, sandbox):
+        res = self._run(
+            sandbox,
+            out="[ALERTA] x\n",
+            err="Warning: Permanently added 203.0.113.9 to known_hosts\n",
+        )
+        assert res.returncode == 0
+        assert "203.0.113.9" not in res.stdout and "Warning" not in res.stdout
+        assert "[ALERTA] x" in res.stdout
+
+    def test_warning_only_on_stderr_is_a_silent_tick(self, sandbox):
+        res = self._run(sandbox, err="Warning: something\n")
+        assert res.returncode == 0 and res.stdout == ""
+
+    def test_failure_message_is_fixed_and_leaks_nothing(self, sandbox):
+        res = self._run(
+            sandbox,
+            rc=255,
+            err="ssh: connect to host 203.0.113.9 port 22: Connection timed out\n"
+            "Host key verification failed: /Users/x/.ssh/known_hosts\n",
+            out="203.0.113.9 e /Users/x/.ssh/known_hosts\n",
+        )
+        assert res.returncode == 1
+        assert "255" in res.stdout and "WATCHDOG" in res.stdout
+        assert "203.0.113.9" not in res.stdout and "known_hosts" not in res.stdout
+        assert "/Users" not in res.stdout
+
+    def test_watchdog_own_error_line_is_relayed_on_failure(self, sandbox):
+        res = self._run(sandbox, rc=1, out="WATCHDOG: tempo esgotado\n")
+        assert res.returncode == 1
+        assert "tempo esgotado" in res.stdout
+
+    def test_hung_ssh_is_killed_by_the_outer_limit(self, sandbox):
+        import time
+
+        t0 = time.monotonic()
+        res = self._run(sandbox, extra={"SSH_SLEEP": "20", "PJE_WATCHDOG_TIMEOUT": "1"})
+        assert time.monotonic() - t0 < 10
+        assert res.returncode == 1 and "WATCHDOG" in res.stdout
+
+    def test_server_alive_options_are_set(self, sandbox):
+        self._run(sandbox)
+        args = sandbox["log"].read_text()
+        assert "ServerAliveInterval=10" in args and "ServerAliveCountMax=3" in args
+        assert "ConnectTimeout=" in args
+
+
+# ───────────────────────── endurecimento (revisões de 24/10/2026) ─────────────────────────
+
+
+def cpf_digits() -> str:
+    return "".join(["123", "456", "789", "09"])
+
+
+def _no_digit_run(out: str, run: int = 3) -> bool:
+    import re
+
+    return not re.search(r"\d{%d}" % run, out)
+
+
+class TestScrubBypasses:
+    @pytest.mark.parametrize(
+        "sep_a,sep_b",
+        [
+            (" ", " "),  # espaços
+            (".", "–"),  # en-dash antes do dígito verificador
+            ("/", "/"),  # barras
+            (".", "‑"),  # hífen não-quebrável
+            ("​.", "-"),  # ZWSP partindo o número
+            ("．", "－"),  # largura total
+        ],
+    )
+    def test_cpf_with_unusual_separators_is_fully_masked(self, sep_a, sep_b):
+        d = cpf_digits()
+        text = f"erro {d[:3]}{sep_a}{d[3:6]}{sep_a}{d[6:9]}{sep_b}{d[9:]} fim"
+        out = wd.scrub(text)
+        assert _no_digit_run(out, 2), out
+        assert "456" not in out and "789" not in out
+
+    def test_cpf_with_zero_width_inside_digits(self):
+        d = cpf_digits()
+        out = wd.scrub(f"x {d[:3]}​{d[3:6]}​{d[6:9]}​{d[9:]} y")
+        assert _no_digit_run(out, 2), out
+
+    @pytest.mark.parametrize("hyphen", ["‑", " - ", "–", " ‐ "])
+    def test_case_number_with_odd_hyphen_is_fully_masked(self, hyphen):
+        text = "falhou " + cnj_like().replace("-", hyphen) + " ok"
+        out = wd.scrub(text)
+        assert _no_digit_run(out, 2), out
+        assert "2024" not in out and "0001" not in out
+
+    def test_fullwidth_digits_are_masked(self):
+        full = "".join(chr(0xFF10 + int(c)) for c in "1234567890")
+        out = wd.scrub(f"id {full}")
+        assert "1234" not in out and full not in out
+
+    @pytest.mark.parametrize(
+        "secret_text,secret",
+        [
+            ("falha password=hunter2 depois", "hunter2"),
+            ("token=abc123def", "abc123def"),
+            ("api_key: s3cr3tvalue", "s3cr3tvalue"),
+            ("Cookie: sessionid=zzz999", "zzz999"),
+            ("conectando https://usuario:pw-xyz@host.exemplo/x", "pw-xyz"),
+            ("redis://:senha-redis@redis:6379/0", "senha-redis"),
+            ("Authorization: Bearer abcDEF123token", "abcDEF123token"),
+        ],
+    )
+    def test_credentials_are_masked(self, secret_text, secret):
+        assert secret not in wd.scrub(secret_text)
+
+    def test_plain_text_survives(self):
+        assert wd.scrub("timeout ao baixar documento") == "timeout ao baixar documento"
+
+
+# ───────────────────────── fila: processing / dead-letter ─────────────────────────
+
+
+class TestQueueHardening:
+    def test_processing_constant_while_jobs_drain_does_not_warn(self, env, cfg):
+        """Cada item de `processing` é um job diferente: o tamanho 1 constante
+        durante um lote longo não indica travamento enquanto `jobs` cai."""
+        state: dict = {}
+        env.llen[wd.PROCESSING_KEY] = 1
+        for i in range(6):
+            env.llen[wd.JOBS_KEY] = 50 - 5 * i
+            assert wd.check_queue(env, cfg, state) == []
+            env.t += 300
+        env.llen[wd.JOBS_KEY] = 20
+        assert wd.check_queue(env, cfg, state) == []
+
+    def test_jobs_and_processing_both_frozen_warns(self, env, cfg):
+        state: dict = {}
+        env.llen[wd.PROCESSING_KEY] = 1
+        env.llen[wd.JOBS_KEY] = 7
+        wd.check_queue(env, cfg, state)
+        env.t += cfg.stuck_minutes * 60 + 1
+        keys = [f.key for f in wd.check_queue(env, cfg, state)]
+        assert "queue:processing-stuck" in keys
+
+    def test_processing_with_empty_jobs_frozen_warns(self, env, cfg):
+        state: dict = {}
+        env.llen[wd.PROCESSING_KEY] = 1
+        wd.check_queue(env, cfg, state)
+        env.t += cfg.stuck_minutes * 60 + 1
+        keys = [f.key for f in wd.check_queue(env, cfg, state)]
+        assert "queue:processing-stuck" in keys
+
+    def test_jobs_just_drained_to_zero_resets_the_processing_clock(self, env, cfg):
+        state: dict = {}
+        env.llen[wd.PROCESSING_KEY] = 1
+        env.llen[wd.JOBS_KEY] = 3
+        wd.check_queue(env, cfg, state)
+        env.t += cfg.stuck_minutes * 60 - 60
+        env.llen[wd.JOBS_KEY] = 0
+        wd.check_queue(env, cfg, state)
+        env.t += 120
+        assert wd.check_queue(env, cfg, state) == []
+
+    @pytest.mark.parametrize("sep", [" ", "\u0085", "\x0b", "\x1c"])
+    def test_unicode_line_separators_inside_one_entry_do_not_split_it(
+        self, env, cfg, sep
+    ):
+        state: dict = {}
+        env.llen[wd.DEAD_LETTER_KEY] = 10
+        wd.check_queue(env, cfg, state)
+        env.llen[wd.DEAD_LETTER_KEY] = 11
+        env.dead_entries = [
+            json.dumps(
+                {"reason": "invalid_json", "payload": f"a{sep}b"}, ensure_ascii=False
+            )
+        ]
+        assert wd.check_queue(env, cfg, state) == []
+
+
+# ───────────────────────── HTTP real (servidor local) ─────────────────────────
+
+
+@pytest.fixture
+def http_server():
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path == "/big":
+                self.send_response(200)
+                self.end_headers()
+                try:
+                    for _ in range(40):
+                        self.wfile.write(b"x" * 100_000)
+                except OSError:
+                    pass
+            elif self.path == "/dribble":
+                self.send_response(200)
+                self.end_headers()
+                try:
+                    for _ in range(200):
+                        self.wfile.write(b" ")
+                        self.wfile.flush()
+                        time.sleep(0.2)
+                except OSError:
+                    pass
+            elif self.path == "/html":
+                body = b"<html>Bad Gateway</html>"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                body = b'{"ok": true}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+    srv.server_close()
+
+
+class TestSystemEnvHttp:
+    def test_json_ok(self, http_server):
+        res = wd.SystemEnv(wd.Config()).http_get_json(http_server + "/ok")
+        assert res == wd.HttpResult(200, {"ok": True}, None)
+
+    def test_body_is_capped(self, http_server):
+        import time
+
+        t0 = time.monotonic()
+        res = wd.SystemEnv(wd.Config()).http_get_json(http_server + "/big")
+        assert time.monotonic() - t0 < 5
+        assert res.status == 200 and res.body is None and res.error == "BodyTooLarge"
+
+    def test_a_server_that_dribbles_bytes_hits_the_total_deadline(self, http_server):
+        import time
+
+        t0 = time.monotonic()
+        res = wd.SystemEnv(wd.Config()).http_get_json(
+            http_server + "/dribble", timeout=0.5
+        )
+        assert time.monotonic() - t0 < 4
+        assert res.status is None and res.error == "TimeoutError"
+
+    def test_http_200_with_non_json_body_is_not_a_connection_failure(self, http_server):
+        res = wd.SystemEnv(wd.Config()).http_get_json(http_server + "/html")
+        assert res == wd.HttpResult(200, None, None)
+
+    def test_non_json_200_becomes_bad_response_not_down(self, http_server):
+        cfg = wd.Config(worker_url=http_server + "/html")
+        keys = [f.key for f in wd.check_worker(wd.SystemEnv(cfg), cfg)]
+        assert keys == ["worker:bad-response"]
+
+
+# ───────────────────────── prazo total, lock preso, disco cheio ─────────────────────────
+
+
+class SlowEnv(FakeEnv):
+    def http_get_json(self, url, headers=None, timeout=5.0):
+        import time
+
+        time.sleep(30)
+        return super().http_get_json(url, headers, timeout)
+
+
+class TestTotalDeadline:
+    def test_a_hung_run_is_cut_off_with_a_message_and_exit_1(self, tmp_path, capsys):
+        import time
+
+        environ = {
+            "WATCHDOG_STATE": str(tmp_path / "s.json"),
+            "WATCHDOG_DEADLINE_SECS": "1",
+        }
+        t0 = time.monotonic()
+        rc = wd.main([], environ=environ, env=SlowEnv())
+        assert rc == 1 and time.monotonic() - t0 < 10
+        assert "tempo esgotado" in capsys.readouterr().out
+
+    def test_the_timer_is_cancelled_after_a_normal_run(self, env, tmp_path):
+        import signal
+
+        environ = {"WATCHDOG_STATE": str(tmp_path / "s.json")}
+        assert wd.main([], environ=environ, env=env) == 0
+        assert signal.getitimer(signal.ITIMER_REAL)[0] == 0.0
+
+    def test_deadline_is_applied_to_digest_too(self, tmp_path, capsys):
+        environ = {
+            "WATCHDOG_STATE": str(tmp_path / "s.json"),
+            "WATCHDOG_DEADLINE_SECS": "1",
+            "SSH_ORIGINAL_COMMAND": "digest",
+        }
+        assert wd.main([], environ=environ, env=SlowEnv()) == 1
+        assert "tempo esgotado" in capsys.readouterr().out
+
+
+def _hold_lock(cfg, tmp_path):
+    import fcntl
+
+    cfg.state_path = str(tmp_path / "state.json")
+    lock = open(cfg.state_path + ".lock", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return lock
+
+
+class TestStuckLock:
+    def test_busy_lock_is_silent_at_first_then_alerts_when_it_lasts(
+        self, env, cfg, tmp_path
+    ):
+        lock = _hold_lock(cfg, tmp_path)
+        try:
+            assert wd.run_check(env, cfg) == []
+            env.t += 5 * 60
+            assert wd.run_check(env, cfg) == []
+            env.t += 6 * 60
+            with pytest.raises(wd.WatchdogStuck):
+                wd.run_check(env, cfg)
+        finally:
+            lock.close()
+
+    def test_a_successful_run_resets_the_clock(self, env, cfg, tmp_path):
+        cfg.state_path = str(tmp_path / "state.json")
+        assert wd.run_check(env, cfg) == []  # sucesso grava o marcador
+        env.t += 9 * 60
+        lock = _hold_lock(cfg, tmp_path)
+        try:
+            assert wd.run_check(env, cfg) == []  # 9 min: ainda tolerado
+            env.t += 2 * 60
+            with pytest.raises(wd.WatchdogStuck):
+                wd.run_check(env, cfg)
+        finally:
+            lock.close()
+
+    def test_main_prints_the_alert_and_exits_1(self, env, cfg, tmp_path, capsys):
+        lock = _hold_lock(cfg, tmp_path)
+        environ = {"WATCHDOG_STATE": cfg.state_path}
+        try:
+            assert wd.main([], environ=environ, env=env) == 0
+            env.t += 11 * 60
+            assert wd.main([], environ=environ, env=env) == 1
+            assert "[ALERTA] watchdog travado" in capsys.readouterr().out
+        finally:
+            lock.close()
+
+
+def _disk_full(path, state):
+    raise OSError(28, "No space left on device")
+
+
+class TestStateWriteFailure:
+    def test_disk_full_keeps_the_alert_and_adds_a_warning(
+        self, env, cfg, tmp_path, monkeypatch
+    ):
+        env.http[cfg.worker_url] = wd.HttpResult(None, None, "URLError")
+        cfg.state_path = str(tmp_path / "state.json")
+        wd.run_check(env, cfg)
+        env.t += 300
+        monkeypatch.setattr(wd, "save_state", _disk_full)
+        text = "\n".join(wd.run_check(env, cfg))
+        assert "Worker" in text and "[AVISO] não consegui gravar o estado" in text
+
+    def test_main_does_not_replace_the_alert_with_internal_error(
+        self, env, cfg, tmp_path, monkeypatch, capsys
+    ):
+        env.http[cfg.worker_url] = wd.HttpResult(None, None, "URLError")
+        environ = {"WATCHDOG_STATE": str(tmp_path / "s.json")}
+        wd.main([], environ=environ, env=env)
+        env.t += 300
+        monkeypatch.setattr(wd, "save_state", _disk_full)
+        assert wd.main([], environ=environ, env=env) == 0
+        out = capsys.readouterr().out
+        assert "Worker" in out and "erro interno" not in out
+
+    def test_tmp_file_is_removed_when_the_write_fails(self, tmp_path, monkeypatch):
+        path = str(tmp_path / "state.json")
+
+        def boom(*a, **k):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(wd.json, "dump", boom)
+        with pytest.raises(OSError):
+            wd.save_state(path, {"a": 1})
+        assert not Path(path + ".tmp").exists()
+
+
+class TestDigestAndSmallFixes:
+    def test_digest_under_a_busy_lock_is_quiet(self, env, cfg, tmp_path):
+        lock = _hold_lock(cfg, tmp_path)
+        try:
+            assert wd.run_digest(env, cfg) == []
+            assert env.http_calls == []
+        finally:
+            lock.close()
+
+    def test_digest_tolerates_a_batch_with_status_none(self, env, cfg, tmp_path):
+        cfg.state_path = str(tmp_path / "state.json")
+        env.t = datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc).timestamp()
+        recent = "2026-10-24T05:00:00+00:00"
+        odd = batch("n", "done", created=recent)
+        odd["status"] = None
+        env.http[cfg.history_url] = wd.HttpResult(
+            200, [batch("a", "done", created=recent), odd], None
+        )
+        text = "\n".join(wd.run_digest(env, cfg))
+        assert "done 1" in text
+
+    def test_docker_inspect_is_pinned_to_containers(self, env, cfg):
+        wd.check_containers(env, cfg, {})
+        inspects = [a for a in env.argv_log if a[:2] == ["docker", "inspect"]]
+        assert inspects and all(a[2:4] == ["--type", "container"] for a in inspects)
+
+    def test_forced_command_in_the_docs_uses_isolated_python(self):
+        doc = (ROOT / "docs" / "ops" / "hermes-watchdog.md").read_text(encoding="utf-8")
+        assert "/usr/bin/python3 -I /opt/pje-download/tools/pje_watchdog.py" in doc
