@@ -25,7 +25,8 @@ alerta sem checagem extra**.
 | Worker `:8006/health` | não responde; Redis inacessível (circuit breaker); sessão expirada; captcha; disco baixo; MNI do TJES fora |
 | Dashboard `:8007/healthz` | não responde; Redis inacessível; lote aguardando retomada |
 | Contêineres | `pje-redis`, `pje-dashboard`, `pje-worker` parados, inexistentes, `unhealthy` ou reiniciando (crash-loop) |
-| Filas do Redis | `jobs` ou `processing` sem mudar por mais de 15 min; itens novos no dead-letter (exceto `invalid_json`, que o teste de fila do deploy injeta a cada deploy) |
+| Filas do Redis | `jobs` não vazia sem mudar por mais de 15 min; `processing` não vazia **e** `jobs` sem mudar por mais de 15 min (o tamanho de `processing` sozinho não conta: cada item é um job diferente e um lote longo o mantém em 1); itens novos no dead-letter (exceto `invalid_json`, que o teste de fila do deploy injeta a cada deploy) |
+| O próprio watchdog | execução anterior presa (lock ocupado há mais de 10 min sem nenhuma execução bem-sucedida): `[ALERTA] watchdog travado`, saída 1 |
 | Lotes | lote novo terminando `failed` (alerta) ou `partial` (aviso) |
 | Disco da VPS | menos de 5 GB livres |
 
@@ -39,14 +40,36 @@ processing` enquanto executava um job; o watchdog nunca tratou `processing`
 como falha, então segue correto com qualquer versão do worker.
 
 Ajustes por variável de ambiente (opcionais, na VPS): `WATCHDOG_STUCK_MINUTES`,
-`WATCHDOG_REMIND_HOURS`, `WATCHDOG_STATE`.
+`WATCHDOG_REMIND_HOURS`, `WATCHDOG_STATE`, `WATCHDOG_DEADLINE_SECS` (prazo total
+do processo, padrão 90).
+
+## Prazo, lock e falha do próprio watchdog
+
+- **Prazo total de 90 s por execução** (`signal.setitimer`): estourou, imprime
+  `WATCHDOG: tempo esgotado` e sai com 1. Cada leitura HTTP também tem prazo
+  total (2x o timeout de socket) e teto de 1 MB, para um endpoint que manda um
+  byte de cada vez não prender o processo e o lock.
+- **Lock ocupado** (outra execução em andamento): sai em silêncio com 0 na
+  primeira vez. O instante da última execução bem-sucedida (ou da primeira vez
+  que o lock foi visto ocupado) fica em `~/.cache/pje-watchdog/state.json.ok`;
+  passados 10 min, imprime `[ALERTA] watchdog travado` e sai com 1.
+- **Estado não gravável** (disco cheio): o alerta já calculado é impresso com
+  `[AVISO] não consegui gravar o estado`, e o `.tmp` é removido. Enquanto durar,
+  a mensagem se repete a cada execução e eventos já anunciados podem repetir.
+- O modo `digest` usa o mesmo lock: se uma checagem está rodando, ele sai vazio
+  com 0 (aquele resumo diário se perde; aceito).
 
 ## Privacidade
 
 A saída vai para o Telegram. Nunca contém número de processo, payload de job,
 nome de parte nem credencial: mensagens de erro de lote passam por `scrub`
-(número CNJ, formato de CPF e qualquer sequência de 6 ou mais dígitos viram
-marcadores) e o dead-letter é resumido só pelo motivo. O resumo diário traz
+(o texto é normalizado antes: NFKC, sem caracteres invisíveis, todo traço Unicode
+vira `-`; número CNJ e qualquer sequência de 6 ou mais dígitos, mesmo separados
+por espaço, ponto, traço ou barra, viram marcadores; `senha=`/`token=`/`key=`/
+`cookie=`, `Bearer ...` e URLs com `usuario:senha@` também) e o dead-letter é
+resumido só pelo motivo. O wrapper nunca repassa o stderr do `ssh` ao chat (traz
+IP da VPS e caminhos); em falha, a mensagem é fixa, com o código de saída, mais
+as linhas `WATCHDOG: ...` que o próprio watchdog imprimiu. O resumo diário traz
 apenas contagens. Não coloque um modelo (LLM) para ler relatórios de lote: eles
 têm números de processo.
 
@@ -69,13 +92,15 @@ Acrescente uma linha ao `~/.ssh/authorized_keys` (uma só linha; troque o final
 pelo conteúdo do `.pub`):
 
 ```
-restrict,command="/usr/bin/python3 /opt/pje-download/tools/pje_watchdog.py" ssh-ed25519 AAAA... hermes-watchdog
+restrict,command="/usr/bin/python3 -I /opt/pje-download/tools/pje_watchdog.py" ssh-ed25519 AAAA... hermes-watchdog
 ```
 
 `restrict` desliga terminal, port forwarding, agent forwarding e X11. Com o
 `command=`, **essa chave só consegue executar o watchdog**, mesmo que o Mac mini
 ou o Hermes sejam comprometidos ou enganados. Não reutilize a chave de deploy.
-Confira o caminho do Python com `command -v python3`.
+Confira o caminho do Python com `command -v python3`. O `-I` (modo isolado)
+ignora `PYTHON*` e o diretório do script no `sys.path`. Quem já instalou a linha
+antiga deve acrescentar o `-I`.
 
 **3. Testar a chave** (no Mac mini). Se o host ainda não estiver no
 `known_hosts`, conecte uma vez com `ssh pje-vps` antes: o wrapper usa
@@ -160,7 +185,9 @@ Remova a linha `hermes-watchdog` do `authorized_keys` da VPS e rode
   vem do `_report.json` de cada lote (ver "Durações dos lotes" abaixo).
 - Quem observa mora no Mac mini; se ele ficar offline, ninguém avisa. O resumo
   diário é a única defesa e depende de você notar a ausência.
-- O watchdog usa o Docker (`docker inspect`, `docker exec`), então roda como um
+- O wrapper limita o `ssh` a 120 s (`PJE_WATCHDOG_TIMEOUT`, alarm do perl, sem
+  depender do `timeout` do GNU); estourou, sai com 1 (código 142).
+- O watchdog usa o Docker (`docker inspect --type container`, `docker exec`), então roda como um
   usuário do grupo `docker`. A chave restrita limita o que isso permite.
 - `invalid_json` no dead-letter é ignorado de propósito; um job malformado de
   verdade com esse motivo não gera aviso.

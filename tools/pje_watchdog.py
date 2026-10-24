@@ -28,10 +28,14 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import time
+import unicodedata
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
@@ -47,17 +51,47 @@ DEAD_LETTER_KEY = "kratos:pje:dead-letter"
 # deploy), então esse motivo não é sinal de problema.
 IGNORED_DEAD_LETTER_REASONS = frozenset({"invalid_json"})
 
+# Prazo total do processo (s). O cron roda a cada 5 min; sem teto, um endpoint
+# que pinga 1 byte a cada poucos segundos prenderia o python (e o flock) para
+# sempre e todos os ticks seguintes ficariam em silêncio.
+DEADLINE_SECS = 90.0
+# Teto do corpo lido de qualquer endpoint (health/histórico são pequenos).
+MAX_BODY_BYTES = 1_048_576
+# Lock ocupado por mais que isso, sem nenhuma execução bem-sucedida: travado.
+STUCK_LOCK_MINUTES = 10.0
+
 MAX_SEEN_BATCHES = 200
 MAX_DEAD_LETTER_SCAN = 100
 
-_CASE_NUMBER = re.compile(r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}")
-_CPF_SHAPE = re.compile(r"\d{3}\.\d{3}\.\d{3}-\d{2}")
-_LONG_DIGITS = re.compile(r"\d{6,}")
+# scrub: tudo roda DEPOIS de normalizar (NFKC, sem caracteres invisíveis, todo
+# traço Unicode virando "-"), então os padrões só precisam conhecer o ASCII.
+_DASHES = re.compile("[\u2010-\u2015\u2212\ufe58\ufe63\uff0d]")
+_CASE_NUMBER = re.compile(
+    r"\d{7}\s*-\s*\d{2}\s*\.\s*\d{4}\s*\.\s*\d\s*\.\s*\d{2}\s*\.\s*\d{4}"
+)
+# 6+ dígitos separados por espaço, ponto, traço ou barra (CPF/CNPJ/CNJ em
+# qualquer formatação, telefone, id longo).
+_DIGIT_RUN = re.compile(r"\d(?:[\s./\-]*\d){5,}")
+_URL_USERINFO = re.compile(r"\S+://\S*@\S+")
+_SECRET_PAIR = re.compile(
+    r"(?i)(\w*(?:pass|senha|token|secret|key|cookie|auth)\w*)\s*[=:]\s*\S+"
+)
+_BEARER = re.compile(r"(?i)\b(bearer|basic)\s+\S+")
+_SCRUB_MAX_INPUT = 4000
 _REASON = re.compile(r"^[a-z_]{1,40}$")
 
 
 class WatchdogError(Exception):
     """Falha da própria checagem (não do sistema observado)."""
+
+
+class WatchdogStuck(WatchdogError):
+    """O lock está ocupado há tempo demais: a execução anterior travou."""
+
+
+class _DeadlineExceeded(BaseException):
+    """Prazo total esgotado. BaseException para nenhum ``except Exception``
+    das checagens engolir o corte."""
 
 
 class HttpResult(NamedTuple):
@@ -95,6 +129,8 @@ class Config:
     stuck_minutes: float = 15.0
     disk_warn_mb: float = 5120.0
     digest_hours: float = 24.0
+    deadline_secs: float = DEADLINE_SECS
+    stuck_lock_minutes: float = STUCK_LOCK_MINUTES
     state_path: str = field(
         default_factory=lambda: os.path.expanduser("~/.cache/pje-watchdog/state.json")
     )
@@ -116,6 +152,7 @@ class Config:
         for var, attr in (
             ("WATCHDOG_REMIND_HOURS", "remind_hours"),
             ("WATCHDOG_STUCK_MINUTES", "stuck_minutes"),
+            ("WATCHDOG_DEADLINE_SECS", "deadline_secs"),
         ):
             raw = environ.get(var)
             if raw:
@@ -140,9 +177,19 @@ class SystemEnv:
 
     def http_get_json(self, url, headers=None, timeout=5.0) -> HttpResult:
         req = urllib.request.Request(url, headers=headers or {})
+        # `timeout` limita cada operação de socket, não o total: o prazo total
+        # (e o teto de tamanho) valem para a leitura inteira do corpo.
+        deadline = time.monotonic() + 2 * timeout
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-                return HttpResult(resp.status, _parse_json(resp.read()), None)
+                try:
+                    raw = _read_capped(resp, MAX_BODY_BYTES, deadline)
+                except _BodyTooLarge:
+                    return HttpResult(resp.status, None, "BodyTooLarge")
+                try:
+                    return HttpResult(resp.status, _parse_json(raw), None)
+                except ValueError:  # 200 com HTML/lixo: resposta ruim, não queda
+                    return HttpResult(resp.status, None, None)
         except urllib.error.HTTPError as exc:
             try:
                 body = _parse_json(exc.read())
@@ -188,6 +235,31 @@ class SystemEnv:
         return shutil.disk_usage(path).free / 1_048_576
 
 
+class _BodyTooLarge(Exception):
+    pass
+
+
+def _read_capped(resp, limit: int, deadline: float) -> bytes:
+    """Lê o corpo em pedaços, com teto de bytes e prazo total.
+
+    ``resp.read()`` sem argumento não tem teto nem prazo: um servidor que manda
+    1 byte a cada poucos segundos mantém cada ``recv`` dentro do timeout e a
+    leitura nunca termina.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        if time.monotonic() > deadline:
+            raise TimeoutError("prazo total da leitura")
+        chunk = resp.read1(65536)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > limit:
+            raise _BodyTooLarge
+        chunks.append(chunk)
+
+
 def _parse_json(raw: bytes | str):
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", errors="replace")
@@ -205,9 +277,16 @@ def scrub(text, limit: int = 120) -> str:
     """
     if not text:
         return ""
-    out = _CASE_NUMBER.sub("[processo]", str(text))
-    out = _CPF_SHAPE.sub("[cpf]", out)
-    out = _LONG_DIGITS.sub("[#]", out)
+    out = unicodedata.normalize("NFKC", str(text)[:_SCRUB_MAX_INPUT])
+    # Cf = invisíveis (ZWSP, ZWJ, BOM...): usados, sem querer ou de propósito,
+    # para partir um número no meio.
+    out = "".join(ch for ch in out if unicodedata.category(ch) != "Cf")
+    out = _DASHES.sub("-", out)
+    out = _URL_USERINFO.sub("[url]", out)
+    out = _BEARER.sub(r"\1 [redigido]", out)
+    out = _SECRET_PAIR.sub(r"\1=[redigido]", out)
+    out = _CASE_NUMBER.sub("[processo]", out)
+    out = _DIGIT_RUN.sub("[#]", out)
     out = " ".join(out.split())
     return out[:limit]
 
@@ -365,7 +444,17 @@ def check_containers(env, cfg: Config, state: dict) -> list[Finding]:
     findings: list[Finding] = []
     known = state.setdefault("containers", {})
     for name in cfg.containers:
-        res = env.run(["docker", "inspect", "--format", _INSPECT_FORMAT, name])
+        res = env.run(
+            [
+                "docker",
+                "inspect",
+                "--type",
+                "container",
+                "--format",
+                _INSPECT_FORMAT,
+                name,
+            ]
+        )
         parts = res.out.split()
         if res.code != 0 or len(parts) != 4:
             findings.append(
@@ -426,18 +515,36 @@ def check_queue(env, cfg: Config, state: dict) -> list[Finding]:
     q = state.setdefault("queue", {})
     findings: list[Finding] = []
 
-    for name, key in (("jobs", JOBS_KEY), ("processing", PROCESSING_KEY)):
-        n = _llen(env, cfg, dotenv, key)
-        q[name], idle = _unchanged_for(q.get(name), n, now)
-        if n > 0 and idle >= cfg.stuck_minutes * 60:
-            findings.append(
-                Finding(
-                    f"queue:{name}-stuck",
-                    AVISO,
-                    f"Fila '{name}' com {n} item(ns) sem mudar há {fmt_duration(idle)}",
-                    confirm=1,
-                )
+    limit = cfg.stuck_minutes * 60
+    n_jobs = _llen(env, cfg, dotenv, JOBS_KEY)
+    q["jobs"], idle_jobs = _unchanged_for(q.get("jobs"), n_jobs, now)
+    n_proc = _llen(env, cfg, dotenv, PROCESSING_KEY)
+    q["processing"], idle_proc = _unchanged_for(q.get("processing"), n_proc, now)
+
+    if n_jobs > 0 and idle_jobs >= limit:
+        findings.append(
+            Finding(
+                "queue:jobs-stuck",
+                AVISO,
+                f"Fila 'jobs' com {n_jobs} item(ns) sem mudar há "
+                f"{fmt_duration(idle_jobs)}",
+                confirm=1,
             )
+        )
+    # `processing` guarda 1 item por job em andamento e cada item é um job
+    # DIFERENTE: um tamanho constante durante um lote longo é normal. Só vale
+    # como travamento quando `jobs` também parou (nada sendo consumido).
+    idle_both = min(idle_proc, idle_jobs)
+    if n_proc > 0 and idle_both >= limit:
+        findings.append(
+            Finding(
+                "queue:processing-stuck",
+                AVISO,
+                f"Fila 'processing' com {n_proc} item(ns) e 'jobs' parada, sem "
+                f"mudar há {fmt_duration(idle_both)}",
+                confirm=1,
+            )
+        )
 
     dead = _llen(env, cfg, dotenv, DEAD_LETTER_KEY)
     baseline = q.get("dead_len")
@@ -448,7 +555,11 @@ def check_queue(env, cfg: Config, state: dict) -> list[Finding]:
         fresh = min(dead - baseline, MAX_DEAD_LETTER_SCAN)
         raw = _redis(env, cfg, dotenv, "LRANGE", DEAD_LETTER_KEY, "0", str(fresh - 1))
         reasons: dict[str, int] = {}
-        for line in raw.splitlines():
+        # split("\n"), não splitlines(): este quebra também em U+2028/U+0085,
+        # que o JSON do dead-letter (ensure_ascii=False) pode conter.
+        for line in raw.split("\n"):
+            if not line.strip():
+                continue
             try:
                 reason = json.loads(line).get("reason", "")
             except (ValueError, AttributeError):
@@ -596,10 +707,18 @@ def save_state(path: str, state: dict) -> None:
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, mode=0o700, exist_ok=True)
     tmp = f"{path}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(state, fh, indent=1, sort_keys=True)
-    os.replace(tmp, path)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=1, sort_keys=True)
+        os.replace(tmp, path)
+    except BaseException:
+        # Disco cheio deixaria o .tmp para trás a cada tick.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def collect(env, cfg: Config, state: dict) -> tuple[list[Finding], tuple[str, ...]]:
@@ -633,7 +752,35 @@ def _header(env) -> str:
     return f"PJe/TJES (VPS) · {fmt_ts(env.now())}"
 
 
-def run_check(env, cfg: Config) -> list[str]:
+def _marker_path(cfg: Config) -> str:
+    return cfg.state_path + ".ok"
+
+
+def _write_marker(env, cfg: Config) -> None:
+    """Grava o instante da última execução bem-sucedida (ou da 1ª vez em que o
+    lock foi visto ocupado). Só quem detém o lock escreve estado; o marcador é
+    um arquivo à parte, de uma linha, que quem NÃO detém o lock consegue ler."""
+    try:
+        tmp = _marker_path(cfg) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(f"{env.now()}\n")
+        os.replace(tmp, _marker_path(cfg))
+    except OSError:
+        pass  # sem marcador o pior caso é não detectar um lock preso
+
+
+def _read_marker(cfg: Config) -> float | None:
+    try:
+        with open(_marker_path(cfg), encoding="utf-8") as fh:
+            return float(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+@contextmanager
+def _exclusive_lock(cfg: Config):
+    """Lock não bloqueante do estado. Entrega True se obteve, False se outra
+    execução o segura."""
     os.makedirs(os.path.dirname(cfg.state_path) or ".", mode=0o700, exist_ok=True)
     lock_fd = os.open(cfg.state_path + ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
     lock = os.fdopen(lock_fd, "w")  # vive até o fim da execução
@@ -641,18 +788,56 @@ def run_check(env, cfg: Config) -> list[str]:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            return []  # outra execução em andamento
-        state = load_state(cfg.state_path)
-        findings, failed = collect(env, cfg, state)
-        lines = reconcile(state, findings, env.now(), cfg, skip_prefixes=failed)
-        save_state(cfg.state_path, state)
-        return [_header(env), *lines] if lines else []
+            yield False
+            return
+        yield True
     finally:
         lock.close()
 
 
+def _check_stuck_lock(env, cfg: Config) -> None:
+    """Lock ocupado: silencioso enquanto a execução anterior é recente; se o
+    último sucesso (ou a 1ª vez que vimos o lock ocupado) passou do limite, a
+    execução anterior travou e isso vira alerta."""
+    now = env.now()
+    since = _read_marker(cfg)
+    if since is None:
+        _write_marker(env, cfg)
+        return
+    if now - since > cfg.stuck_lock_minutes * 60:
+        raise WatchdogStuck(f"lock ocupado há {fmt_duration(now - since)}")
+
+
+def run_check(env, cfg: Config) -> list[str]:
+    with _exclusive_lock(cfg) as got:
+        if not got:
+            _check_stuck_lock(env, cfg)
+            return []  # outra execução em andamento
+        state = load_state(cfg.state_path)
+        findings, failed = collect(env, cfg, state)
+        lines = reconcile(state, findings, env.now(), cfg, skip_prefixes=failed)
+        try:
+            save_state(cfg.state_path, state)
+        except OSError:
+            # Não trocar o alerta já calculado por "erro interno".
+            lines.append(f"[{AVISO}] não consegui gravar o estado")
+        _write_marker(env, cfg)
+        return [_header(env), *lines] if lines else []
+
+
 def run_digest(env, cfg: Config) -> list[str]:
-    """Resumo diário. Não altera o estado do modo ``check``."""
+    """Resumo diário. Não altera o estado do modo ``check``.
+
+    Usa o mesmo lock do ``check`` (não bloqueante): se outra execução o segura,
+    sai vazio e rápido (exit 0), em vez de empilhar chamadas de rede e docker
+    em cima de uma execução em andamento. Perder um resumo é aceitável."""
+    with _exclusive_lock(cfg) as got:
+        if not got:
+            return []
+        return _digest_lines(env, cfg)
+
+
+def _digest_lines(env, cfg: Config) -> list[str]:
     state = load_state(cfg.state_path)
     # Cópia: as checagens atualizam linhas de base, que o digest não pode consumir.
     scratch = json.loads(json.dumps(state))
@@ -694,7 +879,8 @@ def run_digest(env, cfg: Config) -> list[str]:
             )
             if created is None or created < since:
                 continue
-            counts[item.get("status", "?")] = counts.get(item.get("status", "?"), 0) + 1
+            status = str(item.get("status", "?"))  # None misturado a str quebra sorted
+            counts[status] = counts.get(status, 0) + 1
             processos += int(item.get("processos") or 0)
             docs += int(item.get("total_docs") or 0)
         by_status = ", ".join(f"{s} {n}" for s, n in sorted(counts.items())) or "nenhum"
@@ -748,14 +934,41 @@ def main(argv=None, environ=None, env=None) -> int:
     )
     cfg = Config.from_environ(environ)
     env = env or SystemEnv(cfg)
+    old_handler = _install_deadline(cfg.deadline_secs)
     try:
         lines = run_digest(env, cfg) if mode == "digest" else run_check(env, cfg)
+    except _DeadlineExceeded:
+        print("WATCHDOG: tempo esgotado")
+        return 1
+    except WatchdogStuck:
+        print("[ALERTA] watchdog travado: a execução anterior não terminou")
+        return 1
     except Exception as exc:
         print(f"WATCHDOG: erro interno ({type(exc).__name__})")
         return 1
+    finally:
+        _clear_deadline(old_handler)
     if lines:
         print("\n".join(lines))
     return 0
+
+
+def _install_deadline(seconds: float):
+    """Prazo total do processo. Vale também para uma leitura de rede que fica
+    pingando bytes: o handler levanta uma BaseException no ponto bloqueado."""
+
+    def _on_alarm(signum, frame):
+        raise _DeadlineExceeded
+
+    old = signal.signal(signal.SIGALRM, _on_alarm)
+    if seconds > 0:
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+    return old
+
+
+def _clear_deadline(old_handler) -> None:
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    signal.signal(signal.SIGALRM, old_handler)
 
 
 if __name__ == "__main__":
