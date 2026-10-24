@@ -33,6 +33,12 @@ class TestValidDuration:
     def test_rejects_everything_else(self, value):
         assert valid_duration(value) is None
 
+    @pytest.mark.parametrize("sign,exp", [(1, 309), (1, 400), (-1, 400)])
+    def test_huge_int_is_rejected_not_an_overflow_error(self, sign, exp):
+        """json.loads aceita inteiros enormes; math.isfinite(int) levanta OverflowError."""
+        value = sign * 10**exp
+        assert valid_duration(value) is None
+
 
 # ───────────────────────── duration_stats ─────────────────────────
 
@@ -78,6 +84,16 @@ class TestDurationStats:
     def test_ignores_invalid_entries(self):
         s = duration_stats([2.0, None, True, "x", math.nan, math.inf, -1, 4.0])
         assert s["count"] == 2 and s["max"] == 4.0 and s["sum"] == 6.0
+
+    def test_sum_that_would_overflow_stays_finite(self):
+        """1e308 + 1e308 = inf, que json.dumps grava como Infinity (invalido para jq)."""
+        s = duration_stats([1e308, 1e308])
+        assert all(math.isfinite(s[k]) for k in ("p50", "p95", "max", "sum"))
+        json.loads(json.dumps(s), parse_constant=pytest.fail)
+
+    def test_huge_int_entry_is_ignored(self):
+        s = duration_stats([10**400, 3.0])
+        assert s["count"] == 1 and s["sum"] == 3.0
 
     def test_results_are_rounded_to_two_decimals(self):
         s = duration_stats([0.123456, 0.2])
@@ -232,6 +248,12 @@ class TestDashboardStoresTheDuration:
     def test_invalid_duration_is_dropped_not_stored(self, tmp_path, bad):
         state, job = _state_and_job(tmp_path)
         state._apply_result(job, _result(durationS=bad))
+        assert job.progress["processos"]["p1"]["duracao_s"] is None
+
+    @pytest.mark.parametrize("exp", [309, 400])
+    def test_huge_int_duration_is_dropped_and_does_not_raise(self, tmp_path, exp):
+        state, job = _state_and_job(tmp_path)
+        state._apply_result(job, _result(durationS=10**exp))
         assert job.progress["processos"]["p1"]["duracao_s"] is None
 
     def test_failed_result_keeps_its_duration_too(self, tmp_path):
