@@ -129,6 +129,12 @@ SESSION_STATE_PATH = Path(os.getenv("SESSION_STATE_PATH", "/data/pje-session.jso
 DOWNLOAD_BASE_DIR = Path(os.getenv("DOWNLOAD_BASE_DIR", "/data/downloads"))
 AUDIT_LOG_DIR = Path(os.getenv("AUDIT_LOG_DIR", "/data/audit"))
 AUDIT_LOG_RETENTION_DAYS = int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "120"))
+# How often the dashboard re-runs `audit.rotate_logs` while it stays up (the startup
+# run alone never fires on a dashboard that lives for months). Floor of 60 s: a tiny
+# value would only make the loop contend for the audit lock and the disk.
+AUDIT_ROTATE_INTERVAL_SECS = max(
+    60, int(os.getenv("AUDIT_ROTATE_INTERVAL_SECS", "86400"))
+)
 SESSION_TIMEOUT_MINUTES = int(os.getenv("SESSION_TIMEOUT_MINUTES", "60"))
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 MAX_DOCS_PER_SESSION = int(os.getenv("MAX_DOCS_PER_SESSION", "50"))
