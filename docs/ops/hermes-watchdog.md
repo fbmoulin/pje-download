@@ -128,6 +128,26 @@ Em 5 a 10 minutos deve chegar `[ALERTA] Contêiner pje-worker está exited` e
 (`docker compose --profile worker up -d worker`) e confirme o `[NORMALIZOU]`.
 Para a queda da VPS, basta o `ssh` falhar: o wrapper alerta sozinho.
 
+## Durações dos lotes
+
+Cada lote grava, no volume de dados, `/data/downloads/<batch_id>/_report.json`
+com `duracao_s` por processo (medido pelo worker) e um bloco `timing`. Na VPS:
+
+```bash
+cd /opt/pje-download
+docker compose exec -T dashboard ls /data/downloads            # ids dos lotes
+docker compose exec -T dashboard cat /data/downloads/<batch_id>/_report.json \
+  | jq '.timing, [.processos[].duracao_s]'
+```
+
+`timing` traz `wall_s` (relógio do lote), `sum_s` (soma do trabalho), `p50_s`,
+`p95_s`, `max_s`, `with_duration` e `seconds_per_processo`. Leia assim:
+`wall_s` inclui a espera ociosa de um timeout e o tempo parado de um lote
+retomado, então `seconds_per_processo` **não** é tempo de trabalho: use `sum_s`.
+Com menos de 20 processos, `p95` é igual ao máximo. Um job reentregue depois de
+um deploy mede só a última tentativa. Lotes anteriores a esta versão não têm
+`timing` nem `duracao_s`.
+
 ## Revogar
 
 Remova a linha `hermes-watchdog` do `authorized_keys` da VPS e rode
@@ -135,9 +155,8 @@ Remova a linha `hermes-watchdog` do `authorized_keys` da VPS e rode
 
 ## Limites
 
-- Sem séries históricas nem painéis: é alerta, não observabilidade. Para
-  durações de job e de lote, o `_report.json` de cada lote tem `duracao_s` por
-  processo.
+- Sem séries históricas nem painéis: é alerta, não observabilidade. A duração
+  vem do `_report.json` de cada lote (ver "Durações dos lotes" abaixo).
 - Quem observa mora no Mac mini; se ele ficar offline, ninguém avisa. O resumo
   diário é a única defesa e depende de você notar a ausência.
 - O watchdog usa o Docker (`docker inspect`, `docker exec`), então roda como um

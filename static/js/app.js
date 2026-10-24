@@ -79,11 +79,12 @@ function fmtDate(iso) {
 }
 
 function fmtDuration(secs) {
-  if (typeof secs !== 'number' || secs <= 0) return '\u2014';
-  if (secs < 60) return secs.toFixed(1) + 's';
-  const m = Math.floor(secs / 60);
-  const s = Math.round(secs % 60);
-  return `${m}m ${s}s`;
+  if (typeof secs !== 'number' || !Number.isFinite(secs) || secs <= 0) return '\u2014';
+  // 59.95 s ou mais arredonda para 60 s: já é minuto, senão sairia "60.0s".
+  if (secs < 59.95) return secs.toFixed(1) + 's';
+  // Arredonda o total antes de dividir: 119,6 s é "2m 0s", não "1m 60s".
+  const total = Math.round(secs);
+  return `${Math.floor(total / 60)}m ${total % 60}s`;
 }
 
 function isAntigo(num) {

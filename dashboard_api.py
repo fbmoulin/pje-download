@@ -38,7 +38,7 @@ import redis.asyncio as redis
 import structlog
 import metrics
 from async_retry import AsyncRetry
-from file_utils import total_bytes
+from file_utils import duration_stats, total_bytes, valid_duration
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.dashboard-api")
 
@@ -184,6 +184,49 @@ async def _rpush_with_retry(client, key: str, *values: str):
         logger=log,
     )
     return await retry.run(lambda: client.rpush(key, *values), key=key)
+
+
+def _parse_iso(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def batch_timing(job: BatchJob) -> dict:
+    """Resumo de tempo do lote para o ``_report.json`` (``jq '.timing'``).
+
+    ``wall_s`` é ``finished_at - started_at``: inclui a espera ociosa de um
+    timeout e, em lote retomado, o tempo em que a dashboard ficou parada; por
+    isso ``seconds_per_processo`` (wall / processos) não é o tempo de trabalho.
+    O tempo de trabalho está em ``sum_s`` (soma das durações medidas pelo worker).
+    Timestamps ausentes, inválidos ou invertidos dão ``wall_s`` nulo, nunca erro.
+    """
+    procs = job.progress.get("processos", {}) if isinstance(job.progress, dict) else {}
+    stats = duration_stats(
+        p.get("duracao_s") for p in procs.values() if isinstance(p, dict)
+    )
+    wall = None
+    started, finished = _parse_iso(job.started_at), _parse_iso(job.finished_at)
+    if started is not None and finished is not None:
+        try:
+            delta = (finished - started).total_seconds()
+        except TypeError:  # um naive e um aware
+            delta = -1.0
+        wall = round(delta, 2) if delta >= 0 else None
+    n = len(job.processos)
+    return {
+        "wall_s": wall,
+        "processos": n,
+        "with_duration": stats["count"],
+        "sum_s": stats["sum"],
+        "p50_s": stats["p50"],
+        "p95_s": stats["p95"],
+        "max_s": stats["max"],
+        "seconds_per_processo": round(wall / n, 2) if wall is not None and n else None,
+    }
 
 
 class DashboardState:
@@ -552,7 +595,9 @@ class DashboardState:
             "docs_baixados": docs_baixados,
             "tamanho_bytes": tamanho_bytes,
             "erro": error if status in {"failed", "partial"} else None,
-            "duracao_s": None,
+            # Medido pelo worker (consume_queue). Ausente em worker antigo e em
+            # resultados que não passam por download_process (ex.: redelivery_exhausted).
+            "duracao_s": valid_duration(result.get("durationS")),
         }
 
         done = sum(1 for proc in processos.values() if proc.get("status") == "done")
@@ -900,6 +945,8 @@ class DashboardState:
         else:
             job.status = "done"
 
+        # Sempre sobrescreve: _load_history carrega o relatório inteiro como progresso.
+        job.progress["timing"] = batch_timing(job)
         self._persist_progress(job)
         self._persist_report(job)
         self._clear_active_batch(job.id)
@@ -971,6 +1018,7 @@ class DashboardState:
             job.finished_at = datetime.now(UTC).isoformat()
             if not job.progress:
                 job.progress = self._build_initial_progress(job)
+            job.progress["timing"] = batch_timing(job)
             self._persist_progress(job)
             self._persist_report(job)
             self._clear_active_batch(job.id)
