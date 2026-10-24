@@ -51,6 +51,7 @@ from config import (
     APP_ENV,
     AUDIT_LOG_DIR,
     AUDIT_LOG_RETENTION_DAYS,
+    AUDIT_ROTATE_INTERVAL_SECS,
     AUDIT_SYNC_AUTO_MIGRATE,
     AUDIT_SYNC_BATCH_SIZE,
     AUDIT_SYNC_CATCHUP_DAYS,
@@ -77,6 +78,7 @@ import audit_sync
 
 AUDIT_SYNCER_KEY: web.AppKey = web.AppKey("audit_syncer", audit_sync.AuditSyncer)
 AUDIT_SYNC_TASK_KEY: web.AppKey = web.AppKey("audit_sync_task", asyncio.Task)
+AUDIT_ROTATE_TASK_KEY: web.AppKey = web.AppKey("audit_rotate_task", asyncio.Task)
 APP_CTX_KEY: web.AppKey = web.AppKey("_ctx", "AppContext")
 
 _MAX_DOWNLOAD_PAYLOAD_BYTES = 10 * 1024 * 1024  # hard cap for POST /api/download (H5)
@@ -1526,6 +1528,14 @@ async def handle_index(request: web.Request) -> web.Response:
 
 async def _on_cleanup(app: web.Application) -> None:
     """Cancela batch em execução ao encerrar o servidor. Saves progress first."""
+    rotate_task = app.get(AUDIT_ROTATE_TASK_KEY) if hasattr(app, "get") else None
+    if isinstance(rotate_task, asyncio.Task):
+        rotate_task.cancel()
+        try:
+            await rotate_task
+        except asyncio.CancelledError:
+            pass
+
     syncer = app.get(AUDIT_SYNCER_KEY) if hasattr(app, "get") else None
     sync_task = app.get(AUDIT_SYNC_TASK_KEY) if hasattr(app, "get") else None
     if isinstance(syncer, audit_sync.AuditSyncer) and isinstance(
@@ -1584,10 +1594,45 @@ async def _on_cleanup(app: web.Application) -> None:
         await state.close()
 
 
+async def _audit_rotation_loop(interval_secs: float) -> None:
+    """Re-run ``audit.rotate_logs`` every ``interval_secs`` while the dashboard is up.
+
+    Sleeps first: ``create_app`` already rotated at boot. Rotation is synchronous disk
+    I/O, so it runs in a thread. A failure is logged by type only (no path, no content)
+    and the loop goes on to the next interval. Stops only by cancellation.
+    """
+    while True:
+        await asyncio.sleep(interval_secs)
+        try:
+            from audit import rotate_logs
+
+            deleted = await asyncio.to_thread(
+                rotate_logs, max_days=AUDIT_LOG_RETENTION_DAYS
+            )
+            if deleted:
+                log.info(
+                    "dashboard.audit.rotation_complete",
+                    deleted=deleted,
+                    retention_days=AUDIT_LOG_RETENTION_DAYS,
+                    periodic=True,
+                )
+        except Exception as exc:
+            log.warning(
+                "dashboard.audit.rotation_failed",
+                error_type=type(exc).__name__,
+                periodic=True,
+            )
+
+
 async def _on_startup(app: web.Application) -> None:
     ctx: AppContext | None = app.get(APP_CTX_KEY) if hasattr(app, "get") else None
     if ctx is not None:
         await ctx.state.resume_active_batch()
+
+    # Before the syncer's early returns: rotation does not depend on the Postgres sink.
+    app[AUDIT_ROTATE_TASK_KEY] = asyncio.create_task(
+        _audit_rotation_loop(AUDIT_ROTATE_INTERVAL_SECS)
+    )
 
     syncer = app.get(AUDIT_SYNCER_KEY) if hasattr(app, "get") else None
     if not isinstance(syncer, audit_sync.AuditSyncer):
