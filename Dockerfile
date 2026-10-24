@@ -79,6 +79,13 @@ RUN apt-get update && \
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN pip install --no-cache-dir -r requirements.txt && \
     playwright install chromium
+# System libraries Chromium links against (libXcomposite, libxkbcommon, libcups, ...).
+# The apt list above was hand-kept and incomplete: on the production VPS
+# `chromium.launch()` died with "libXcomposite.so.1: cannot open shared object file".
+# `install-deps` installs Playwright's own list for THIS Playwright version and THIS
+# distro, so it also follows a Playwright bump. It runs apt-get update itself.
+RUN playwright install-deps chromium && \
+    rm -rf /var/lib/apt/lists/*
 COPY --chown=appuser:appuser . .
 RUN mkdir -p /data/downloads && chown -R appuser:appuser /data
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

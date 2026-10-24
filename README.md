@@ -534,6 +534,8 @@ curl http://localhost:8007/api/status   # status operacional + worker resumido
 curl http://localhost:8007/metrics      # metricas Prometheus
 ```
 
+Alertas em producao: o watchdog (`tools/pje_watchdog.py`) roda na VPS e o Hermes (Mac mini) entrega no Telegram, depois que o dono instala a chave SSH e os jobs. Instalacao e checagens em [`docs/ops/hermes-watchdog.md`](docs/ops/hermes-watchdog.md). O stack Prometheus/Grafana em `ops/monitoring/` esta obsoleto.
+
 ### Producao (VPS)
 
 > **Status:** ✅ **Em produção desde 2026-07-18** — Hostinger VPS no datacenter **São Paulo** (KVM 2). Deploy contínuo via GitHub Actions (`deploy.yml`).

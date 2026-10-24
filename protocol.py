@@ -55,6 +55,9 @@ class ResultMessage(TypedDict):
     errorMessage: str | None
     downloadedAt: str  # ISO 8601 datetime
     batchId: NotRequired[str | None]
+    # Segundos que o worker levou no job (consume_queue). Opcional: workers antigos
+    # não enviam e dashboards antigos ignoram a chave.
+    durationS: NotRequired[float]
 
 
 class ProgressMessage(TypedDict):

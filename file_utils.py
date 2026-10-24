@@ -4,7 +4,7 @@ Previously duplicated across worker.py, dashboard_api.py, and
 batch_downloader.py. Centralised here so a schema change (e.g., renaming
 ``tamanhoBytes``, adding a new dedupe key) ripples through one place.
 
-Two helpers live here:
+Helpers that live here:
 
 - :func:`total_bytes` — sum the ``tamanhoBytes`` field defensively. Tolerates
   missing keys, ``None``, and string values (the MNI SOAP response sometimes
@@ -13,12 +13,18 @@ Two helpers live here:
   Prefers the ``checksum`` field as dedupe key; falls back to
   ``nome|tamanhoBytes|fonte`` for items that don't have a checksum.
 
+- :func:`valid_duration` / :func:`duration_stats` — validate a duration in seconds
+  and summarise a list of them (count, p50, p95, max, sum) for the batch
+  ``timing`` block of ``_report.json``.
+
 Zero module-level side effects — safe to import anywhere, including at test
 collection time.
 """
 
 from __future__ import annotations
 
+import math
+import sys
 from typing import Iterable
 
 
@@ -86,6 +92,51 @@ def total_bytes(files: Iterable[dict]) -> int:
             # Defensive: a string like "" or a malformed source.
             continue
     return total
+
+
+def valid_duration(value: object) -> float | None:
+    """Return ``value`` as a float when it is a usable duration in seconds.
+
+    Usable means a real number (not ``bool``, which is an ``int`` subclass),
+    finite (Python's ``json`` happily parses ``NaN``/``Infinity``) and not
+    negative. Anything else is ``None`` so a bad payload never poisons the
+    statistics or the UI.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:  # json parses ints like 10**400; they do not fit a float
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def duration_stats(values: Iterable[object]) -> dict:
+    """Summarise durations: ``count``, ``p50``, ``p95``, ``max`` and ``sum`` (seconds).
+
+    Percentiles use the nearest-rank method with integer arithmetic
+    (``k = ceil(q * n / 100)``) so there is no floating-point off-by-one. With
+    fewer than 20 samples ``p95`` is simply the maximum. Invalid entries are
+    ignored; an empty input gives ``count`` 0 and ``None`` percentiles.
+    """
+    clean = sorted(d for d in (valid_duration(v) for v in values) if d is not None)
+    n = len(clean)
+    if n == 0:
+        return {"count": 0, "p50": None, "p95": None, "max": None, "sum": 0.0}
+
+    def rank(q: int) -> float:
+        return clean[(q * n + 99) // 100 - 1]
+
+    return {
+        "count": n,
+        "p50": round(rank(50), 2),
+        "p95": round(rank(95), 2),
+        "max": round(clean[-1], 2),
+        # Clamp: finite values can still sum to inf, which json.dumps writes as Infinity.
+        "sum": round(min(sum(clean), sys.float_info.max), 2),
+    }
 
 
 def merge_file_lists(*groups: list[dict]) -> list[dict]:

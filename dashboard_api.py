@@ -38,7 +38,7 @@ import redis.asyncio as redis
 import structlog
 import metrics
 from async_retry import AsyncRetry
-from file_utils import total_bytes
+from file_utils import duration_stats, total_bytes, valid_duration
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.dashboard-api")
 
@@ -51,6 +51,7 @@ from config import (
     APP_ENV,
     AUDIT_LOG_DIR,
     AUDIT_LOG_RETENTION_DAYS,
+    AUDIT_ROTATE_INTERVAL_SECS,
     AUDIT_SYNC_AUTO_MIGRATE,
     AUDIT_SYNC_BATCH_SIZE,
     AUDIT_SYNC_CATCHUP_DAYS,
@@ -77,6 +78,7 @@ import audit_sync
 
 AUDIT_SYNCER_KEY: web.AppKey = web.AppKey("audit_syncer", audit_sync.AuditSyncer)
 AUDIT_SYNC_TASK_KEY: web.AppKey = web.AppKey("audit_sync_task", asyncio.Task)
+AUDIT_ROTATE_TASK_KEY: web.AppKey = web.AppKey("audit_rotate_task", asyncio.Task)
 APP_CTX_KEY: web.AppKey = web.AppKey("_ctx", "AppContext")
 
 _MAX_DOWNLOAD_PAYLOAD_BYTES = 10 * 1024 * 1024  # hard cap for POST /api/download (H5)
@@ -124,6 +126,8 @@ class BatchPollState:
 
 MAX_BATCH_SIZE = 500  # máximo de processos por batch
 MAX_BATCH_HISTORY = 100  # max completed batches kept in memory
+_INVALID_MAX_ITEMS = 100  # B1: rejected lines echoed back in the /api/download reply
+_INVALID_ITEM_MAX_CHARS = 64  # B1: each echoed line is cut to this length
 # RESULT_WAIT_TIMEOUT_SECS moved to config.py (Sprint 2 Q4 — env-configurable)
 _RPUSH_MAX_ATTEMPTS = 3  # audit P1: transient Redis failure should not kill a batch
 # Longest pause between reply-queue BLPOP attempts while Redis is erroring.
@@ -184,6 +188,49 @@ async def _rpush_with_retry(client, key: str, *values: str):
         logger=log,
     )
     return await retry.run(lambda: client.rpush(key, *values), key=key)
+
+
+def _parse_iso(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def batch_timing(job: BatchJob) -> dict:
+    """Resumo de tempo do lote para o ``_report.json`` (``jq '.timing'``).
+
+    ``wall_s`` é ``finished_at - started_at``: inclui a espera ociosa de um
+    timeout e, em lote retomado, o tempo em que a dashboard ficou parada; por
+    isso ``seconds_per_processo`` (wall / processos) não é o tempo de trabalho.
+    O tempo de trabalho está em ``sum_s`` (soma das durações medidas pelo worker).
+    Timestamps ausentes, inválidos ou invertidos dão ``wall_s`` nulo, nunca erro.
+    """
+    procs = job.progress.get("processos", {}) if isinstance(job.progress, dict) else {}
+    stats = duration_stats(
+        p.get("duracao_s") for p in procs.values() if isinstance(p, dict)
+    )
+    wall = None
+    started, finished = _parse_iso(job.started_at), _parse_iso(job.finished_at)
+    if started is not None and finished is not None:
+        try:
+            delta = (finished - started).total_seconds()
+        except TypeError:  # um naive e um aware
+            delta = -1.0
+        wall = round(delta, 2) if delta >= 0 else None
+    n = len(job.processos)
+    return {
+        "wall_s": wall,
+        "processos": n,
+        "with_duration": stats["count"],
+        "sum_s": stats["sum"],
+        "p50_s": stats["p50"],
+        "p95_s": stats["p95"],
+        "max_s": stats["max"],
+        "seconds_per_processo": round(wall / n, 2) if wall is not None and n else None,
+    }
 
 
 class DashboardState:
@@ -552,7 +599,9 @@ class DashboardState:
             "docs_baixados": docs_baixados,
             "tamanho_bytes": tamanho_bytes,
             "erro": error if status in {"failed", "partial"} else None,
-            "duracao_s": None,
+            # Medido pelo worker (consume_queue). Ausente em worker antigo e em
+            # resultados que não passam por download_process (ex.: redelivery_exhausted).
+            "duracao_s": valid_duration(result.get("durationS")),
         }
 
         done = sum(1 for proc in processos.values() if proc.get("status") == "done")
@@ -900,6 +949,8 @@ class DashboardState:
         else:
             job.status = "done"
 
+        # Sempre sobrescreve: _load_history carrega o relatório inteiro como progresso.
+        job.progress["timing"] = batch_timing(job)
         self._persist_progress(job)
         self._persist_report(job)
         self._clear_active_batch(job.id)
@@ -971,6 +1022,7 @@ class DashboardState:
             job.finished_at = datetime.now(UTC).isoformat()
             if not job.progress:
                 job.progress = self._build_initial_progress(job)
+            job.progress["timing"] = batch_timing(job)
             self._persist_progress(job)
             self._persist_report(job)
             self._clear_active_batch(job.id)
@@ -1189,22 +1241,41 @@ async def handle_download(request: web.Request) -> web.Response:
     from config import is_valid_processo
 
     processos = []
+    seen_processos: set[str] = set()
     invalidos = []
+    duplicados = 0
     for p in processos_raw:
         p = p.strip().strip('"').strip("'")
         if not p:
             continue
-        if is_valid_processo(p):
-            processos.append(p)
-        else:
+        if not is_valid_processo(p):
             invalidos.append(p)
+        elif p in seen_processos:
+            duplicados += 1
+        else:
+            seen_processos.add(p)
+            processos.append(p)
 
-    if invalidos:
-        log.warning("dashboard.invalid_processos", invalidos=invalidos)
+    # B1: the user is told what was dropped (reply fields below). Logs carry
+    # counts only: the raw lines may be personal data.
+    feedback = {
+        "invalidos": [
+            p[:_INVALID_ITEM_MAX_CHARS] for p in invalidos[:_INVALID_MAX_ITEMS]
+        ],
+        "invalidos_total": len(invalidos),
+        "duplicados": duplicados,
+    }
+    if invalidos or duplicados:
+        log.warning(
+            "dashboard.invalid_processos",
+            count=len(invalidos),
+            duplicados=duplicados,
+            aceitos=len(processos),
+        )
 
     if not processos:
         return web.json_response(
-            {"error": "Nenhum processo com formato CNJ válido", "invalidos": invalidos},
+            {"error": "Nenhum processo com formato CNJ válido", **feedback},
             status=400,
         )
 
@@ -1274,6 +1345,7 @@ async def handle_download(request: web.Request) -> web.Response:
             "batch_id": job.id,
             "processos": len(job.processos),
             "status": job.status,
+            **feedback,
         },
         status=201,
     )
@@ -1478,6 +1550,14 @@ async def handle_index(request: web.Request) -> web.Response:
 
 async def _on_cleanup(app: web.Application) -> None:
     """Cancela batch em execução ao encerrar o servidor. Saves progress first."""
+    rotate_task = app.get(AUDIT_ROTATE_TASK_KEY) if hasattr(app, "get") else None
+    if isinstance(rotate_task, asyncio.Task):
+        rotate_task.cancel()
+        try:
+            await rotate_task
+        except asyncio.CancelledError:
+            pass
+
     syncer = app.get(AUDIT_SYNCER_KEY) if hasattr(app, "get") else None
     sync_task = app.get(AUDIT_SYNC_TASK_KEY) if hasattr(app, "get") else None
     if isinstance(syncer, audit_sync.AuditSyncer) and isinstance(
@@ -1536,10 +1616,45 @@ async def _on_cleanup(app: web.Application) -> None:
         await state.close()
 
 
+async def _audit_rotation_loop(interval_secs: float) -> None:
+    """Re-run ``audit.rotate_logs`` every ``interval_secs`` while the dashboard is up.
+
+    Sleeps first: ``create_app`` already rotated at boot. Rotation is synchronous disk
+    I/O, so it runs in a thread. A failure is logged by type only (no path, no content)
+    and the loop goes on to the next interval. Stops only by cancellation.
+    """
+    while True:
+        await asyncio.sleep(interval_secs)
+        try:
+            from audit import rotate_logs
+
+            deleted = await asyncio.to_thread(
+                rotate_logs, max_days=AUDIT_LOG_RETENTION_DAYS
+            )
+            if deleted:
+                log.info(
+                    "dashboard.audit.rotation_complete",
+                    deleted=deleted,
+                    retention_days=AUDIT_LOG_RETENTION_DAYS,
+                    periodic=True,
+                )
+        except Exception as exc:
+            log.warning(
+                "dashboard.audit.rotation_failed",
+                error_type=type(exc).__name__,
+                periodic=True,
+            )
+
+
 async def _on_startup(app: web.Application) -> None:
     ctx: AppContext | None = app.get(APP_CTX_KEY) if hasattr(app, "get") else None
     if ctx is not None:
         await ctx.state.resume_active_batch()
+
+    # Before the syncer's early returns: rotation does not depend on the Postgres sink.
+    app[AUDIT_ROTATE_TASK_KEY] = asyncio.create_task(
+        _audit_rotation_loop(AUDIT_ROTATE_INTERVAL_SECS)
+    )
 
     syncer = app.get(AUDIT_SYNCER_KEY) if hasattr(app, "get") else None
     if not isinstance(syncer, audit_sync.AuditSyncer):

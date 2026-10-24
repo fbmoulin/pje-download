@@ -62,6 +62,14 @@ function setApiKey(value) {
   else localStorage.removeItem(API_KEY_STORAGE_KEY);
 }
 
+// Stores the key and calls `onChanged` only when it actually changed ("change" and
+// "blur" both fire for one edit, and an untouched field must not reload anything).
+function applyApiKey(value, onChanged) {
+  const before = getApiKey();
+  setApiKey(value);
+  if (getApiKey() !== before) onChanged();
+}
+
 // ── Formatters ──
 
 function fmtBytes(bytes) {
@@ -79,11 +87,12 @@ function fmtDate(iso) {
 }
 
 function fmtDuration(secs) {
-  if (typeof secs !== 'number' || secs <= 0) return '\u2014';
-  if (secs < 60) return secs.toFixed(1) + 's';
-  const m = Math.floor(secs / 60);
-  const s = Math.round(secs % 60);
-  return `${m}m ${s}s`;
+  if (typeof secs !== 'number' || !Number.isFinite(secs) || secs <= 0) return '\u2014';
+  // 59.95 s ou mais arredonda para 60 s: já é minuto, senão sairia "60.0s".
+  if (secs < 59.95) return secs.toFixed(1) + 's';
+  // Arredonda o total antes de dividir: 119,6 s é "2m 0s", não "1m 60s".
+  const total = Math.round(secs);
+  return `${Math.floor(total / 60)}m ${total % 60}s`;
 }
 
 function isAntigo(num) {
@@ -134,9 +143,9 @@ function toast(message, type = 'info') {
 
 // ── Badge ──
 
-function setBadge(status) {
+function setBadge(status, labelOverride) {
   const badge = $('#status-badge');
-  const label = status.charAt(0).toUpperCase() + status.slice(1);
+  const label = labelOverride || status.charAt(0).toUpperCase() + status.slice(1);
   badge.textContent = label;
   badge.className = 'badge badge--' + (
     status === 'running' ? 'running'
@@ -280,12 +289,51 @@ async function apiFetch(path, opts = {}) {
   const res = await fetch(API + path, { ...opts, headers });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `HTTP ${res.status}`);
+    const err = new Error(body.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
   }
   return res.json();
 }
 
+// What the header badge and the session line say when a status call fails. In production
+// every /api/* route needs the API key while the page itself is public, so a 401 means
+// "key missing or wrong", not "service down".
+function statusFeedbackFor(err) {
+  if (err && err.status === 401) {
+    return { label: 'Chave de API', sessionText: '⚠ Chave de API necessária (campo acima)' };
+  }
+  return { label: 'Offline', sessionText: '⚠ Serviço indisponível' };
+}
+
 // ── Submit Download ──
+
+// Every non-blank line goes to the server, which is the one that validates and
+// reports what it rejected (B1). Filtering here by length made short lines vanish.
+function parseProcessoLines(text) {
+  return String(text).split('\n').map(l => l.trim()).filter(Boolean);
+}
+
+// Same normalisation the server applies before validating (strip + outer quotes),
+// cut to the 64 characters it echoes back in `invalidos`. The server counts Unicode
+// code points (Python p[:64]); .slice() counts UTF-16 units and would cut emoji lines
+// at a different place, so cut by code points here too.
+function normalizeProcessoLine(line) {
+  const s = String(line).trim().replace(/^"+|"+$/g, '').replace(/^'+|'+$/g, '');
+  return Array.from(s).slice(0, 64).join('');
+}
+
+// Text the textarea should hold after a 201: only the lines the server rejected.
+// If the server's list was capped (invalidos_total > listed), we cannot tell which
+// lines were rejected, so keep everything the user typed.
+function remainingAfterSubmit(text, invalidos, invalidosTotal) {
+  const rejected = Array.isArray(invalidos) ? invalidos : [];
+  const total = typeof invalidosTotal === 'number' ? invalidosTotal : rejected.length;
+  if (!total) return '';
+  if (total > rejected.length) return String(text);
+  const set = new Set(rejected);
+  return parseProcessoLines(text).filter(l => set.has(normalizeProcessoLine(l))).join('\n');
+}
 
 async function submitDownload() {
   const textarea = $('#processos-input');
@@ -295,7 +343,7 @@ async function submitDownload() {
     return;
   }
 
-  const processos = raw.split('\n').map(l => l.trim()).filter(l => l.length > 10);
+  const processos = parseProcessoLines(raw);
   if (!processos.length) {
     toast('Nenhum numero de processo valido encontrado', 'warning');
     return;
@@ -324,7 +372,16 @@ async function submitDownload() {
       body: JSON.stringify({ processos, include_anexos: !skipAnexos, ...(documentoIds !== undefined ? { documento_ids: documentoIds } : {}) }),
     });
     toast(`Batch ${data.batch_id} criado com ${data.processos} processos`, 'success');
-    textarea.value = '';
+    const rejeitados = typeof data.invalidos_total === 'number'
+      ? data.invalidos_total : (data.invalidos || []).length;
+    const duplicados = data.duplicados || 0;
+    if (rejeitados) {
+      toast(`${rejeitados} linha(s) com formato invalido nao foram enviadas e continuam na caixa de texto`, 'warning');
+    }
+    if (duplicados) {
+      toast(`${duplicados} numero(s) repetido(s) removido(s)`, 'warning');
+    }
+    textarea.value = remainingAfterSubmit(textarea.value, data.invalidos, data.invalidos_total);
     $('#documento-ids').value = '';
     $('#restricted-collection').checked = false;
     startPolling();
@@ -642,13 +699,19 @@ async function init() {
   const apiKeyInput = $('#dashboard-api-key');
   if (apiKeyInput) {
     apiKeyInput.value = getApiKey();
-    apiKeyInput.addEventListener('change', (e) => setApiKey(e.target.value));
-    apiKeyInput.addEventListener('blur', (e) => setApiKey(e.target.value));
+    // Saving the key must also reload the status, so the screen fixes itself without F5.
+    const saveKey = (e) => applyApiKey(e.target.value, refreshStatus);
+    apiKeyInput.addEventListener('change', saveKey);
+    apiKeyInput.addEventListener('blur', saveKey);
   }
 
   updateClock();
   setInterval(updateClock, 1000);
 
+  await refreshStatus();
+}
+
+async function refreshStatus() {
   try {
     const data = await apiFetch('/api/status');
     setBadge(data.current_status || 'idle');
@@ -656,7 +719,8 @@ async function init() {
       startPolling();
     }
   } catch (e) {
-    setBadge('offline');
+    const fb = statusFeedbackFor(e);
+    setBadge('offline', fb.label);
   }
 
   fetchHistory();
@@ -678,8 +742,8 @@ async function fetchSessionStatus() {
       clearTimeout(_sessionPollTimer);
       _sessionPollTimer = setTimeout(fetchSessionStatus, 1500);
     }
-  } catch {
-    _setSessionUI('error', '⚠ Serviço indisponível', false);
+  } catch (e) {
+    _setSessionUI('error', statusFeedbackFor(e).sessionText, false);
   }
 }
 
