@@ -62,6 +62,14 @@ function setApiKey(value) {
   else localStorage.removeItem(API_KEY_STORAGE_KEY);
 }
 
+// Stores the key and calls `onChanged` only when it actually changed ("change" and
+// "blur" both fire for one edit, and an untouched field must not reload anything).
+function applyApiKey(value, onChanged) {
+  const before = getApiKey();
+  setApiKey(value);
+  if (getApiKey() !== before) onChanged();
+}
+
 // ── Formatters ──
 
 function fmtBytes(bytes) {
@@ -135,9 +143,9 @@ function toast(message, type = 'info') {
 
 // ── Badge ──
 
-function setBadge(status) {
+function setBadge(status, labelOverride) {
   const badge = $('#status-badge');
-  const label = status.charAt(0).toUpperCase() + status.slice(1);
+  const label = labelOverride || status.charAt(0).toUpperCase() + status.slice(1);
   badge.textContent = label;
   badge.className = 'badge badge--' + (
     status === 'running' ? 'running'
@@ -281,9 +289,21 @@ async function apiFetch(path, opts = {}) {
   const res = await fetch(API + path, { ...opts, headers });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `HTTP ${res.status}`);
+    const err = new Error(body.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
   }
   return res.json();
+}
+
+// What the header badge and the session line say when a status call fails. In production
+// every /api/* route needs the API key while the page itself is public, so a 401 means
+// "key missing or wrong", not "service down".
+function statusFeedbackFor(err) {
+  if (err && err.status === 401) {
+    return { label: 'Chave de API', sessionText: '⚠ Chave de API necessária (campo acima)' };
+  }
+  return { label: 'Offline', sessionText: '⚠ Serviço indisponível' };
 }
 
 // ── Submit Download ──
@@ -679,13 +699,19 @@ async function init() {
   const apiKeyInput = $('#dashboard-api-key');
   if (apiKeyInput) {
     apiKeyInput.value = getApiKey();
-    apiKeyInput.addEventListener('change', (e) => setApiKey(e.target.value));
-    apiKeyInput.addEventListener('blur', (e) => setApiKey(e.target.value));
+    // Saving the key must also reload the status, so the screen fixes itself without F5.
+    const saveKey = (e) => applyApiKey(e.target.value, refreshStatus);
+    apiKeyInput.addEventListener('change', saveKey);
+    apiKeyInput.addEventListener('blur', saveKey);
   }
 
   updateClock();
   setInterval(updateClock, 1000);
 
+  await refreshStatus();
+}
+
+async function refreshStatus() {
   try {
     const data = await apiFetch('/api/status');
     setBadge(data.current_status || 'idle');
@@ -693,7 +719,8 @@ async function init() {
       startPolling();
     }
   } catch (e) {
-    setBadge('offline');
+    const fb = statusFeedbackFor(e);
+    setBadge('offline', fb.label);
   }
 
   fetchHistory();
@@ -715,8 +742,8 @@ async function fetchSessionStatus() {
       clearTimeout(_sessionPollTimer);
       _sessionPollTimer = setTimeout(fetchSessionStatus, 1500);
     }
-  } catch {
-    _setSessionUI('error', '⚠ Serviço indisponível', false);
+  } catch (e) {
+    _setSessionUI('error', statusFeedbackFor(e).sessionText, false);
   }
 }
 
