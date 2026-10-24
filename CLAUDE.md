@@ -48,7 +48,7 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **1275 tests** (measured 2026-10-24 on master `a255a36`: 1275 passed with a live Redis) — run with `pytest tests/ -q` before any commit
+- Test suite: pytest — **1293 tests** (measured 2026-10-24 on master `d59c8a4`: 1293 passed with a live Redis; #84 only changed a pin) — run with `pytest tests/ -q` before any commit
   - ⚠️ **Without a reachable redis you get "921 passed, 14 skipped", and the skips are silent.**
     They are `tests/test_redis_socket_timeout.py`, `tests/test_result_queue_ttl.py` and
     `tests/test_worker_job_redelivery.py` — the only real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
@@ -308,7 +308,7 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 
 **As of 2026-09-29:** All Phase 1 backlog items (1–6) are complete and merged, and Phase 2 T2.1 and T2.2A are merged and deployed (#54, #53). Remaining Phase 2 items are below.
 
-**Test suite status (2026-10-24):** 1275 passed with a live Redis (no failures), master `a255a36`.
+**Test suite status (2026-10-24):** 1293 passed with a live Redis (no failures), master `d59c8a4` (then `a2bfb3f`, Playwright 1.64.0).
 
 ### Phase 1 Completed Items (2026-04-04 → 2026-09-27)
 
