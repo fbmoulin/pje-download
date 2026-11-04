@@ -401,6 +401,44 @@ function clearForm() {
 
 // ── File Upload ──
 
+// Pure parser for an imported file. Keeps every non-blank, non-comment entry (the server
+// validates and answers `invalidos`) instead of filtering by length, and never cuts a
+// longer digit run down to a CNJ-shaped prefix. `skipped` counts lines it could not use.
+function parseImportedFile(name, text) {
+  text = text.trim();
+  const lower = name.toLowerCase();
+  const numeros = [];
+  let skipped = 0;
+
+  if (lower.endsWith('.json')) {
+    const data = JSON.parse(text);
+    const list = Array.isArray(data) ? data : (data.processos || []);
+    for (const item of list) {
+      const v = typeof item === 'string' ? item.trim() : String(item.numero || item.numeroProcesso || item.processo || '').trim();
+      if (v) numeros.push(v); else skipped++;
+    }
+  } else if (lower.endsWith('.csv')) {
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length < 2) return { numeros, skipped, empty: true };
+    const header = lines[0].toLowerCase().split(/[,;\t]/);
+    const idx = header.findIndex(h => h.includes('numero') || h.includes('processo'));
+    for (let i = 1; i < lines.length; i++) {
+      if (idx >= 0) {
+        const cell = (lines[i].split(/[,;\t]/)[idx] || '').replace(/"/g, '').trim();
+        if (cell) numeros.push(cell); else skipped++;
+      } else {
+        const match = lines[i].match(/(?<!\d)\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}(?!\d)/);
+        if (match) numeros.push(match[0]); else skipped++;
+      }
+    }
+  } else {
+    for (const l of text.split('\n').map(l => l.trim())) {
+      if (l && !l.startsWith('#')) numeros.push(l);
+    }
+  }
+  return { numeros, skipped };
+}
+
 function handleFileUpload(input) {
   const file = input.files[0];
   if (!file) return;
@@ -408,45 +446,21 @@ function handleFileUpload(input) {
 
   const reader = new FileReader();
   reader.onload = (e) => {
-    const text = e.target.result.trim();
-    let numeros = [];
-
-    if (file.name.endsWith('.json')) {
-      try {
-        const data = JSON.parse(text);
-        const list = Array.isArray(data) ? data : (data.processos || []);
-        numeros = list.map(item => typeof item === 'string' ? item.trim() : (item.numero || item.numeroProcesso || item.processo || '')).filter(Boolean);
-      } catch (err) {
-        toast('JSON invalido: ' + err.message, 'error');
-        return;
-      }
-    } else if (file.name.endsWith('.csv')) {
-      const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-      if (lines.length < 2) { toast('CSV vazio', 'warning'); return; }
-      const header = lines[0].toLowerCase().split(/[,;\t]/);
-      const idx = header.findIndex(h => h.includes('numero') || h.includes('processo'));
-      if (idx >= 0) {
-        for (let i = 1; i < lines.length; i++) {
-          const cols = lines[i].split(/[,;\t]/);
-          if (cols[idx]) numeros.push(cols[idx].replace(/"/g, '').trim());
-        }
-      } else {
-        for (const line of lines) {
-          const match = line.match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/);
-          if (match) numeros.push(match[0]);
-        }
-      }
-    } else {
-      numeros = text.split('\n').map(l => l.trim()).filter(l => l.length > 10 && !l.startsWith('#'));
+    let parsed;
+    try {
+      parsed = parseImportedFile(file.name, e.target.result);
+    } catch (err) {
+      toast('JSON invalido: ' + err.message, 'error');
+      return;
     }
-
-    numeros = numeros.filter(n => n.length > 10);
+    if (parsed.empty) { toast('CSV vazio', 'warning'); return; }
+    const { numeros, skipped } = parsed;
     if (!numeros.length) { toast('Nenhum processo encontrado no arquivo', 'warning'); return; }
 
     const ta = $('#processos-input');
     const existing = ta.value.trim();
     ta.value = existing ? existing + '\n' + numeros.join('\n') : numeros.join('\n');
-    toast(`${numeros.length} processo(s) importados de ${file.name}`, 'success');
+    toast(`${numeros.length} processo(s) importados de ${file.name}` + (skipped ? `; ${skipped} linha(s) sem numero foram ignoradas` : ''), skipped ? 'warning' : 'success');
     $('#file-label').textContent = `${file.name} (${numeros.length})`;
   };
   reader.readAsText(file);
