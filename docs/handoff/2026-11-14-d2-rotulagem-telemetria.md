@@ -1,16 +1,53 @@
 # Handoff — SPEC-D2-001, 14/11/2026
 
-## Estado verificável
+## Medição do Mac e teste integrado — atualização posterior em 14/11/2026
+
+Esta seção atualiza o estado de T6 e prevalece sobre as pendências históricas abaixo.
+**Fonte de evidência:** saídas do Terminal e do Claude Code fornecidas por Felipe
+nesta conversa; não houve acesso remoto direto ao Mac ou à VPS.
+
+- Cópia no Mac na branch do PR103, commit `7b4cbfa`, sem alterações locais
+  conforme `git status --short --branch`.
+- Relatório real gerado em **14/11/2026 às 05:07:24 UTC** (02:07:24 BRT), na
+  fonte local padrão `~/.local/state/pje-prompt-gate`.
+- Telemetria válida, arquivo de rótulos ausente; **1 prompt avaliado**, exclusivamente
+  de **10/10/2026 às 07:33:38 UTC**; zero bloqueios de PII registrados nessa fonte.
+- `alvo_ou_sintoma`:1 aviso,0 rotulados; `possui_dod`:1 aviso,0 rotulados;
+  `multi_tarefa`:0 avisos. As duas primeiras contagens pertencem ao mesmo evento.
+  **Nenhuma regra mecanicamente elegível para bloqueio.**
+- Configurações do projeto e local mostraram UserPromptSubmit/Stop no projeto,
+  sem disableAllHooks ou PROMPT_GATE_DISABLE ativos nesses dois arquivos.
+  Isso não constitui auditoria de todas as configurações possíveis do cliente.
+- Smoke direto do programa: exit0, aviso esperado, sem erro; estado temporário.
+- Smoke integrado: Claude Code exibiu o aviso UserPromptSubmit e respondeu sem
+  ferramentas/alterações, conforme o transcript fornecido. A sessão usou outro
+  XDG_STATE_HOME temporário. Não foi executado um teste do Stop nesta sessão.
+- Relatório real após o smoke preservou exatamente a amostra antiga: os testes
+  sintéticos **não entram** na revisão D2. IDs e texto dos prompts não são publicados.
+
+**Conclusão técnica:** CLI e ligação UserPromptSubmit funcionaram nesse teste local.
+A pequena amostra não explica por si só o baixo uso registrado; pode haver outras
+pastas, sessões ou fontes. Não afirmar que todos os usos do Claude foram cobertos.
+T6: consulta da fonte fornecida concluída; rotulagem contextual do único evento
+permanece pendente. T7: Felipe ainda decide o destino de cada regra, com data real.
+Não houve promoção, remoção, nova extensão, merge ou deploy.
+
+**Recomendação ainda não ratificada:** não promover nenhuma regra; se Felipe desejar
+manter os avisos, registrar decisão explícita de continuidade advisory que substitua
+o calendário de revisão anterior. Não apresentar essa escolha como extensão
+automática ou como cumprimento dos critérios estatísticos.
+
+## Estado anterior à medição (histórico desta entrega)
 
 | Item | Evidência |
 |---|---|
 | Repositório / base | `fbmoulin/pje-download`, `master` consultada em `e5ec846` |
-| Entrega | [PR103](https://github.com/fbmoulin/pje-download/pull/103), branch `fix/d2-rotulagem-por-regra`, em rascunho |
+| Entrega | [PR103](https://github.com/fbmoulin/pje-download/pull/103), branch `fix/d2-rotulagem-por-regra`, pronto para revisão (sem merge) |
 | Código validado | `e0a5d7233839fde6272f9e4bbaf128da29741b51`, árvore `c784f4062f7b6a5c0f1ae3cfa0e7f31df2e50bba` |
 | CI remoto | [43551254323](https://github.com/fbmoulin/pje-download/actions/runs/43551254323), success; **1331 passed, 0 skipped, 1 warning**, Redis real |
 | Testes locais | Gate 247 passed; suíte 1317 passed, 14 skipped (Redis ausente), 1 warning |
 | Checks locais | Ruff 0.14.14 check/format, 10 specs estruturais, detector PII e diff-check aprovados |
-| Integração/produção | Nenhum merge/deploy desta entrega; instalação no Mac e estado da VPS não consultados |
+| Integração/produção | Nenhum merge/deploy; execução da branch no Mac reportada acima; VPS não consultada |
 
 O aviso é o RuntimeWarning de AsyncMock em `test_worker_lazy_browser.py`, fora da
 fatia. O CI comprova os testes daquela revisão; não comprova telemetria de uso real,
@@ -56,7 +93,7 @@ normal de CI/deploy de master: depende de decisão de integração, não deste h
    data real, justificativa e decisão na Task 9. Pelo menos 60 rótulos válidos e no máximo 2 FP é
    elegibilidade mecânica, não autorização automática para bloquear.
 
-**T6 e T7 continuam pendentes.** O registro de 17/10 usava uma medição do Mac de 10/10
+**Registro anterior à medição: T6 e T7 estavam pendentes; ver atualização no início.** O registro de 17/10 usava uma medição do Mac de 10/10
 (um aviso, zero rótulos); não é resultado atual. 31/10 era a data prorrogada;
 14/11 é o limite da última extensão possível, sem concessão registrada. Não criar
 extensão retroativa nem encerrar a política com base nos dados deste ambiente.
