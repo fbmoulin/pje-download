@@ -11,7 +11,7 @@
 - D2/Task9/T7 encerradas por Felipe: três regras advisory, sem promoção/remoção ou extensão retroativa; PII/Stop preservados. [Evidência e histórico D2](docs/handoff/2026-11-14-d2-rotulagem-telemetria.md).
 - Relatório real gerado às 05:07:24 UTC: 1 evento de 10/10, nenhum rótulo. Smokes isolados excluídos. Não prova cobertura de todas as sessões.
 - Nenhum lote real, teste de Chromium na imagem atual ou teste de interrupção foi executado nesta etapa. Nenhuma ação KCP.
-- Depois da pausa, o `/code-review` do `987e208` achou quatro correções pequenas em `tools/prompt_gate.py`, feitas no branch `fix/prompt-gate-review-103` (PR próprio; conferir se já foi mergeado). Linha ruim, colisão de id e regra 60/2 ficam como estão por decisão de Felipe (adendo de 14/11 na [SPEC-D2-001](docs/specs/2026-11-14-d2-rotulagem-telemetria.md)).
+- Depois da pausa, o `/code-review` do `987e208` achou quatro correções pequenas em `tools/prompt_gate.py`, mergeadas no #106 (`5f0c757`, CI #244 com 1338 passed e sem skips, deploy #134). Detalhes e pendências: [handoff da revisão](docs/handoff/2026-11-14-prompt-gate-revisao-103.md). Linha ruim, colisão de id e regra 60/2 ficam como estão por decisão de Felipe (adendo de 14/11 na [SPEC-D2-001](docs/specs/2026-11-14-d2-rotulagem-telemetria.md)).
 
 ## Ordem de retomada e aceite
 
