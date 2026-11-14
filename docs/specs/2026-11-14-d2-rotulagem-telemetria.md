@@ -284,6 +284,18 @@ transitória); se persistir, copiar o arquivo ao lado do original e remover some
 linha que o diagnóstico nomeia, sem imprimir seu conteúdo. A cópia fica guardada.
 Procedimento em `CLAUDE.md`, seção "Prompt gate".
 
-As correções pequenas da mesma revisão (compatibilidade do `--label` com Python
-anterior ao 3.11, comando do aviso colável no shell, separadores de linha Unicode no
-leitor estrito e remoção da função órfã) vão em PR próprio, com testes.
+As correções pequenas da mesma revisão foram feitas em PR próprio
+(`fix/prompt-gate-review-103`), com testes vistos falhando antes:
+
+- O leitor estrito separa registros só em `\n`. `splitlines()` também cortava em
+  U+2028, U+2029 e U+0085, que o hook grava crus dentro de um campo.
+- O aviso mostra um comando `--label <id> <regra>` por regra, sem o rótulo: colado
+  sem editar cai no erro de uso e não grava nada. Um rótulo padrão enviesaria a
+  evidência (pré-mortem `.premortems/PREMORTEM-2026-11-14T08-29-13Z.md`).
+- `_rotular` deixou de usar `sys.exception()`, que só existe no Python 3.11+.
+- `_ler_jsonl` foi removido. As menções a um "leitor tolerante utilizado pelos hooks"
+  (§5.2 e notas da implementação) ficam como histórico: nenhum hook lê esses
+  arquivos, eles só anexam.
+
+Não verificado nesta entrega: como o Claude Code interativo exibe o aviso de várias
+linhas. Conferir numa sessão real, na raiz do repositório.

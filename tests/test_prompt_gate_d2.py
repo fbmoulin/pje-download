@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from tests.test_prompt_gate_telemetry import _cli
+from tests.test_prompt_gate_hook import VAGO
+from tests.test_prompt_gate_telemetry import _cli, _hook, _id_do_aviso
 
 TS = "2026-11-14T10:00:00Z"
 RULE = "possui_dod"
@@ -207,3 +208,40 @@ def test_unreadable_source_reports_without_raw_exception(tmp_path, monkeypatch, 
     assert gate.main(["--report"]) == 1
     out = capsys.readouterr()
     assert "EVIDENCIA_INCOMPLETA" in out.err and "PRIVATE_SENTINEL" not in out.err
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\x85"])
+def test_unicode_line_separator_in_a_field_is_not_a_record_break(tmp_path, sep):
+    """The hook writes these raw (ensure_ascii=False) inside session_id."""
+    state = tmp_path / "state"
+    event_id = _id_do_aviso(_hook(VAGO, state, sessao=f"a{sep}b"))
+    raw = (state / "pje-prompt-gate" / "telemetria.jsonl").read_bytes()
+    assert sep.encode() in raw and raw.count(b"\n") == 1
+    p = _cli(state, "--report")
+    assert p.returncode == 0, p.stderr
+    assert _cli(state, "--label", event_id, RULE, "tp").returncode == 0
+
+
+@pytest.mark.parametrize("position", ["middle", "end"])
+def test_blank_line_is_still_incomplete_evidence(tmp_path, position):
+    state, base = files(tmp_path, [event(1), event(2)])
+    arq = base / "telemetria.jsonl"
+    first, second = arq.read_text("utf-8").splitlines(keepends=True)
+    blank = first + "\n" + second if position == "middle" else first + second + "\n"
+    arq.write_text(blank, encoding="utf-8")
+    p = _cli(state, "--report")
+    assert p.returncode == 1 and "EVIDENCIA_INCOMPLETA" in p.stderr
+
+
+def test_label_refusal_does_not_need_sys_exception(tmp_path, monkeypatch, capsys):
+    """sys.exception() is 3.11+; macOS ships 3.9 as /usr/bin/python3."""
+    import sys
+
+    from tools import prompt_gate as gate
+
+    state, base = files(tmp_path, [event()])
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    monkeypatch.delattr(sys, "exception", raising=False)
+    assert gate.main(["--label", "00000002", RULE, "tp"]) == 1
+    assert capsys.readouterr().err.strip() == "aviso de qualidade nao encontrado"
+    assert not (base / "rotulos.jsonl").exists()
