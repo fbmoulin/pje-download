@@ -352,12 +352,12 @@ asyncio.run(main())"
 **Deve aparecer:** um número de versão, como `145.0.xxxx`. Se aparecer
 "executable doesn't exist", guarde as últimas linhas para pedir ajuda.
 
-## Passo 5: decidir o #84 (playwright 1.64.0)
+## Passo 5: conferir a versão atual do Chromium
 
-Atualização do navegador automático. O navegador de reserva está dormente em produção,
-então não há pressa. Se o passo 4 deu certo, peça "Merge #84" (atualiza a branch, roda a
-suíte com Redis e mergeia; o deploy refaz a imagem, cerca de 3 minutos) ou diga "deixa o
-#84".
+O #84 (Playwright 1.64.0) já foi integrado em 24/10/2026; não solicitar novamente
+esse merge. O teste de lançamento passou na imagem anterior após o #98, mas a
+repetição na imagem posterior continua sem conclusão documentada. Use o Passo 4
+para a versão efetivamente instalada e registre a evidência antes de encerrar o item.
 
 ## Passo 6: limpezas e prazos
 
@@ -365,9 +365,16 @@ suíte com Redis e mergeia; o deploy refaz a imagem, cerca de 3 minutos) ou diga
   `ssh pje-vps` e `sudo snap remove tailscale`.
 - **Pasta `ops/monitoring/`** (painéis antigos do openclaw). Quando confirmar que o
   openclaw foi desligado, peça a remoção em um PR próprio.
-- **Revisão do prompt gate, até 31/10/2026.** No Mac mini:
-  `cd /Users/felipemoulin/pje-download && python3 tools/prompt_gate.py --report`.
-  Decidir entre manter, estender (a última vez, até 14/11) ou remover a regra.
+- **Revisão D2 do prompt gate — decisão pendente.** A data histórica é 31/10;14/11
+  é o limite da última extensão possível, não concessão automática. O PR103 está em
+  rascunho e ainda não é a versão instalada no Mac. Antes de usar o novo relatório,
+  confirmar a integração e atualizar a cópia correta de trabalho. Na raiz dela:
+  `python3 tools/prompt_gate.py --report`. Conferir caminho e intervalo dos eventos.
+  Ausência de fonte não é amostra zero. Rotular cada regra com
+  `python3 tools/prompt_gate.py --label <id> <regra> fp|tp`, substituindo os campos
+  entre `< >`. Legados multirregra precisam de revisão separada; usar um rotulador
+  por vez e preservar os arquivos originais. Depois Felipe registra a decisão por
+  regra, sem promoção automática. Roteiro completo: `../../HANDOFF.md`.
 - **Trocar a chave SSH de deploy e a `DASHBOARD_API_KEY`.** Adiado desde julho; envolve
   secrets do GitHub e a VPS.
 - **Logs de auditoria.** São apagados todo dia quando passam de 120 dias, e **não existe

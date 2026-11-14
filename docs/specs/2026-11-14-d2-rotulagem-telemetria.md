@@ -1,10 +1,10 @@
 # SPEC-D2-001 — Revisão confiável do Prompt Quality Gate
 
-**Versão:** 0.1.1 — proposta aprovada por Felipe em 14/11/2026; implementação validada localmente; CI remoto pendente.
+**Versão:** 0.1.1 — proposta aprovada por Felipe em 14/11/2026; implementação validada localmente e no CI do código e0a5d72; PR103 em rascunho.
 **Data:** 13/11/2026, referência temporal da sessão.
 **Projeto:** fbmoulin/pje-download.
 **Método:** Spec-Driven Design: evidências → requisitos → contratos → pré-mortem → tarefas → testes → decisão.
-**Estado:** implementação validada localmente; nenhuma alteração de política ou decisão D2 realizada.
+**Estado:** PR103 em rascunho, CI do código aprovado, sem merge/deploy ou decisão D2.
 
 ## 1. Objetivo e decisão proposta
 
@@ -32,7 +32,7 @@ Fontes fixadas:
 - [Spec original e Task 9](https://github.com/fbmoulin/pje-download/blob/e5ec846713959d99d3c9bcc669a83f6ed55bf2f3/docs/specs/2026-10-03-prompt-quality-gate.md).
 - [Regras do repositório](https://github.com/fbmoulin/pje-download/blob/e5ec846713959d99d3c9bcc669a83f6ed55bf2f3/AGENTS.md).
 
-Não executado nesta elaboração: telemetria do Mac, hooks reais do Claude, testes do produto, consultas ao banco KCP ou operações de produção. Os achados são de código, não frequência operacional medida.
+Na elaboração da v0.1.0 ainda não tinham sido executados testes do produto; os resultados posteriores estão na seção de execução. Continuam não executados: telemetria do Mac, hooks reais do Claude, consultas ao banco KCP e operações de produção. Os achados são de código, não frequência operacional medida.
 
 ## 3. Escopo e invariantes
 
@@ -207,3 +207,13 @@ funções históricas preservadas, salvo rotular/relatório e a instrução de u
 
 RF10/T6/T7 continuam pendentes: telemetria real do Mac e decisão humana. Aprovação
 da implementação não equivale a promover regras ou encerrar a decisão de política.
+
+
+### Confirmação remota e reconciliação documental —14/11/2026
+
+[CI 43551254323](https://github.com/fbmoulin/pje-download/actions/runs/43551254323)
+aprovado no código `e0a5d7233839fde6272f9e4bbaf128da29741b51`:1331passed,
+sem skips,1warning,95.43s,com Redis real. Ruff e verificação das specs aprovados.
+Árvore do código testado:`c784f4062f7b6a5c0f1ae3cfa0e7f31df2e50bba`.
+O PR103 continua em rascunho; documentação posterior não implica nova execução
+da suíte. RF10/T6/T7 continuam pendentes. Retomada consolidada em `../../HANDOFF.md`.

@@ -13,7 +13,7 @@
 - `python dashboard_api.py --port 8007 --output ./downloads` starts the dashboard.
 - `python worker.py` starts the Redis consumer; the dashboard is not the execution path anymore without it.
 - `pytest tests/test_config.py tests/test_dashboard_api.py tests/test_worker.py tests/test_pje_session.py tests/test_batch_downloader.py -q` is the focused regression suite for orchestration and integrations.
-- `pytest tests/ -q` is the full suite (920 tests with a live Redis; without one, 2 real-socket tests skip silently).
+- `pytest tests/ -q` is the full suite. Verified PR103 code `e0a5d72`: CI43551254323 had 1331 passed, no skips, 1 warning with real Redis; local validation had 1317 passed, 14 skipped, 1 warning without Redis. Counts are dated evidence, not permanent assertions.
 - `uvx ruff@0.14.14 check .` and `uvx ruff@0.14.14 format --check .` match CI exactly: CI pins ruff 0.14.14 and lints the whole repo, not a file list.
 - `python tools/verify_spec.py docs/specs/*.md` is the canonical verifier for Markdown specification documents (SDD specs).
 
@@ -37,3 +37,15 @@
 - Treat `TRUST_X_FORWARDED_FOR` as opt-in only behind a trusted reverse proxy.
 - The repo is public and handles court records: never commit CPF/CNPJ/CNJ-shaped literals (the pre-push gate and gitleaks block them). Tests build such values at runtime.
 - Claude Code sessions get project hooks from `.claude/settings.json` (`tools/prompt_gate.py`) only when opened at the repo root; see `CLAUDE.md` "Prompt gate".
+
+
+## Current Handoff and D2 Evidence
+
+- Read `HANDOFF.md` and `TODO.md` before resuming. Dated handoffs are historical snapshots, not current production state.
+- SPEC-D2-001 / PR103 is a draft implementation, not merged/deployed. T6 (real Mac telemetry) and T7 (Felipe's D2 decision) remain open.
+- Manual CLI: `python3 tools/prompt_gate.py --label <id> <regra> fp|tp`; short syntax only for single-rule events. Do not apply a legacy multi-rule label to each rule.
+- Keep evidence append-only and outside git. `--report` is read-only; missing/corrupt evidence is inconclusive, not a zero sample or approval. Use one labeler at a time.
+- Do not change PII/Stop, enable quality blocking, extend a review deadline or remove a rule merely because the technical implementation passed CI.
+- Rollback keeps v2 labels; the old CLI report must not be used for D2 decisions after rollback.
+- Focused regression: `pytest tests/test_prompt_gate.py tests/test_prompt_gate_hook.py tests/test_prompt_gate_stop.py tests/test_prompt_gate_telemetry.py tests/test_prompt_gate_d2.py tests/test_refine_prompt_skill.py -q`.
+- Documentation-only changes can be skipped by paths-ignore, but a synchronization of PR103 may still run CI because its overall diff includes Python. Check actual runs; cite the tested SHA and do not infer test execution from a documentation commit.
