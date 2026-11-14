@@ -370,8 +370,11 @@ para a versão efetivamente instalada e registre a evidência antes de encerrar 
   consultada tinha um evento antigo e nenhum rótulo; os smokes ficaram separados.
   Não há promoção, remoção, prorrogação retroativa ou novo prazo. Não é necessário
   fabricar uma amostra nem rotular um evento sem seu contexto original.
-  O PR103 está pronto para revisão; merge/deploy exigem decisão separada.
-  Para consulta posterior na versão corrigida: `python3 tools/prompt_gate.py --report`.
+  O #103 foi mergeado e implantado em 14/11/2026 (`987e208`, deploy #133).
+  Para consulta posterior: `python3 tools/prompt_gate.py --report`.
+  Se o relatório responder `EVIDENCIA_INCOMPLETA`, rode de novo; se persistir, a
+  mensagem diz o arquivo e o número da linha: guarde uma cópia do arquivo e apague
+  só aquela linha (`CLAUDE.md`, seção "Prompt gate").
   A decisão aprovada está na Task9 da spec original e em `../../HANDOFF.md`.
 - **Trocar a chave SSH de deploy e a `DASHBOARD_API_KEY`.** Adiado desde julho; envolve
   secrets do GitHub e a VPS.

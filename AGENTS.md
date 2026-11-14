@@ -13,7 +13,7 @@
 - `python dashboard_api.py --port 8007 --output ./downloads` starts the dashboard.
 - `python worker.py` starts the Redis consumer; the dashboard is not the execution path anymore without it.
 - `pytest tests/test_config.py tests/test_dashboard_api.py tests/test_worker.py tests/test_pje_session.py tests/test_batch_downloader.py -q` is the focused regression suite for orchestration and integrations.
-- `pytest tests/ -q` is the full suite. Verified PR103 code `e0a5d72`: CI43551254323 had 1331 passed, no skips, 1 warning with real Redis; local validation had 1317 passed, 14 skipped, 1 warning without Redis. Counts are dated evidence, not permanent assertions.
+- `pytest tests/ -q` is the full suite. Verified on master `987e208` (#103): CI run 43560698713 had 1331 passed, no skips, 1 warning with real Redis; local validation had 1317 passed, 14 skipped, 1 warning without Redis. Counts are dated evidence, not permanent assertions.
 - `uvx ruff@0.14.14 check .` and `uvx ruff@0.14.14 format --check .` match CI exactly: CI pins ruff 0.14.14 and lints the whole repo, not a file list.
 - `python tools/verify_spec.py docs/specs/*.md` is the canonical verifier for Markdown specification documents (SDD specs).
 
@@ -42,10 +42,10 @@
 ## Current Handoff and D2 Evidence
 
 - Read `HANDOFF.md` and `TODO.md` before resuming. Dated handoffs are historical snapshots, not current production state.
-- SPEC-D2-001 / PR103 is ready for review, not merged/deployed. Mac measurement and isolated UserPromptSubmit smoke completed via Felipe's supplied output. On14/11 Felipe explicitly closed D2/Task9/T7: keep all three quality rules advisory, no promotion/removal or retroactive extension. This decision supersedes the previous extension calendar; no new deadline or schedule. See Task9 for the dated evidence. Historical event labeling remains optional and does not block closure.
+- SPEC-D2-001 / #103 was merged and deployed on 2026-11-14 (`987e208`, CI #242, deploy #133). Mac measurement and isolated UserPromptSubmit smoke completed via Felipe's supplied output. On 2026-11-14 Felipe explicitly closed D2/Task9/T7: keep all three quality rules advisory, no promotion/removal or retroactive extension. This decision supersedes the previous extension calendar; no new deadline or schedule. See Task 9 for the dated evidence. Historical event labeling remains optional and does not block closure.
 - Manual CLI: `python3 tools/prompt_gate.py --label <id> <regra> fp|tp`; short syntax only for single-rule events. Do not apply a legacy multi-rule label to each rule.
-- Keep evidence append-only and outside git. `--report` is read-only; missing/corrupt evidence is inconclusive, not a zero sample or approval. Use one labeler at a time.
+- Keep evidence append-only and outside git. `--report` is read-only; missing/corrupt evidence is inconclusive, not a zero sample or approval. Use one labeler at a time. Repairing `EVIDENCIA_INCOMPLETA` is manual: keep a copy of the file, then remove only the line the message names (`CLAUDE.md`, section "Prompt gate").
 - Do not change PII/Stop, enable quality blocking, extend a review deadline or remove a rule merely because the technical implementation passed CI.
 - Rollback keeps v2 labels; the old CLI report must not be used for D2 decisions after rollback.
 - Focused regression: `pytest tests/test_prompt_gate.py tests/test_prompt_gate_hook.py tests/test_prompt_gate_stop.py tests/test_prompt_gate_telemetry.py tests/test_prompt_gate_d2.py tests/test_refine_prompt_skill.py -q`.
-- Documentation-only changes can be skipped by paths-ignore, but a synchronization of PR103 may still run CI because its overall diff includes Python. Check actual runs; cite the tested SHA and do not infer test execution from a documentation commit.
+- Documentation-only changes are skipped by paths-ignore (no CI, no deploy); a PR whose overall diff includes Python runs CI, and merging it deploys. Check actual runs; cite the tested SHA and do not infer test execution from a documentation commit.

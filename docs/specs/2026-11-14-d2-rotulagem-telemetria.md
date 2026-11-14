@@ -252,3 +252,38 @@ foram concluídos; isso não atesta todas as sessões, fontes ou comportamento f
 Esta aprovação trata da política D2; **não autoriza merge ou deploy do PR103**,
 nem ações no caso KCP. Nenhum settings ou código foi alterado para esta decisão.
 
+
+## Adendo pós-merge — 14/11/2026
+
+O cabeçalho e as seções acima foram escritos antes do merge e ficam como registro
+daquela hora. Estado medido depois (`gh pr view 103`, `gh run list`):
+
+| Fato | Medição |
+|---|---|
+| PR103 | `MERGED` em 14/11/2026 05:16:02 UTC, squash `987e208` em `master` |
+| CI do `987e208` | run #242 (43560698713): 1331 passed, sem skips, 1 warning, Redis real |
+| Deploy do `987e208` | run #133 (43560885678): sucesso |
+| Fonte real do Mac às 07:51 UTC | telemetria válida, 2 eventos avaliados, 1 aviso pendente, `rotulos.jsonl` ausente |
+
+O merge foi feito por Felipe; a frase "não autoriza merge ou deploy do PR103" da
+decisão D2 descreve o limite daquela aprovação, não o estado atual.
+
+### Três achados da revisão do merge mantidos como estão
+
+A revisão de código do `987e208` questionou três comportamentos que este contrato
+define de propósito. Felipe decidiu em 14/11/2026 manter os três, sem mudar código:
+
+| Achado | Contrato mantido | Motivo |
+|---|---|---|
+| Uma linha ruim bloqueia `--report` e `--label` | §5.2: leitura estrita, sem reparo automático | Reparo é manual e documentado; depois de corrigido o leitor para separadores Unicode, uma linha ruim só nasce de disco cheio, processo morto no meio do append ou edição manual |
+| ID de 8 hex repetido invalida a fonte | §5.1: colisão é erro de integridade | Chance de cerca de 1 em 10 mil com 1.000 eventos; a fonte real tem 2 eventos em cinco semanas. Checar na escrita poria leitura de arquivo e um ponto de falha novo no hook |
+| `elegivel` com avisos não rotulados | §5.2 e §5.3: ≥60 classificados e ≤2 FP | O relatório mostra `nao_rotulados` na mesma linha e não promove nada; D2 está encerrado em advisory. Reabrir só se a promoção voltar à pauta |
+
+Reparo manual de `EVIDENCIA_INCOMPLETA`: rodar de novo (leitura durante um append é
+transitória); se persistir, copiar o arquivo ao lado do original e remover somente a
+linha que o diagnóstico nomeia, sem imprimir seu conteúdo. A cópia fica guardada.
+Procedimento em `CLAUDE.md`, seção "Prompt gate".
+
+As correções pequenas da mesma revisão (compatibilidade do `--label` com Python
+anterior ao 3.11, comando do aviso colável no shell, separadores de linha Unicode no
+leitor estrito e remoção da função órfã) vão em PR próprio, com testes.
