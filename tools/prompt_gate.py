@@ -316,19 +316,6 @@ def _anexar(nome: str, registro: dict) -> None:
         f.write(json.dumps(registro, ensure_ascii=False) + "\n")
 
 
-def _ler_jsonl(nome: str) -> list[dict]:
-    arq = _base_estado() / nome
-    if not arq.exists():
-        return []
-    registros = []
-    for linha in arq.read_text("utf-8").splitlines():
-        try:
-            registros.append(json.loads(linha))
-        except ValueError:
-            continue  # linha truncada por escrita concorrente: ignora
-    return registros
-
-
 def _hook_prompt() -> int:
     pii_decidida = False
     inicio = time.perf_counter()
@@ -396,9 +383,20 @@ def _hook_prompt() -> int:
                             "assumir."
                         ),
                     },
-                    "systemMessage": (
-                        f"gate [{rotulo}] {', '.join(resultado.regras)} — rotule: "
-                        f"python3 tools/prompt_gate.py --label {rotulo} <regra> fp|tp"
+                    # Um comando por regra, colavel (`<regra>` e `fp|tp` no shell
+                    # viram redirecionamento e pipe) e SEM o rotulo: colado como
+                    # esta, cai no erro de uso e nao grava. Um rotulo padrao
+                    # enviesaria a evidencia do D2.
+                    "systemMessage": "\n".join(
+                        [
+                            f"gate [{rotulo}] {', '.join(resultado.regras)} — para "
+                            "rotular, acrescente ao final tp se o aviso foi correto "
+                            "ou fp se foi indevido:"
+                        ]
+                        + [
+                            f"  python3 tools/prompt_gate.py --label {rotulo} {regra}"
+                            for regra in resultado.regras
+                        ]
                     ),
                 },
                 ensure_ascii=False,
@@ -609,7 +607,7 @@ def _objeto_sem_duplicatas(pares: list[tuple]) -> dict:
 
 
 def _ler_evidencia(nome: str, *, obrigatorio: bool = False) -> tuple[list[dict], str]:
-    """Leitor estrito SOMENTE do CLI; o leitor tolerante dos hooks nao muda."""
+    """Leitor estrito do CLI (--label/--report). Os hooks so anexam, nunca leem."""
     try:
         texto = (_base_estado() / nome).read_text("utf-8")
     except FileNotFoundError:
@@ -623,7 +621,12 @@ def _ler_evidencia(nome: str, *, obrigatorio: bool = False) -> tuple[list[dict],
             f"EVIDENCIA_INCOMPLETA: {nome}, linha 1: leitura"
         ) from None
     registros = []
-    for linha, bruto in enumerate(texto.splitlines(), 1):
+    # split("\n"), nao splitlines(): esta tambem corta em U+2028/U+2029/U+0085, que
+    # _anexar grava crus (ensure_ascii=False) dentro de um campo.
+    brutos = texto.split("\n")
+    if brutos[-1] == "":
+        brutos.pop()  # terminador do ultimo registro (ou arquivo vazio)
+    for linha, bruto in enumerate(brutos, 1):
         try:
             r = json.loads(bruto, object_pairs_hook=_objeto_sem_duplicatas)
             if not isinstance(r, dict):
@@ -763,15 +766,12 @@ def _rotular(args: list[str]) -> int:
                 "rotulo": args[-1],
             },
         )
-    except (EvidenciaInvalida, OSError):
-        # OSError nunca ecoa dados/caminhos de excecoes externas.
-        erro = sys.exception()
-        print(
-            str(erro)
-            if isinstance(erro, EvidenciaInvalida)
-            else "falha ao gravar rotulo",
-            file=sys.stderr,
-        )
+    except EvidenciaInvalida as erro:
+        print(str(erro), file=sys.stderr)
+        return 1
+    except OSError:
+        # Nunca ecoa dados/caminhos de excecoes externas.
+        print("falha ao gravar rotulo", file=sys.stderr)
         return 1
     print(f"rotulado: {args[0]} {regra} = {args[-1]}")
     return 0

@@ -4,6 +4,7 @@ Telemetry lives outside the repo and never stores the prompt text or a hash of i
 """
 
 import json
+import shlex
 import subprocess
 import sys
 
@@ -141,6 +142,34 @@ def test_ultimo_rotulo_vale(estado):
     p = _cli(estado, "--report")
     linha = next(x for x in p.stdout.splitlines() if x.startswith("possui_dod"))
     assert linha.split()[1:5] == ["1", "1", "0", "1"]  # avisos rotulados fp tp
+
+
+def test_aviso_mostra_um_comando_por_regra_sem_rotulo_padrao(estado):
+    """`<regra>` e `fp|tp` colados no zsh viram redirecionamento e pipe."""
+    p = _hook(VAGO, estado)
+    msg = json.loads(p.stdout)["systemMessage"]
+    rotulo = _id_do_aviso(p)
+    assert not set("<>|;&") & set(msg)
+    assert " tp " in msg and " fp " in msg  # as duas opcoes, em texto
+    comandos = [x.strip() for x in msg.splitlines() if "--label" in x]
+    assert not set("()[]") & set("".join(comandos))
+    assert [c.split()[-2:] for c in comandos] == [
+        [rotulo, "alvo_ou_sintoma"],
+        [rotulo, "possui_dod"],
+    ]
+    arq = estado / "pje-prompt-gate" / "rotulos.jsonl"
+    for comando, valor in zip(comandos, ("fp", "tp")):
+        args = shlex.split(comando)
+        assert args[:2] == ["python3", "tools/prompt_gate.py"]
+        # Colado sem editar nao rotula nada: nenhum valor e o padrao.
+        assert _cli(estado, *args[2:]).returncode == 1
+        assert not arq.exists() or valor == "tp"
+        assert _cli(estado, *args[2:], valor).returncode == 0
+    gravados = [json.loads(x) for x in arq.read_text("utf-8").splitlines()]
+    assert [(r["regra"], r["rotulo"]) for r in gravados] == [
+        ("alvo_ou_sintoma", "fp"),
+        ("possui_dod", "tp"),
+    ]
 
 
 # --- --report -----------------------------------------------------------------

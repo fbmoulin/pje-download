@@ -236,8 +236,11 @@ evidence: `docs/specs/2026-10-03-prompt-quality-gate.md`; premortems in `.premor
   pytest (the hook's `python3` usually lacks them and then only warns);
   `PROMPT_GATE_RUFF` = ruff command; `PROMPT_GATE_BLOCK_RULES=possui_dod,...` = promote a
   quality rule to blocking (only after the dated D2 review, spec Task 9).
-- **Labeling warnings** (feeds the D2 review): each warning shows `gate [<id>]`. Run
-  `python3 tools/prompt_gate.py --label <id> <regra> fp|tp`. The short form only works for a
+- **Labeling warnings** (feeds the D2 review): each warning shows `gate [<id>]` and one
+  `--label <id> <regra>` command per rule, deliberately without the label: append `tp` or
+  `fp` yourself (pasted as shown it only prints the usage error; a default would bias the D2
+  evidence). Full form: `python3 tools/prompt_gate.py --label <id> <regra> fp|tp` (never
+  paste `<regra>` or `fp|tp` literally into a shell). The short form only works for a
   single-rule warning. `--report` shows per-rule counts and pending ids/rules; session/prompt
   references remain in the local telemetry file. Telemetry lives in
   `${XDG_STATE_HOME:-~/.local/state}/pje-prompt-gate/` — never the prompt text, never a hash.

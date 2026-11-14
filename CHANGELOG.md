@@ -6,6 +6,16 @@ o projeto segue versionamento semântico.
 
 ## [Unreleased]
 
+### Fixed — revisão do merge do #103 no prompt gate (14/11/2026)
+
+- `--report`/`--label` não falham mais quando um campo gravado pelo hook contém U+2028,
+  U+2029 ou U+0085: o leitor estrito separa registros só em `\n`.
+- O aviso mostra um comando `--label <id> <regra>` por regra, colável no shell e sem
+  rótulo padrão (acrescenta-se `tp` ou `fp`); antes imprimia `<regra> fp|tp` literal.
+- `--label` recusado não quebra mais em Python anterior ao 3.11 (`sys.exception()`).
+- Removido `_ler_jsonl`, sem uso desde o #103. Linha ruim, colisão de id e regra 60/2
+  mantidas por decisão do Felipe (adendo na SPEC-D2-001).
+
 ### Documentation — encerramento de sessão (14/11/2026)
 
 - Handoff com prompt de retomada, evidências de merge/CI/deploy e sincronização do Mac.
