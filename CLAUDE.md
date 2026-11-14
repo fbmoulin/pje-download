@@ -48,12 +48,9 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — **1293 tests** (measured 2026-10-24 on master `d59c8a4`: 1293 passed with a live Redis; #84 only changed a pin) — run with `pytest tests/ -q` before any commit
-  - ⚠️ **Without a reachable redis you get "921 passed, 14 skipped", and the skips are silent.**
-    They are `tests/test_redis_socket_timeout.py`, `tests/test_result_queue_ttl.py` and
-    `tests/test_worker_job_redelivery.py` — the only real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI
-    publishes redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379
-    redis:7.4-alpine` first, or treat a green run as proving nothing about the redis pin.
+- Test suite: pytest. Last verified PR103 code `e0a5d72`, CI43551254323: **1331 passed, no skips, 1 warning**, with real Redis. Local validation: **1317 passed, 14 skipped, 1 warning** without Redis; gate subset: **247 passed**. These are dated results, not a fixed required count.
+  - The real-socket suites are `tests/test_redis_socket_timeout.py`, `tests/test_result_queue_ttl.py` and `tests/test_worker_job_redelivery.py`. Missing Redis means missing evidence for these contracts; report skips explicitly.
+  - The warning is the existing AsyncMock RuntimeWarning in `test_worker_lazy_browser.py`. No new live PJe/browser acceptance was performed by this task.
 - Audit sink: asyncpg → Railway Postgres (optional, opt-in via `AUDIT_SYNC_ENABLED`). **Requires PG 15+** — syncer self-disables on older versions (see Sprint 12 B5)
 - Shared helpers: `file_utils.py` (`total_bytes`, `merge_file_lists`), `async_retry.py` (`AsyncRetry` class for exponential backoff)
 
@@ -191,7 +188,7 @@ Post-v2.5.0 — Deploy Verifier + Spec Verifier (SDD) (2026-06-26 → 2026-07, H
 Prompt gate for Claude Code (2026-10-03 → 2026-10-10, #66, #71, #72):
 - Spec: `docs/specs/2026-10-03-prompt-quality-gate.md` (v3, Tasks 1–8 done); premortems `.premortems/PREMORTEM-2026-10-03T14-58-00Z.md` (REWORK) and `-16-05-00Z-v2.md` (REFINE); review of the rejected JEV/LangGraph design in `docs/research/2026-10-03-review-jev-claude-code-langgraph.md`.
 - Scope: `tools/prompt_gate.py` + `.claude/settings.json` (`UserPromptSubmit` and `Stop` hooks, `permissions.deny` on downloaded case files), `/refine-prompt` skill, `.gitignore` for `.claude/settings.local.json` and `.venv/` (#71). How it works and its limits: section "Prompt gate" below.
-- Open: **Task 9 — D2 review, extended on 2026-10-17 to 2026-10-31** (1 warning, 0 labeled; one extension left, to 2026-11-14): `python3 tools/prompt_gate.py --report`; promote a rule to blocking only with ≥ 60 labeled warnings and ≤ 2 FP, at most two 14-day extensions.
+- Closed14/11/2026: **Task9 / D2 decision ratified by Felipe.** Keep all three quality rules advisory; no promotion/removal or retroactive extension. Real Mac source:1 event from10/10,0 labels; isolated smokes excluded. The dated review calendar is superseded by this explicit continuity decision. No new deadline. PR103 remains unmerged; source measurement does not prove comprehensive collection.
 - Status: DONE (Tasks 1–8) — #66 added 211 tests (681→892 passed without Redis), #71 added 3; deployed (deploy #111 for #66, #114 for #71).
 
 ## Security
@@ -207,6 +204,8 @@ Prompt gate for Claude Code (2026-10-03 → 2026-10-10, #66, #71, #72):
 - CNJ 615/2025 audit trail: `audit.py` logs every document access to JSON-L (`/data/audit/audit-YYYY-MM-DD.jsonl`, 0600 perms, append-only)
 
 ## Prompt gate (Claude Code hooks)
+
+Current implementation/CI and remaining work: `HANDOFF.md`. PR103 remains draft; this documentation does not claim it is merged, deployed or installed on the Mac.
 
 `.claude/settings.json` registers `tools/prompt_gate.py` as a `UserPromptSubmit` hook and as a
 `Stop` hook, and denies `Read` on `downloads/`, `downloads_batch/` and `/data/`. Spec and
@@ -238,9 +237,18 @@ evidence: `docs/specs/2026-10-03-prompt-quality-gate.md`; premortems in `.premor
   `PROMPT_GATE_RUFF` = ruff command; `PROMPT_GATE_BLOCK_RULES=possui_dod,...` = promote a
   quality rule to blocking (only after the dated D2 review, spec Task 9).
 - **Labeling warnings** (feeds the D2 review): each warning shows `gate [<id>]`. Run
-  `python3 tools/prompt_gate.py --label <id> fp|tp`, and `--report` for per-rule counts and the
-  unlabeled ids with their `session_id`/`prompt_id`. Telemetry lives in
+  `python3 tools/prompt_gate.py --label <id> <regra> fp|tp`. The short form only works for a
+  single-rule warning. `--report` shows per-rule counts and pending ids/rules; session/prompt
+  references remain in the local telemetry file. Telemetry lives in
   `${XDG_STATE_HOME:-~/.local/state}/pje-prompt-gate/` — never the prompt text, never a hash.
+- **D2 evidence (SPEC-D2-001):** labels are append-only v2, keyed by event id + rule.
+  Legacy single-rule labels remain usable; multi-rule legacy labels require individual review.
+  Missing telemetry returns `TELEMETRIA_AUSENTE` (exit 1), present empty telemetry says
+  `AMOSTRA_VAZIA` (exit 0), and corrupt/incompatible evidence returns
+  `EVIDENCIA_INCOMPLETA` (exit 1). None of these commands promotes a rule. Use one labeler
+  at a time. Confirm the Mac's source path and date interval; this cloud environment is not
+  the Mac's usage sample. Do not delete history to obtain green metrics. An old CLI after
+  rollback cannot interpret v2 for D2 decisions. Plan: `docs/specs/2026-11-14-d2-rotulagem-telemetria.md`.
 - **Tests that hold PII-shaped values build them at runtime** (`tests/test_prompt_gate.py`
   helpers). `.gitleaks.toml` also flags formatted CNJ numbers and formatted CPFs regardless of
   check digit, so never commit such literals, not even invalid ones.

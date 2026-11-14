@@ -119,7 +119,7 @@ def test_kill_switch_nao_registra(estado):
 
 def test_label_grava_rotulo_para_id_existente(estado):
     rotulo = _id_do_aviso(_hook(VAGO, estado))
-    p = _cli(estado, "--label", rotulo, "fp")
+    p = _cli(estado, "--label", rotulo, "possui_dod", "fp")
     assert p.returncode == 0, p.stderr
     rotulos = (estado / "pje-prompt-gate" / "rotulos.jsonl").read_text("utf-8")
     (linha,) = [json.loads(x) for x in rotulos.splitlines()]
@@ -136,8 +136,8 @@ def test_label_rejeita_id_desconhecido_ou_rotulo_invalido(estado, args):
 
 def test_ultimo_rotulo_vale(estado):
     rotulo = _id_do_aviso(_hook(VAGO, estado))
-    _cli(estado, "--label", rotulo, "fp")
-    _cli(estado, "--label", rotulo, "tp")
+    _cli(estado, "--label", rotulo, "possui_dod", "fp")
+    _cli(estado, "--label", rotulo, "possui_dod", "tp")
     p = _cli(estado, "--report")
     linha = next(x for x in p.stdout.splitlines() if x.startswith("possui_dod"))
     assert linha.split()[1:5] == ["1", "1", "0", "1"]  # avisos rotulados fp tp
@@ -152,8 +152,8 @@ def test_report_conta_por_regra_e_lista_pendentes(estado):
         ids.append(_id_do_aviso(_hook(VAGO, estado, sessao=f"s{i}", prompt_id=f"p{i}")))
     _hook(COMPLETO, estado, sessao="s9")
     _hook(f"consulta {CPF} agora", estado, sessao="s8")
-    _cli(estado, "--label", ids[0], "fp")
-    _cli(estado, "--label", ids[1], "tp")
+    _cli(estado, "--label", ids[0], "alvo_ou_sintoma", "fp")
+    _cli(estado, "--label", ids[1], "alvo_ou_sintoma", "tp")
     p = _cli(estado, "--report")
     assert p.returncode == 0, p.stderr
     linhas = p.stdout.splitlines()
@@ -161,11 +161,12 @@ def test_report_conta_por_regra_e_lista_pendentes(estado):
     assert alvo.split()[1:5] == ["3", "2", "1", "1"]
     assert "prompts avaliados: 4" in p.stdout
     assert "bloqueios por PII: 1" in p.stdout
-    assert ids[2] in p.stdout and "s2" in p.stdout and "p2" in p.stdout
-    assert ids[0] not in p.stdout.split("pendentes", 1)[1]
+    assert ids[2] in p.stdout
+    assert "possui_dod" in p.stdout.split("pendentes", 1)[1]
 
 
-def test_report_sem_telemetria_nao_quebra(estado):
+def test_report_sem_telemetria_e_inconclusivo(estado):
     p = _cli(estado, "--report")
-    assert p.returncode == 0
-    assert "prompts avaliados: 0" in p.stdout
+    assert p.returncode == 1
+    assert "TELEMETRIA_AUSENTE" in p.stderr
+    assert not estado.exists()

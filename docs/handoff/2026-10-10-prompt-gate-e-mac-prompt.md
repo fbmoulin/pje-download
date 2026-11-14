@@ -1,5 +1,9 @@
 # Prompt de retomada — pje-download, 2026-10-10
 
+> **Registro histórico de10/10.** Para retomar hoje, leia `../../HANDOFF.md` e
+> `2026-11-14-d2-rotulagem-telemetria.md`. Datas, contagens, PRs e próximos passos
+> abaixo não descrevem o estado atual. Texto original preservado como histórico.
+
 Abra o Claude Code **na raiz** do repo (`cd /Users/felipemoulin/pje-download && claude`) e cole
 o bloco abaixo.
 

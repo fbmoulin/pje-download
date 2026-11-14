@@ -6,6 +6,24 @@ o projeto segue versionamento semântico.
 
 ## [Unreleased]
 
+### Fixed — revisão D2 por regra (14/11/2026; PR103 pronto para revisão)
+
+- Rótulos v2 por evento/regra; precedência de rótulos específicos, compatibilidade com
+  legado de regra única e pendência explícita para legado multirregra.
+- Relatório distingue fonte ausente, vazia e inválida; mostra origem, período e contagens
+  sem promover regras. PII, isenções e Stop preservados; aviso orienta a nova sintaxe.
+- Spec incremental e testes: CI43551254323 no código `e0a5d72`, **1331 passed, sem skips,
+  1 warning**, com Redis real. Correção ainda não integrada nem implantada.
+- Documentação reconciliada: README, AGENTS, CLAUDE, TODO, spec, guia do dono e handoffs.
+  Medição real do Mac e smokes isolados concluídos via saída fornecida por Felipe. Em14/11, Felipe ratificou manter as três regras advisory, encerrando D2/Task9/T7 sem promoção, remoção ou extensão retroativa; não se cria novo prazo. Merge/deploy permanecem separados.
+
+### Fixed — importação de arquivos (04/11/2026; #101)
+
+- Remove filtro silencioso de linhas curtas e impede truncar um identificador maior para
+  um prefixo com aparência válida; informa linhas ignoradas. Integrado em `e5ec846`.
+- CI41927830978 e deploy41928168216 aprovados nesse SHA; **1298 passed, 1 warning** no CI.
+  Esse registro histórico não comprova estado atual do host nem aceite operacional.
+
 ### Added — prompt gate do Claude Code (2026-10-03 → 2026-10-10; #66, #71, #72)
 
 - **`tools/prompt_gate.py` registrado em `.claude/settings.json`** como hooks `UserPromptSubmit` e

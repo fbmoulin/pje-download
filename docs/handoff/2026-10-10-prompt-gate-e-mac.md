@@ -1,5 +1,9 @@
 # HANDOFF — pje-download: prompt gate do Claude Code + migração para o Mac mini (2026-10-03 → 2026-10-10)
 
+> **Registro histórico de10/10.** Para retomar hoje, leia `../../HANDOFF.md` e
+> `2026-11-14-d2-rotulagem-telemetria.md`. Datas, contagens, PRs e próximos passos
+> abaixo não descrevem o estado atual. Texto original preservado como histórico.
+
 > Este arquivo é a fonte para a próxima sessão. Tudo abaixo foi medido, exceto onde marcado.
 
 ## Estado
