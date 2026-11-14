@@ -11,9 +11,10 @@ O caminho principal de execucao agora e desacoplado:
 
 ## Estado verificado — 14/11/2026
 
-- **Master:** `987e208` (#103, rotulagem por regra do prompt gate), mergeado e implantado em 14/11/2026 (deploy #133).
-- **CI do `987e208`:** [43560698713](https://github.com/fbmoulin/pje-download/actions/runs/43560698713), aprovado com **1331 passed, 0 skipped, 1 warning**, Redis real. Não é medição da telemetria do Mac.
-- **D2 encerrado por decisão de Felipe em 14/11:** três regras mantidas em advisory; nenhuma promoção, remoção ou prorrogação retroativa. Medição real do Mac concluída (1 evento, 0 rótulos); T7 concluída. Registro completo na Task 9 da spec original.
+- **Base master consultada:** `e5ec846` (#101, importação de arquivos corrigida em 04/11).
+- **SPEC-D2-001 / PR103:** integrado na `master` em `987e208` em 14/11/2026; CI pós-merge 43560698713 e deploy 43560885678 aprovados. Sessão pausada; próximo passo operacional e prompt em [HANDOFF.md](HANDOFF.md).
+- **CI do código `e0a5d72`:** [43551254323](https://github.com/fbmoulin/pje-download/actions/runs/43551254323), aprovado com **1331 passed, 0 skipped, 1 warning**, Redis real. Não é medição da produção nem da telemetria do Mac.
+- **D2 encerrado por decisão de Felipe em 14/11:** três regras mantidas em advisory; nenhuma promoção, remoção ou prorrogação retroativa. Medição real do Mac concluída (1 evento,0 rótulos); T7 concluída. Próxima etapa: aceite operacional do Chromium e lote pequeno TJES; merge e deploy do PR103 concluídos. Registro completo na Task9 da spec original.
 - **Retomada:** [HANDOFF.md](HANDOFF.md). Pendências operacionais do TJES: [TODO.md](TODO.md).
 
 ## Arquitetura
@@ -182,7 +183,7 @@ PY
 
 Detalhes, limites e escapes (`!!`, `PROMPT_GATE_DISABLE=1`): `CLAUDE.md` §"Prompt gate".
 
-Desde o **#103**, a revisão D2 usa rótulos por regra:
+Desde o **PR103**, integrado na master, a revisão D2 usa rótulos por regra:
 
 ```text
 python3 tools/prompt_gate.py --label <id> <regra> fp|tp
