@@ -1,5 +1,12 @@
 # Handoff — SPEC-D2-001, 14/11/2026
 
+## Encerramento da sessão — estado posterior ao registro D2
+
+[PR103](https://github.com/fbmoulin/pje-download/pull/103) integrado em 14/11/2026 às 05:16:02 UTC, squash `987e2089f3aca2ddaf3cb209ceacbe60317e6c2f`. [CI pós-merge 43560698713](https://github.com/fbmoulin/pje-download/actions/runs/43560698713) concluído com sucesso às 05:18:22 UTC. [Deploy 43560885678](https://github.com/fbmoulin/pje-download/actions/runs/43560885678) concluído com sucesso às 05:22:00 UTC. Sucesso do workflow não substitui o aceite funcional com processos reais.
+
+Felipe confirmou no terminal do Mac o fast-forward para `987e208`, com `master...origin/master` limpa. Sessão pausada antes do teste Chromium, lote real e aceite Task 6. O prompt e a sequência atual estão em [HANDOFF.md](../../HANDOFF.md). As seções abaixo preservam o histórico anterior: referências a merge não autorizado/pronto para revisão foram superadas pela autorização técnica posterior e pelo merge confirmado.
+
+
 ## Decisão D2 ratificada por Felipe — 14/11/2026
 
 Felipe aprovou expressamente nesta conversa **manter as três regras de qualidade

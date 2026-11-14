@@ -12,9 +12,9 @@ O caminho principal de execucao agora e desacoplado:
 ## Estado verificado — 14/11/2026
 
 - **Base master consultada:** `e5ec846` (#101, importação de arquivos corrigida em 04/11).
-- **SPEC-D2-001 / PR103:** implementado na branch `fix/d2-rotulagem-por-regra`, pronto para revisão; sem merge ou deploy desta mudança.
+- **SPEC-D2-001 / PR103:** integrado na `master` em `987e208` em 14/11/2026; CI pós-merge 43560698713 e deploy 43560885678 aprovados. Sessão pausada; próximo passo operacional e prompt em [HANDOFF.md](HANDOFF.md).
 - **CI do código `e0a5d72`:** [43551254323](https://github.com/fbmoulin/pje-download/actions/runs/43551254323), aprovado com **1331 passed, 0 skipped, 1 warning**, Redis real. Não é medição da produção nem da telemetria do Mac.
-- **D2 encerrado por decisão de Felipe em 14/11:** três regras mantidas em advisory; nenhuma promoção, remoção ou prorrogação retroativa. Medição real do Mac concluída (1 evento,0 rótulos); T7 concluída. Próxima etapa técnica: decidir integração do PR103, ainda sem merge/deploy. Registro completo na Task9 da spec original.
+- **D2 encerrado por decisão de Felipe em 14/11:** três regras mantidas em advisory; nenhuma promoção, remoção ou prorrogação retroativa. Medição real do Mac concluída (1 evento,0 rótulos); T7 concluída. Próxima etapa: aceite operacional do Chromium e lote pequeno TJES; merge e deploy do PR103 concluídos. Registro completo na Task9 da spec original.
 - **Retomada:** [HANDOFF.md](HANDOFF.md). Pendências operacionais do TJES: [TODO.md](TODO.md).
 
 ## Arquitetura
@@ -183,7 +183,7 @@ PY
 
 Detalhes, limites e escapes (`!!`, `PROMPT_GATE_DISABLE=1`): `CLAUDE.md` §"Prompt gate".
 
-Na branch do **PR103**, a revisão D2 usa rótulos por regra:
+Desde o **PR103**, integrado na master, a revisão D2 usa rótulos por regra:
 
 ```text
 python3 tools/prompt_gate.py --label <id> <regra> fp|tp

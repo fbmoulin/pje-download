@@ -370,7 +370,7 @@ para a versão efetivamente instalada e registre a evidência antes de encerrar 
   consultada tinha um evento antigo e nenhum rótulo; os smokes ficaram separados.
   Não há promoção, remoção, prorrogação retroativa ou novo prazo. Não é necessário
   fabricar uma amostra nem rotular um evento sem seu contexto original.
-  O PR103 está pronto para revisão; merge/deploy exigem decisão separada.
+  O PR103 foi integrado em `987e208` em 14/11/2026; CI pós-merge e deploy aprovados. Sessão pausada: retome pelo `HANDOFF.md`, começando pelo Passo 4 (Chromium), depois Passo 2 (lote pequeno).
   Para consulta posterior na versão corrigida: `python3 tools/prompt_gate.py --report`.
   A decisão aprovada está na Task9 da spec original e em `../../HANDOFF.md`.
 - **Trocar a chave SSH de deploy e a `DASHBOARD_API_KEY`.** Adiado desde julho; envolve
