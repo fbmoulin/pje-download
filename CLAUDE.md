@@ -238,9 +238,18 @@ evidence: `docs/specs/2026-10-03-prompt-quality-gate.md`; premortems in `.premor
   `PROMPT_GATE_RUFF` = ruff command; `PROMPT_GATE_BLOCK_RULES=possui_dod,...` = promote a
   quality rule to blocking (only after the dated D2 review, spec Task 9).
 - **Labeling warnings** (feeds the D2 review): each warning shows `gate [<id>]`. Run
-  `python3 tools/prompt_gate.py --label <id> fp|tp`, and `--report` for per-rule counts and the
-  unlabeled ids with their `session_id`/`prompt_id`. Telemetry lives in
+  `python3 tools/prompt_gate.py --label <id> <regra> fp|tp`. The short form only works for a
+  single-rule warning. `--report` shows per-rule counts and pending ids/rules; session/prompt
+  references remain in the local telemetry file. Telemetry lives in
   `${XDG_STATE_HOME:-~/.local/state}/pje-prompt-gate/` — never the prompt text, never a hash.
+- **D2 evidence (SPEC-D2-001):** labels are append-only v2, keyed by event id + rule.
+  Legacy single-rule labels remain usable; multi-rule legacy labels require individual review.
+  Missing telemetry returns `TELEMETRIA_AUSENTE` (exit 1), present empty telemetry says
+  `AMOSTRA_VAZIA` (exit 0), and corrupt/incompatible evidence returns
+  `EVIDENCIA_INCOMPLETA` (exit 1). None of these commands promotes a rule. Use one labeler
+  at a time. Confirm the Mac's source path and date interval; this cloud environment is not
+  the Mac's usage sample. Do not delete history to obtain green metrics. An old CLI after
+  rollback cannot interpret v2 for D2 decisions. Plan: `docs/specs/2026-11-14-d2-rotulagem-telemetria.md`.
 - **Tests that hold PII-shaped values build them at runtime** (`tests/test_prompt_gate.py`
   helpers). `.gitleaks.toml` also flags formatted CNJ numbers and formatted CPFs regardless of
   check digit, so never commit such literals, not even invalid ones.

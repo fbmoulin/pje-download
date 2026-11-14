@@ -304,6 +304,19 @@ sozinhos), `--label`/`--report`. Sem números de teste fixos. Rodar
 
 ### Task 9 — Revisão D2 (datada: merge + 14 dias)
 
+**Atualização técnica de 14/11/2026 — SPEC-D2-001:** a rotulagem passa a ser por
+`--label <id> <regra> fp|tp`. A forma antiga serve somente a eventos com uma regra.
+Rótulos antigos multirregra ficam pendentes; não replicar TP/FP entre regras.
+O relatório diferencia fonte ausente, vazia e inválida e não promove regras.
+Fonte correta e rotulagem individual são pré-condições para a decisão abaixo.
+A referência histórica ao `env` versionado nesta Task diverge das opções locais
+no corpo da spec; resolver em um futuro PR de promoção aprovado, com teste da
+configuração efetiva. Nenhum settings foi alterado nesta entrega.
+A data de 14/11 é o limite da última extensão possível, não prorrogação realizada.
+Não há medição nova do Mac, decisão de promoção ou nova extensão registrada.
+Ver `docs/specs/2026-11-14-d2-rotulagem-telemetria.md`.
+
+
 `--report`. Para cada regra: ≥ 60 avisos rotulados **e** ≤ 2 FP → promover a bloqueio
 (acrescentar o id a `PROMPT_GATE_BLOCK_RULES` no `env` do `.claude/settings.json`, com o
 teste do settings atualizado); FP > 2 → ajustar a regra ou removê-la; menos dados → estender
