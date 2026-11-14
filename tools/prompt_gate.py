@@ -624,7 +624,8 @@ def _ler_evidencia(nome: str, *, obrigatorio: bool = False) -> tuple[list[dict],
     # split("\n"), nao splitlines(): esta tambem corta em U+2028/U+2029/U+0085, que
     # _anexar grava crus (ensure_ascii=False) dentro de um campo.
     brutos = texto.split("\n")
-    if brutos[-1] == "":
+    terminado = brutos[-1] == ""
+    if terminado:
         brutos.pop()  # terminador do ultimo registro (ou arquivo vazio)
     for linha, bruto in enumerate(brutos, 1):
         try:
@@ -632,10 +633,16 @@ def _ler_evidencia(nome: str, *, obrigatorio: bool = False) -> tuple[list[dict],
             if not isinstance(r, dict):
                 raise ValueError
             registros.append(r)
-        except ValueError:
+        except (ValueError, RecursionError):  # RecursionError: JSON aninhado demais
             raise EvidenciaInvalida(
                 f"EVIDENCIA_INCOMPLETA: {nome}, linha {linha}: JSON"
             ) from None
+    if not terminado:
+        # Sem o "\n" final, o proximo append do hook colaria dois registros numa
+        # linha; acusar ja, enquanto o reparo e so acrescentar a quebra de linha.
+        raise EvidenciaInvalida(
+            f"EVIDENCIA_INCOMPLETA: {nome}, linha {len(brutos)}: sem fim de linha"
+        )
     return registros, "vazio" if not registros else "valido"
 
 

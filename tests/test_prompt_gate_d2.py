@@ -233,6 +233,33 @@ def test_blank_line_is_still_incomplete_evidence(tmp_path, position):
     assert p.returncode == 1 and "EVIDENCIA_INCOMPLETA" in p.stderr
 
 
+@pytest.mark.parametrize("name", ["telemetria", "rotulos"])
+def test_deeply_nested_json_is_incomplete_evidence_not_a_traceback(tmp_path, name):
+    state, base = files(tmp_path, [event()], [])
+    (base / f"{name}.jsonl").write_text("[" * 200_000 + "\n", encoding="utf-8")
+    p = _cli(state, "--report")
+    assert p.returncode == 1, p.stderr
+    assert f"EVIDENCIA_INCOMPLETA: {name}.jsonl, linha 1: JSON" in p.stderr
+    assert "Traceback" not in p.stderr
+
+
+@pytest.mark.parametrize("name", ["telemetria", "rotulos"])
+def test_last_record_without_newline_is_incomplete_evidence(tmp_path, name):
+    """The next hook append would glue two records onto one line."""
+    state, base = files(tmp_path, [event(1), event(2)], [label(1)])
+    arq = base / f"{name}.jsonl"
+    arq.write_text(arq.read_text("utf-8").rstrip("\n"), encoding="utf-8")
+    before = (base / "rotulos.jsonl").read_bytes()
+    p = _cli(state, "--report")
+    assert p.returncode == 1
+    assert "sem fim de linha" in p.stderr and f"{name}.jsonl" in p.stderr
+    assert "elegivel" not in p.stdout
+    assert _cli(state, "--label", "00000002", RULE, "tp").returncode == 1
+    assert (base / "rotulos.jsonl").read_bytes() == before
+    arq.write_text(arq.read_text("utf-8") + "\n", encoding="utf-8")  # o reparo
+    assert _cli(state, "--report").returncode == 0
+
+
 def test_label_refusal_does_not_need_sys_exception(tmp_path, monkeypatch, capsys):
     """sys.exception() is 3.11+; macOS ships 3.9 as /usr/bin/python3."""
     import sys

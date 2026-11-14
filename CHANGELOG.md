@@ -6,6 +6,14 @@ o projeto segue versionamento semântico.
 
 ## [Unreleased]
 
+### Fixed — achados baixos do pré-mortem do #106 (14/11/2026)
+
+- `--report`/`--label` respondem `EVIDENCIA_INCOMPLETA` (em vez de traceback) para uma
+  linha de JSON aninhado demais (`RecursionError`).
+- Último registro sem `\n` final passa a ser `EVIDENCIA_INCOMPLETA ... sem fim de linha`;
+  antes era aceito e o append seguinte do hook colava dois registros. Reparo: acrescentar
+  a quebra de linha.
+
 ### Fixed — revisão do merge do #103 no prompt gate (14/11/2026)
 
 - `--report`/`--label` não falham mais quando um campo gravado pelo hook contém U+2028,
