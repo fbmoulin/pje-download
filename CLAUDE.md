@@ -188,7 +188,7 @@ Post-v2.5.0 — Deploy Verifier + Spec Verifier (SDD) (2026-06-26 → 2026-07, H
 Prompt gate for Claude Code (2026-10-03 → 2026-10-10, #66, #71, #72):
 - Spec: `docs/specs/2026-10-03-prompt-quality-gate.md` (v3, Tasks 1–8 done); premortems `.premortems/PREMORTEM-2026-10-03T14-58-00Z.md` (REWORK) and `-16-05-00Z-v2.md` (REFINE); review of the rejected JEV/LangGraph design in `docs/research/2026-10-03-review-jev-claude-code-langgraph.md`.
 - Scope: `tools/prompt_gate.py` + `.claude/settings.json` (`UserPromptSubmit` and `Stop` hooks, `permissions.deny` on downloaded case files), `/refine-prompt` skill, `.gitignore` for `.claude/settings.local.json` and `.venv/` (#71). How it works and its limits: section "Prompt gate" below.
-- Closed14/11/2026: **Task9 / D2 decision ratified by Felipe.** Keep all three quality rules advisory; no promotion/removal or retroactive extension. Real Mac source:1 event from10/10,0 labels; isolated smokes excluded. The dated review calendar is superseded by this explicit continuity decision. No new deadline. PR103 remains unmerged; source measurement does not prove comprehensive collection.
+- Closed14/11/2026: **Task9 / D2 decision ratified by Felipe.** Keep all three quality rules advisory; no promotion/removal or retroactive extension. Real Mac source:1 event from10/10,0 labels; isolated smokes excluded. The dated review calendar is superseded by this explicit continuity decision. No new deadline. PR103 merged as `987e208` on14/11; post-merge CI43560698713 and deploy43560885678 succeeded. Source measurement does not prove comprehensive collection.
 - Status: DONE (Tasks 1–8) — #66 added 211 tests (681→892 passed without Redis), #71 added 3; deployed (deploy #111 for #66, #114 for #71).
 
 ## Security
@@ -205,7 +205,7 @@ Prompt gate for Claude Code (2026-10-03 → 2026-10-10, #66, #71, #72):
 
 ## Prompt gate (Claude Code hooks)
 
-Current implementation/CI and remaining work: `HANDOFF.md`. PR103 remains draft; this documentation does not claim it is merged, deployed or installed on the Mac.
+Current state and resumption prompt: `HANDOFF.md`. PR103 merged as `987e208`; post-merge CI and deploy succeeded on 14/11/2026. Felipe's terminal output confirmed Mac master synchronized and clean at that commit. Chromium, a small TJES batch and Task 6 operational acceptance remain pending.
 
 `.claude/settings.json` registers `tools/prompt_gate.py` as a `UserPromptSubmit` hook and as a
 `Stop` hook, and denies `Read` on `downloads/`, `downloads_batch/` and `/data/`. Spec and
