@@ -12,9 +12,9 @@ O caminho principal de execucao agora e desacoplado:
 ## Estado verificado — 14/11/2026
 
 - **Base master consultada:** `e5ec846` (#101, importação de arquivos corrigida em 04/11).
-- **SPEC-D2-001 / PR103:** implementado na branch `fix/d2-rotulagem-por-regra`, ainda em rascunho; sem merge ou deploy desta mudança.
+- **SPEC-D2-001 / PR103:** implementado na branch `fix/d2-rotulagem-por-regra`, pronto para revisão; sem merge ou deploy desta mudança.
 - **CI do código `e0a5d72`:** [43551254323](https://github.com/fbmoulin/pje-download/actions/runs/43551254323), aprovado com **1331 passed, 0 skipped, 1 warning**, Redis real. Não é medição da produção nem da telemetria do Mac.
-- **Próximas etapas:** revisar/integrar a mudança técnica; medir a fonte correta do Mac (T6); Felipe registrar a decisão D2 (T7). Nenhuma regra de qualidade foi promovida.
+- **D2 encerrado por decisão de Felipe em 14/11:** três regras mantidas em advisory; nenhuma promoção, remoção ou prorrogação retroativa. Medição real do Mac concluída (1 evento,0 rótulos); T7 concluída. Próxima etapa técnica: decidir integração do PR103, ainda sem merge/deploy. Registro completo na Task9 da spec original.
 - **Retomada:** [HANDOFF.md](HANDOFF.md). Pendências operacionais do TJES: [TODO.md](TODO.md).
 
 ## Arquitetura

@@ -1,5 +1,39 @@
 # Handoff — SPEC-D2-001, 14/11/2026
 
+## Decisão D2 ratificada por Felipe — 14/11/2026
+
+Felipe aprovou expressamente nesta conversa **manter as três regras de qualidade
+em modo advisory**, sem promover bloqueios nem remover regras:
+`alvo_ou_sintoma`, `possui_dod` e `multi_tarefa`.
+
+**Fonte:** relatório real do Mac fornecido por Felipe, gerado em
+14/11/2026 às 05:07:24 UTC (02:07:24 BRT), na fonte local padrão
+`~/.local/state/pje-prompt-gate`. Telemetria válida, 1 evento de 10/10/2026
+às 07:33:38 UTC e nenhum rótulo. O mesmo evento disparou as duas primeiras
+regras; a terceira teve zero avisos. Não há 60 classificações por regra.
+
+| Regra | Avisos | Rotulados | Decisão |
+|---|---:|---:|---|
+| alvo_ou_sintoma |1|0| Manter aviso; não promover |
+| possui_dod |1|0| Manter aviso; não promover |
+| multi_tarefa |0|0| Manter aviso; não promover |
+
+A justificativa é insuficiência de evidência para bloqueio; não houve classificação
+inventada do evento antigo. Os smokes isolados não compõem a amostra real.
+A decisão **encerra a revisão D2 datada/Task9 e T7**, substituindo o calendário
+anterior de extensões. É continuidade advisory expressamente aprovada, **não**
+prorrogação retroativa nem satisfação dos critérios estatísticos. Não se cria
+novo prazo ou tarefa agendada.
+
+A proteção existente de CPF/CNPJ e o Stop permanecem inalterados. Uma futura
+promoção/remoção exige nova revisão e autorização específicas; o relatório não
+altera configurações. A rotulagem contextual do evento antigo fica opcional para
+investigação futura e não bloqueia esta decisão. A consulta da fonte e os smokes
+foram concluídos; isso não atesta todas as sessões, fontes ou comportamento futuro.
+
+Esta aprovação trata da política D2; **não autoriza merge ou deploy do PR103**,
+nem ações no caso KCP. Nenhum settings ou código foi alterado para esta decisão.
+
 ## Medição do Mac e teste integrado — atualização posterior em 14/11/2026
 
 Esta seção atualiza o estado de T6 e prevalece sobre as pendências históricas abaixo.
@@ -29,10 +63,10 @@ nesta conversa; não houve acesso remoto direto ao Mac ou à VPS.
 A pequena amostra não explica por si só o baixo uso registrado; pode haver outras
 pastas, sessões ou fontes. Não afirmar que todos os usos do Claude foram cobertos.
 T6: consulta da fonte fornecida concluída; rotulagem contextual do único evento
-permanece pendente. T7: Felipe ainda decide o destino de cada regra, com data real.
+permanece disponível para investigação, sem bloquear a decisão. T7 foi concluída pela ratificação no início deste documento.
 Não houve promoção, remoção, nova extensão, merge ou deploy.
 
-**Recomendação ainda não ratificada:** não promover nenhuma regra; se Felipe desejar
+**Proposta histórica, posteriormente ratificada acima:** não promover nenhuma regra; se Felipe desejar
 manter os avisos, registrar decisão explícita de continuidade advisory que substitua
 o calendário de revisão anterior. Não apresentar essa escolha como extensão
 automática ou como cumprimento dos critérios estatísticos.
@@ -70,7 +104,7 @@ normal de CI/deploy de master: depende de decisão de integração, não deste h
 - Histórico preservado; nenhuma promoção de qualidade, remoção ou extensão D2.
   PII, isenções e Stop preservados; apenas o texto de instrução do aviso muda.
 
-## Próxima sequência
+## Roteiro histórico de medição e revisão (executado; integração ainda pendente)
 
 1. Conferir estado/HEAD do PR103 e CI antes de decidir sua integração; não inferir
    aprovação de merge a partir do sucesso dos testes.

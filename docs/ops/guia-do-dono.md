@@ -365,16 +365,14 @@ para a versão efetivamente instalada e registre a evidência antes de encerrar 
   `ssh pje-vps` e `sudo snap remove tailscale`.
 - **Pasta `ops/monitoring/`** (painéis antigos do openclaw). Quando confirmar que o
   openclaw foi desligado, peça a remoção em um PR próprio.
-- **Revisão D2 do prompt gate — decisão pendente.** A data histórica é 31/10;14/11
-  é o limite da última extensão possível, não concessão automática. O PR103 está em
-  rascunho e ainda não é a versão instalada no Mac. Antes de usar o novo relatório,
-  confirmar a integração e atualizar a cópia correta de trabalho. Na raiz dela:
-  `python3 tools/prompt_gate.py --report`. Conferir caminho e intervalo dos eventos.
-  Ausência de fonte não é amostra zero. Rotular cada regra com
-  `python3 tools/prompt_gate.py --label <id> <regra> fp|tp`, substituindo os campos
-  entre `< >`. Legados multirregra precisam de revisão separada; usar um rotulador
-  por vez e preservar os arquivos originais. Depois Felipe registra a decisão por
-  regra, sem promoção automática. Roteiro completo: `../../HANDOFF.md`.
+- **D2 encerrado por Felipe em 14/11/2026:** manter as três regras de qualidade
+  apenas como avisos; proteção existente de CPF/CNPJ preservada. A fonte real
+  consultada tinha um evento antigo e nenhum rótulo; os smokes ficaram separados.
+  Não há promoção, remoção, prorrogação retroativa ou novo prazo. Não é necessário
+  fabricar uma amostra nem rotular um evento sem seu contexto original.
+  O PR103 está pronto para revisão; merge/deploy exigem decisão separada.
+  Para consulta posterior na versão corrigida: `python3 tools/prompt_gate.py --report`.
+  A decisão aprovada está na Task9 da spec original e em `../../HANDOFF.md`.
 - **Trocar a chave SSH de deploy e a `DASHBOARD_API_KEY`.** Adiado desde julho; envolve
   secrets do GitHub e a VPS.
 - **Logs de auditoria.** São apagados todo dia quando passam de 120 dias, e **não existe

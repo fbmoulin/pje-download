@@ -6,7 +6,7 @@ o projeto segue versionamento semântico.
 
 ## [Unreleased]
 
-### Fixed — revisão D2 por regra (14/11/2026; PR103 em rascunho)
+### Fixed — revisão D2 por regra (14/11/2026; PR103 pronto para revisão)
 
 - Rótulos v2 por evento/regra; precedência de rótulos específicos, compatibilidade com
   legado de regra única e pendência explícita para legado multirregra.
@@ -15,7 +15,7 @@ o projeto segue versionamento semântico.
 - Spec incremental e testes: CI43551254323 no código `e0a5d72`, **1331 passed, sem skips,
   1 warning**, com Redis real. Correção ainda não integrada nem implantada.
 - Documentação reconciliada: README, AGENTS, CLAUDE, TODO, spec, guia do dono e handoffs.
-  T6 (medição do Mac) e T7 (decisão humana) permanecem pendentes; nenhuma extensão retroativa.
+  Medição real do Mac e smokes isolados concluídos via saída fornecida por Felipe. Em14/11, Felipe ratificou manter as três regras advisory, encerrando D2/Task9/T7 sem promoção, remoção ou extensão retroativa; não se cria novo prazo. Merge/deploy permanecem separados.
 
 ### Fixed — importação de arquivos (04/11/2026; #101)
 

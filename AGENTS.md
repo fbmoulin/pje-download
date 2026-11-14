@@ -42,7 +42,7 @@
 ## Current Handoff and D2 Evidence
 
 - Read `HANDOFF.md` and `TODO.md` before resuming. Dated handoffs are historical snapshots, not current production state.
-- SPEC-D2-001 / PR103 is a draft implementation, not merged/deployed. T6 (real Mac telemetry) and T7 (Felipe's D2 decision) remain open.
+- SPEC-D2-001 / PR103 is ready for review, not merged/deployed. Mac measurement and isolated UserPromptSubmit smoke completed via Felipe's supplied output. On14/11 Felipe explicitly closed D2/Task9/T7: keep all three quality rules advisory, no promotion/removal or retroactive extension. This decision supersedes the previous extension calendar; no new deadline or schedule. See Task9 for the dated evidence. Historical event labeling remains optional and does not block closure.
 - Manual CLI: `python3 tools/prompt_gate.py --label <id> <regra> fp|tp`; short syntax only for single-rule events. Do not apply a legacy multi-rule label to each rule.
 - Keep evidence append-only and outside git. `--report` is read-only; missing/corrupt evidence is inconclusive, not a zero sample or approval. Use one labeler at a time.
 - Do not change PII/Stop, enable quality blocking, extend a review deadline or remove a rule merely because the technical implementation passed CI.

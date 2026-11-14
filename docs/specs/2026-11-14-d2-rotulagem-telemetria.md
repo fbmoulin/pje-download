@@ -1,10 +1,10 @@
 # SPEC-D2-001 — Revisão confiável do Prompt Quality Gate
 
-**Versão:** 0.1.1 — proposta aprovada por Felipe em 14/11/2026; implementação validada localmente e no CI do código e0a5d72; PR103 em rascunho.
+**Versão:** 0.1.1 — proposta aprovada por Felipe em 14/11/2026; implementação validada localmente e no CI do código e0a5d72; PR103 pronto para revisão.
 **Data:** 13/11/2026, referência temporal da sessão.
 **Projeto:** fbmoulin/pje-download.
 **Método:** Spec-Driven Design: evidências → requisitos → contratos → pré-mortem → tarefas → testes → decisão.
-**Estado:** PR103 em rascunho, CI do código aprovado, sem merge/deploy ou decisão D2.
+**Estado:** PR103 em rascunho, CI do código aprovado, sem merge/deploy; decisão D2 ratificada conforme seção final.
 
 ## 1. Objetivo e decisão proposta
 
@@ -148,7 +148,7 @@ Arquivos prováveis: `tools/prompt_gate.py`, testes de prompt gate/telemetria ex
 - Regressões existentes: PII antes das isenções, fail-closed interno, primeiro prompt, isenções e Stop.
 - Nenhum texto/hash de prompt ou valor de PII em fixtures persistidas, saída ou diff.
 
-Aceite da implementação: todos os RF demonstrados, matriz aprovada, sem mudanças de bloqueio, histórico preservado e comandos documentados. Só depois executar a medição real e registrar decisão D2. Testes desta spec são planejados, não executados.
+Aceite da implementação: todos os RF demonstrados, matriz aprovada, sem mudanças de bloqueio, histórico preservado e comandos documentados. A medição real e a decisão D2 foram posteriormente registradas no handoff e na seção final. Os testes eram planejados na v0.1.0; sua execução consta nas evidências posteriores.
 
 Rollback: reverter somente o código/documentação desta fatia; preservar `rotulos.jsonl`. Versão antiga não sabe interpretar corretamente v2: após rollback, não usar seu relatório para decisão D2. Não apagar/converter registros para fazê-lo parecer compatível. Não há configuração de produção a restaurar nesta entrega.
 
@@ -185,8 +185,8 @@ As fontes fixadas e o apêndice A acima vinculam requisitos à evidência. Reval
 
 - RF01–RF08 implementados no CLI, com leitor estrito separado do leitor tolerante histórico; novos rótulos v2, precedência específica e legado multirregra pendente.
 - O relatório mostra somente IDs e regras pendentes; session_id/prompt_id permanecem no arquivo local para consulta humana, sem reprodução automática de campos livres.
-- T6 permanece dependente da telemetria real do Mac. Nenhum relatório deste ambiente é medição do uso de Felipe.
-- T7 permanece pendente de decisão D2: não se registrou extensão retroativa, remoção de regra nem promoção.
+- T6: fonte real do Mac consultada por Felipe e saída registrada no handoff; smokes isolados excluídos. A classificação contextual do evento antigo não foi inventada.
+- T7 concluída: Felipe ratificou continuidade advisory em 14/11, sem extensão retroativa, remoção de regra ou promoção.
 - No aceite de leitura, timestamps significa mtime de arquivos/diretórios. atime pode ser atualizado pelo filesystem em uma leitura normal; não há promessa de congelar atime.
 
 
@@ -205,9 +205,8 @@ fatia. Ruff 0.14.14 check e format do repositório passaram; 10/10 specs passara
 verificador estrutural; diff-check e detector de PII passaram. Comparação AST confirmou
 funções históricas preservadas, salvo rotular/relatório e a instrução de uso no aviso.
 
-RF10/T6/T7 continuam pendentes: telemetria real do Mac e decisão humana. Aprovação
-da implementação não equivale a promover regras ou encerrar a decisão de política.
-
+RF10/T7 concluídos pela decisão ratificada na seção final; T6 tem a medição real
+registrada no handoff. Não se atribuiu rótulo sem contexto nem se autorizou merge/deploy.
 
 ### Confirmação remota e reconciliação documental —14/11/2026
 
@@ -216,4 +215,40 @@ aprovado no código `e0a5d7233839fde6272f9e4bbaf128da29741b51`:1331passed,
 sem skips,1warning,95.43s,com Redis real. Ruff e verificação das specs aprovados.
 Árvore do código testado:`c784f4062f7b6a5c0f1ae3cfa0e7f31df2e50bba`.
 O PR103 continua em rascunho; documentação posterior não implica nova execução
-da suíte. RF10/T6/T7 continuam pendentes. Retomada consolidada em `../../HANDOFF.md`.
+da suíte. RF10/T7 concluídos pela decisão final; medição real de T6 registrada no handoff. Retomada consolidada em `../../HANDOFF.md`.
+
+
+## Decisão D2 ratificada por Felipe — 14/11/2026
+
+Felipe aprovou expressamente nesta conversa **manter as três regras de qualidade
+em modo advisory**, sem promover bloqueios nem remover regras:
+`alvo_ou_sintoma`, `possui_dod` e `multi_tarefa`.
+
+**Fonte:** relatório real do Mac fornecido por Felipe, gerado em
+14/11/2026 às 05:07:24 UTC (02:07:24 BRT), na fonte local padrão
+`~/.local/state/pje-prompt-gate`. Telemetria válida, 1 evento de 10/10/2026
+às 07:33:38 UTC e nenhum rótulo. O mesmo evento disparou as duas primeiras
+regras; a terceira teve zero avisos. Não há 60 classificações por regra.
+
+| Regra | Avisos | Rotulados | Decisão |
+|---|---:|---:|---|
+| alvo_ou_sintoma |1|0| Manter aviso; não promover |
+| possui_dod |1|0| Manter aviso; não promover |
+| multi_tarefa |0|0| Manter aviso; não promover |
+
+A justificativa é insuficiência de evidência para bloqueio; não houve classificação
+inventada do evento antigo. Os smokes isolados não compõem a amostra real.
+A decisão **encerra a revisão D2 datada/Task9 e T7**, substituindo o calendário
+anterior de extensões. É continuidade advisory expressamente aprovada, **não**
+prorrogação retroativa nem satisfação dos critérios estatísticos. Não se cria
+novo prazo ou tarefa agendada.
+
+A proteção existente de CPF/CNPJ e o Stop permanecem inalterados. Uma futura
+promoção/remoção exige nova revisão e autorização específicas; o relatório não
+altera configurações. A rotulagem contextual do evento antigo fica opcional para
+investigação futura e não bloqueia esta decisão. A consulta da fonte e os smokes
+foram concluídos; isso não atesta todas as sessões, fontes ou comportamento futuro.
+
+Esta aprovação trata da política D2; **não autoriza merge ou deploy do PR103**,
+nem ações no caso KCP. Nenhum settings ou código foi alterado para esta decisão.
+
