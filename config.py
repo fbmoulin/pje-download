@@ -285,7 +285,17 @@ REDIS_SOCKET_TIMEOUT_SECS = float(
 )
 
 # Per-batch absolute timeout ceiling — prevents a stuck poll loop from running forever (H2).
+# The ceiling scales with the batch: min(CAP, max(FLOOR, n_processos * SECS_PER_PROCESSO)).
+# BATCH_MAX_DURATION_SECS keeps its name and is the FLOOR (a batch of 1 gets exactly it).
+# Since #109 a TJES processo with many annexes takes ~120-143 s, so a fixed 3600 s failed
+# every processo past ~27 of a healthy batch. The idle timer (RESULT_WAIT_TIMEOUT_SECS)
+# stays the hang detector. The CAP is never below the floor.
 BATCH_MAX_DURATION_SECS = int(os.getenv("BATCH_MAX_DURATION_SECS", "3600"))
+BATCH_SECS_PER_PROCESSO = int(os.getenv("BATCH_SECS_PER_PROCESSO", "300"))
+BATCH_MAX_DURATION_CAP_SECS = max(
+    int(os.getenv("BATCH_MAX_DURATION_CAP_SECS", str(24 * 3600))),
+    BATCH_MAX_DURATION_SECS,
+)
 
 # TTL for `kratos:pje:results:<batch_id>` reply queues.
 #
@@ -297,7 +307,7 @@ BATCH_MAX_DURATION_SECS = int(os.getenv("BATCH_MAX_DURATION_SECS", "3600"))
 #
 # The worker refreshes this TTL on every write, so the window only starts
 # decaying after the LAST message; an abandoned queue self-cleans, a live one
-# never expires. MUST exceed BATCH_MAX_DURATION_SECS — a shorter TTL would drop
+# never expires. MUST exceed BATCH_MAX_DURATION_CAP_SECS (the largest ceiling) — a shorter TTL would drop
 # a live batch's undrained results and resurrect the "batch failed but the files
 # are on disk" symptom. Derived so raising the batch ceiling lifts it in lockstep.
 REDIS_RESULT_QUEUE_TTL_MARGIN_SECS = int(
@@ -324,7 +334,7 @@ REDIS_RESULT_QUEUE_TTL_SECS = int(
         "REDIS_RESULT_QUEUE_TTL_SECS",
         str(
             max(
-                BATCH_MAX_DURATION_SECS + REDIS_RESULT_QUEUE_TTL_MARGIN_SECS,
+                BATCH_MAX_DURATION_CAP_SECS + REDIS_RESULT_QUEUE_TTL_MARGIN_SECS,
                 REDIS_RESULT_QUEUE_TTL_FLOOR_SECS,
             )
         ),
@@ -338,10 +348,10 @@ REDIS_RESULT_QUEUE_TTL_SECS = int(
 # defaults. Fail fast at import instead, because the failure this guards against
 # is silent — a queue expiring mid-batch drops undrained results and the batch is
 # reported failed with its files sitting on disk.
-if REDIS_RESULT_QUEUE_TTL_SECS <= BATCH_MAX_DURATION_SECS:
+if REDIS_RESULT_QUEUE_TTL_SECS <= BATCH_MAX_DURATION_CAP_SECS:
     raise ValueError(
         f"REDIS_RESULT_QUEUE_TTL_SECS ({REDIS_RESULT_QUEUE_TTL_SECS}s) must exceed "
-        f"BATCH_MAX_DURATION_SECS ({BATCH_MAX_DURATION_SECS}s): a reply queue that "
+        f"BATCH_MAX_DURATION_CAP_SECS ({BATCH_MAX_DURATION_CAP_SECS}s): a reply queue that "
         f"expires before its batch can finish silently discards undrained results."
     )
 

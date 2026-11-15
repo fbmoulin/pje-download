@@ -66,7 +66,9 @@ from config import (
     REDIS_SOCKET_TIMEOUT_SECS,
     RESULT_POLL_BLPOP_TIMEOUT_SECS,
     RESULT_WAIT_TIMEOUT_SECS,
+    BATCH_MAX_DURATION_CAP_SECS,
     BATCH_MAX_DURATION_SECS,
+    BATCH_SECS_PER_PROCESSO,
     WORKER_HEALTH_HOST,
     TRUST_X_FORWARDED_FOR,
     atomic_write_text,
@@ -105,6 +107,16 @@ class BatchJob:
     documento_ids: list[str] | None = None
     progress: dict = field(default_factory=dict)
     error: str | None = None
+
+
+def _batch_ceiling_secs(n_processos: int) -> int:
+    """Absolute ceiling for a batch of ``n_processos``: it grows with the batch
+    (``BATCH_SECS_PER_PROCESSO`` each), never below the ``BATCH_MAX_DURATION_SECS``
+    floor nor above ``BATCH_MAX_DURATION_CAP_SECS``."""
+    return min(
+        BATCH_MAX_DURATION_CAP_SECS,
+        max(BATCH_MAX_DURATION_SECS, n_processos * BATCH_SECS_PER_PROCESSO),
+    )
 
 
 @dataclass
@@ -805,17 +817,20 @@ class DashboardState:
 
         Idle-timeout path: if no message arrives for RESULT_WAIT_TIMEOUT_SECS,
         LREM the still-queued jobs, mark remaining processos as failed with a
-        timeout message and return. The absolute BATCH_MAX_DURATION_SECS ceiling
+        timeout message and return. The absolute ceiling (``_batch_ceiling_secs``)
         does the same. A Redis ConnectionError/TimeoutError on the BLPOP is retried
         with a capped backoff and counts toward the idle timeout.
 
         Mutates ``state`` in place: pending, last_result_at, timed_out, fatal_error.
         """
         batch_start_time = time.monotonic()
+        # Sized from what is still pending: on resume (enqueue_jobs=False) that
+        # excludes finished processos, and the clock restarts at the resume.
+        ceiling_secs = _batch_ceiling_secs(len(state.pending))
         redis_errors = 0  # consecutive BLPOP failures; reset on any success
         while state.pending:
-            if time.monotonic() - batch_start_time > BATCH_MAX_DURATION_SECS:
-                abs_error = f"Batch absolute timeout ({BATCH_MAX_DURATION_SECS}s)"
+            if time.monotonic() - batch_start_time > ceiling_secs:
+                abs_error = f"Batch absolute timeout ({ceiling_secs}s)"
                 await self._purge_pending_jobs(job, redis_client, state)
                 self._fail_remaining_processes(job, state.pending, abs_error)
                 job.error = abs_error

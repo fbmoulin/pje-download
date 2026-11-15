@@ -90,7 +90,10 @@ class TestTimeoutsPurgeTheJobQueue:
         redis_stub = _silent_worker_redis()
         ds.get_redis = AsyncMock(return_value=redis_stub)
 
-        with patch("dashboard_api.BATCH_MAX_DURATION_SECS", -1):
+        with (
+            patch("dashboard_api.BATCH_MAX_DURATION_SECS", -1),
+            patch("dashboard_api.BATCH_MAX_DURATION_CAP_SECS", -1),
+        ):
             await ds._run_batch(job)
 
         assert job.status == "failed"
@@ -156,7 +159,10 @@ class TestTimeoutsPurgeTheJobQueue:
         redis_stub.lrem = AsyncMock(side_effect=RedisConnectionError("gone"))
         ds.get_redis = AsyncMock(return_value=redis_stub)
 
-        with patch("dashboard_api.BATCH_MAX_DURATION_SECS", -1):
+        with (
+            patch("dashboard_api.BATCH_MAX_DURATION_SECS", -1),
+            patch("dashboard_api.BATCH_MAX_DURATION_CAP_SECS", -1),
+        ):
             await ds._run_batch(job)
 
         assert job.status == "failed"
