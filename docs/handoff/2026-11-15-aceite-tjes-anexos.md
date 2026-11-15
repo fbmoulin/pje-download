@@ -91,3 +91,12 @@ Próximo: (1) pedir ao dono a conferência de conteúdo; (2) medir um lote maior
 - Memória: `memory.peak` 343,5 MiB (antes do #111) e 345,4 MiB (depois), de 512; maior amostra de `docker stats` 303,9 e 284,7 MiB; `oom_kill` 0. `mem_limit` não foi alterado, por decisão do dono (os arquivos não precisam ser guardados depois de analisados).
 - Pendências do #109: ver `TODO.md` (itens 1, 2, 3, 5, 6 tratados; 4 e 7 decididos sem mudança, com o motivo).
 - O que continua NÃO verificado: conteúdo dos arquivos contra o PDF do PJe (depende do dono); processos com PDFs escaneados maiores que 9 MB contra o limite de 512 MiB; lote grande contra o novo teto.
+
+## Atualização (2026-11-15, retenção em produção)
+
+- Produção: `build_sha` do dashboard = `dbc512c52a8c8332c63711e422d99fca17fa99a8` (#114; CI e deploy `success`). #113 (`528ff5b`) trouxe a retenção em dry-run.
+- Dry-run (build `528ff5b`): `candidates=6 purged=0 errors=0 unmatched_dirs=1 bytes_freed=4799795`, os 6 lotes esperados.
+- Primeiro passe real (2026-11-15T08:06Z): `dry_run=False candidates=6 purged=6 errors=0 skipped_active=0 unmatched_dirs=1 bytes_freed=4799795 retention_days=14`.
+- Conferido no disco: os 6 lotes antigos têm `_report.json` e `_purged.json` com `state: done` e nenhuma pasta de processo; os 7 lotes de 14 e 15/11 mantêm as pastas e não têm marcador; os 13 relatórios seguem presentes.
+- Reverter: `DOWNLOAD_RETENTION_DRY_RUN=true` (só log) ou `DOWNLOAD_RETENTION_DAYS=0` (desativa). Arquivos já apagados não voltam.
+- Em aberto: UI não lê `_purged.json`; `_logs` e pastas de jobs diretos fora do escopo; conferência de conteúdo contra os PDFs do PJe (dono).
