@@ -51,17 +51,17 @@ Regras da limpeza (módulo novo `retention.py`, função pura `purge_old_downloa
 | O que apaga | dentro do lote: **todo diretório, qualquer que seja o nome** (inclusive `_x`), e todo arquivo que não comece com `_`. Só **arquivos regulares** na raiz do lote cujo nome comeca com `_` (`_report.json`, `_progress.json`, `_purged.json`) ficam. Symlink na raiz do lote é removido como link, nunca seguido |
 | Segurança de caminho | o lote e cada alvo precisam resolver para dentro do diretório base; lote que é symlink é ignorado |
 | Idempotência | lote sem nenhuma entrada apagável é ignorado; reexecutar não faz nada |
-| Marcador | depois de apagar, grava `_purged.json` (`purged_at`, `bytes_freed`); serve de evidência de quais lotes foram limpos |
-| Dry-run | `DOWNLOAD_RETENTION_DRY_RUN` (padrão **true**): faz tudo menos apagar e grava o marcador; só registra contagens |
-| Log | uma linha `dashboard.retention.complete` com `candidates`, `purged`, `bytes_freed`, `errors`, `skipped_active`, `unmatched_dirs`, `dry_run`, `retention_days`; nunca nomes de arquivo ou de processo. `errors > 0` sobe para WARNING com o tipo da primeira exceção |
+| Marcador | gravado **antes** da primeira remoção com `state: started` e reescrito com `state: done` ao fim (`purged_at`, `bytes_freed`): um passe interrompido por deploy deixa `started` como evidência |
+| Dry-run | `DOWNLOAD_RETENTION_DRY_RUN` (padrão **true**): seleciona e conta, mas **não apaga nem grava o marcador** (ele afirmaria uma limpeza que não houve); só registra contagens |
+| Log | uma linha `dashboard.retention.complete` com `candidates`, `purged`, `bytes_freed`, `errors`, `skipped_active`, `unmatched_dirs`, `dry_run`, `retention_days`; nunca nomes de arquivo ou de processo. Mais uma linha por lote candidato (`dashboard.retention.would_purge` em dry-run, `...purging` na deleção real) só com `batch_id` (data+hora+hex), `status`, `age_days` e `bytes`, para conferir a seleção contra a lista medida. `errors > 0` sobe para WARNING com o tipo da primeira exceção |
 | Falha | erro por lote capturado (a validação do relatório fica dentro do `try`); o laço segue com o próximo e nunca derruba o dashboard |
 
 Configuração (fail-safe, a deleção é irreversível): `DOWNLOAD_RETENTION_DAYS` padrão 14;
 `0`, negativo ou **inválido desativa** a limpeza e registra um ERROR com o nome da variável (nunca o
 valor); `DOWNLOAD_RETENTION_INTERVAL_SECS` padrão 86400, mínimo 60; `DOWNLOAD_RETENTION_DRY_RUN`
-padrão true (só `false` literal liga a deleção real). As variáveis vêm de `docker-compose.yml` com
-padrão; o `.env` que `deploy.yml` reescreve a cada deploy não as define, então mudar o padrão exige
-PR. O laço roda **uma vez no início** (depois de `resume_active_batch`) e a cada intervalo; não
+padrão true (só `false` literal liga a deleção real). As variáveis têm padrão em `config.py`; o `.env` que `deploy.yml`
+reescreve a cada deploy não as define, então mudar o padrão exige PR (ou uma entrada
+`environment:` no compose). O laço roda **uma vez no início** (depois de `resume_active_batch`) e a cada intervalo; não
 dorme primeiro, porque deploys mais frequentes que o intervalo impediriam qualquer execução.
 
 ### Task 1 — Função pura e testes (TDD)
@@ -72,8 +72,8 @@ ilegível, relatório JSON que não é objeto, `status` como lista ou dicionári
 `TypeError` fora do `try`), `_logs`, nome fora do padrão (`20251115_x`, nome com quebra de linha
 final), pasta de processo `_x` dentro do lote (é apagada), arquivos `_*` regulares (ficam),
 symlink de lote ou de entrada (não segue), `mtime` no futuro, só uma das duas idades velha, arquivo
-novo dentro do lote vetando a limpeza, lote em `protect`, idempotência, dry-run (nada some,
-marcador gravado), `max_days` inválido, contagens e bytes devolvidos. Teste de mutação: remover a
+novo dentro do lote vetando a limpeza, lote em `protect`, idempotência, dry-run (nada some e
+nenhum marcador é gravado), `max_days` inválido, contagens e bytes devolvidos. Teste de mutação: remover a
 exigência de `_report.json` terminal precisa quebrar o teste do lote `running`. Implementar em
 `retention.py`.
 

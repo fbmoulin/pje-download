@@ -266,6 +266,17 @@ evidence: `docs/specs/2026-10-03-prompt-quality-gate.md`; premortems in `.premor
   helpers). `.gitleaks.toml` also flags formatted CNJ numbers and formatted CPFs regardless of
   check digit, so never commit such literals, not even invalid ones.
 
+## Download retention (added 2026-11-15)
+
+Spec: `docs/specs/2026-11-15-retencao-downloads.md`. `retention.purge_old_downloads` (called by `dashboard_api._download_retention_loop`, started in `_on_startup` after `resume_active_batch`) deletes the downloaded files of **finished dashboard batches** older than `DOWNLOAD_RETENTION_DAYS` (default 14). **The deletion is irreversible**, so:
+
+- **Dry-run is ON by default** (`DOWNLOAD_RETENTION_DRY_RUN`, only a literal `false` turns it off): it selects and counts, deletes nothing and writes no marker. Flipping the default to real deletion is a separate PR the owner must authorize after reading the `dashboard.retention.complete` log line (`candidates`, `purged`, `bytes_freed`, `errors`, `skipped_active`, `unmatched_dirs`, `dry_run`, `retention_days`; never names).
+- **Fail safe:** `DOWNLOAD_RETENTION_DAYS` of `0`, negative or unparseable disables it (an unparseable/negative value also logs `dashboard.retention.config_invalid` with the variable name, never the value). The loop runs once at startup and then every `DOWNLOAD_RETENTION_INTERVAL_SECS` (86400); it does not sleep first, because deploys are more frequent than the interval.
+- **What it touches:** only `/data/downloads/<id>/` with `<id>` = `\d{8}_\d{6}_[0-9a-f]{6}`, whose `_report.json` is a JSON object with status `done`/`failed`/`partial`, older than N days by BOTH the report mtime and `completed_at`, with no fresh file inside. It removes every directory and every file not starting with `_`; regular `_*` files (`_report.json`, `_progress.json`, `_purged.json`) stay, so the history still loads. Symlinks are never followed. The current and any queued/running batch are protected.
+- **Out of scope (and visible as `unmatched_dirs`):** `_logs`, and top-level `<processo>/` folders written by direct queue jobs without `outputSubdir`. `/data/audit` has its own retention.
+- After a purge the batch's `_report.json` still shows `docs_baixados` / `tamanho_bytes` of files that no longer exist; a redelivered or resumed job simply recreates its folder.
+- **Never loosen a gate** (terminal status, dual age, freshness veto, `_`-directory rule) without a test that kills the mutation: `tests/test_download_retention.py` was mutation-checked on exactly those four.
+
 ## Audit Sync (Railway Postgres, Phase 2)
 
 Local JSON-L remains the **source of truth**; Railway is a write-only redundant sink.
