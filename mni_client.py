@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import mimetypes
 import os
 import threading
 import time
@@ -1198,11 +1197,25 @@ def _mimetype_to_ext(mimetype: str | None) -> str:
         "image/jpeg": ".jpg",
         "application/msword": ".doc",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        # Anexos reais do TJES (ex.: vídeo de WhatsApp) e tipos comuns de prova.
+        "video/mp4": ".mp4",
+        "video/quicktime": ".mov",
+        "audio/mpeg": ".mp3",
+        "audio/ogg": ".ogg",
+        "audio/mp4": ".m4a",
+        "audio/x-m4a": ".m4a",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+        "image/tiff": ".tiff",
+        "image/bmp": ".bmp",
+        "application/vnd.ms-excel": ".xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "application/zip": ".zip",
     }
     if mimetype in mapping:
         return mapping[mimetype]
     # O atributo mimetype é opcional no WSDL: o zeep devolve None se ausente.
+    # Lista explícita de propósito: a tabela do `mimetypes` varia com o sistema
+    # e devolve extensões executáveis (.exe, .sh, .jar) para tipos hostis.
     base = (mimetype or "").split(";")[0].strip().lower()
-    if base in mapping:
-        return mapping[base]
-    return (base and mimetypes.guess_extension(base)) or ".bin"
+    return mapping.get(base, ".bin")

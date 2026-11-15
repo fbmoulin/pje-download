@@ -207,6 +207,23 @@ class TestMimetypeToExt:
         assert _mimetype_to_ext("Video/MP4; codecs=avc1") == ".mp4"
         assert _mimetype_to_ext("text/plain; charset=utf-8") == ".txt"
 
+    @pytest.mark.parametrize(
+        "hostile",
+        [
+            "application/x-msdownload",
+            "application/x-sh",
+            "application/java-archive",
+            "text/x-python",
+            "application/x-msdos-program",
+        ],
+    )
+    def test_executable_looking_types_never_get_an_executable_extension(self, hostile):
+        """The OS mime table maps these to .exe/.sh/.jar/.py and varies by
+        system; an explicit list keeps the saved file name deterministic."""
+        from mni_client import _mimetype_to_ext
+
+        assert _mimetype_to_ext(hostile) == ".bin"
+
 
 # ---------------------------------------------------------------------------
 # MNIClient.__init__

@@ -71,7 +71,7 @@ def no_session_message(
 ) -> str:
     """Operator text for MNI losses when no PJe session exists to retry them.
 
-    Counts come first (the dashboard cell cuts the text at 80 chars), ids last.
+    Counts and the reason come first (the dashboard cell cuts the text at 80 chars), ids last.
     ``anexos_pendentes`` counts annex ids inside ``failed_ids``; the rest are
     principals.
     """
@@ -80,9 +80,8 @@ def no_session_message(
     head = ", ".join(failed_ids[:shown])
     more = "…" if len(failed_ids) > shown else ""
     return (
-        f"{len(failed_ids)} documento(s) não puderam ser baixados via MNI "
-        f"({anexos} anexo(s) e {principais} principal(is)); "
-        f"sem sessão PJe disponível para nova tentativa (ex.: {head}{more})"
+        f"{len(failed_ids)} documento(s) não baixados via MNI, sem sessão PJe "
+        f"({anexos} anexo(s) e {principais} principal(is)); ex.: {head}{more}"
     )
 
 

@@ -139,7 +139,7 @@ class TestConfigConstants:
     def test_defaults(self):
         assert config.BATCH_MAX_DURATION_SECS == 3600
         assert config.BATCH_SECS_PER_PROCESSO == 300
-        assert config.BATCH_MAX_DURATION_CAP_SECS == 86400
+        assert config.BATCH_MAX_DURATION_CAP_SECS == 21600
 
     def test_default_ttl_exceeds_the_cap(self):
         assert config.REDIS_RESULT_QUEUE_TTL_SECS > config.BATCH_MAX_DURATION_CAP_SECS
