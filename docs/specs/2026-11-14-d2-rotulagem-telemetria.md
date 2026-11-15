@@ -297,5 +297,10 @@ As correções pequenas da mesma revisão foram feitas em PR próprio
   (§5.2 e notas da implementação) ficam como histórico: nenhum hook lê esses
   arquivos, eles só anexam.
 
+Depois, os dois achados baixos daquele pré-mortem também foram corrigidos: JSON aninhado
+demais vira `EVIDENCIA_INCOMPLETA` em vez de traceback, e um último registro sem `\n`
+é recusado (`sem fim de linha`), como esta spec já pedia em §5.2 ("linha final parcial
+também torna o relatório inconclusivo").
+
 Não verificado nesta entrega: como o Claude Code interativo exibe o aviso de várias
 linhas. Conferir numa sessão real, na raiz do repositório.

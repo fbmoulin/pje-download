@@ -256,7 +256,9 @@ evidence: `docs/specs/2026-10-03-prompt-quality-gate.md`; premortems in `.premor
   never skips or fixes a bad line, and a repeated event id is reported the same way. First re-run: a
   read during an append is transient. If it persists, the message names the file and the line
   number. Copy the file next to itself (`cp telemetria.jsonl telemetria.jsonl.orig-AAAAMMDD`),
-  then remove **only that line** in an editor, without printing its content anywhere. Keep the
+  then remove **only that line** in an editor, without printing its content anywhere. For
+  `sem fim de linha` (last record lacks its `\n`, e.g. after a hand edit) the repair is only
+  appending the newline (`echo >> telemetria.jsonl`); do it before the hook appends again. Keep the
   copy: that is what separates a repair from deleting history. No quarantine command, no
   write-time collision check and no change to the 60/2 eligibility rule: the owner chose to
   keep the SPEC-D2-001 contract (addendum of 2026-11-14 in the spec).
