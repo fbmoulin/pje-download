@@ -82,3 +82,12 @@ O aceite operacional TJES (Chromium, lote de 3, Task 6) está feito e o #109 bai
 Próximo: (1) pedir ao dono a conferência de conteúdo; (2) medir um lote maior com docker stats;
 (3) tratar o #102 só com autorização explícita. Não leia arquivos de downloads/ nem /data/.
 ```
+
+
+## Atualização (2026-11-15, depois do #111)
+
+- Produção: `build_sha` do worker e do dashboard = `7a8e0d351a7dcd0c2fd00590321f16bfb09cc503` (#111). #102 (`39a4fc4`) e #110 (`fb56a68`) também mergeados.
+- Lote real repetido depois do #111 (3 processos públicos, batch `20261115_041403_f77f2f`): `done` nos três, 187 s (máximo 165,7 s); o vídeo do `796-14` agora é `.mp4`; arquivos 9 / 69 / 14, iguais ao lote anterior.
+- Memória: `memory.peak` 343,5 MiB (antes do #111) e 345,4 MiB (depois), de 512; maior amostra de `docker stats` 303,9 e 284,7 MiB; `oom_kill` 0. `mem_limit` não foi alterado, por decisão do dono (os arquivos não precisam ser guardados depois de analisados).
+- Pendências do #109: ver `TODO.md` (itens 1, 2, 3, 5, 6 tratados; 4 e 7 decididos sem mudança, com o motivo).
+- O que continua NÃO verificado: conteúdo dos arquivos contra o PDF do PJe (depende do dono); processos com PDFs escaneados maiores que 9 MB contra o limite de 512 MiB; lote grande contra o novo teto.
