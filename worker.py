@@ -1209,10 +1209,14 @@ class PJeSessionWorker:
                 if incluir_vinculados and doc.vinculados:
                     expected_total_docs += len(doc.vinculados)
 
-            anexos_pendentes = (
-                sum(len(doc.vinculados) for doc in result.processo.documentos)
+            anexo_ids = (
+                {
+                    str(v.id)
+                    for doc in result.processo.documentos
+                    for v in doc.vinculados
+                }
                 if incluir_vinculados
-                else 0
+                else set()
             )
 
             log.info(
@@ -1220,7 +1224,7 @@ class PJeSessionWorker:
                 processo=numero_processo,
                 total_docs=len(result.processo.documentos),
                 expected_total_docs=expected_total_docs,
-                anexos_pendentes=anexos_pendentes,
+                anexos_no_mni=len(anexo_ids),
             )
 
             # Fase 2: download em batches (dentro de download_documentos)
@@ -1230,6 +1234,11 @@ class PJeSessionWorker:
                 tipos_documento,
                 incluir_anexos=incluir_vinculados,
                 progress_cb=progress_cb,
+            )
+            # O MNI entrega o anexo pelo ID (medido em 2026-11-14): pendente é só o
+            # anexo que não veio, e esse ainda pode ir para os fallbacks.
+            anexos_pendentes = sum(
+                1 for i in getattr(files, "failed_ids", []) if str(i) in anexo_ids
             )
             return (files if files else None), anexos_pendentes, expected_total_docs
 
