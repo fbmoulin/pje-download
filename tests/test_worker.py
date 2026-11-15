@@ -1551,6 +1551,35 @@ class TestMniOptimization:
         )
 
     @pytest.mark.asyncio
+    async def test_try_mni_download_counts_only_failed_annexes_as_pending(
+        self, tmp_path
+    ):
+        from file_utils import DownloadedFiles
+
+        w = _load_worker_module()
+        worker = w.PJeSessionWorker()
+
+        anexo_a = MagicMock(id="11")
+        anexo_b = MagicMock(id="12")
+        processo = MagicMock(
+            documentos=[MagicMock(id="1", vinculados=[anexo_a, anexo_b], tipo="x")]
+        )
+        worker.mni_client = AsyncMock()
+        worker.mni_client.consultar_processo.return_value = MagicMock(
+            success=True, processo=processo
+        )
+        # "1" is a lost principal, "12" a lost annex: only the annex is pending.
+        worker.mni_client.download_documentos = AsyncMock(
+            return_value=DownloadedFiles([{"nome": "a.pdf"}], ["1", "12"])
+        )
+
+        _, anexos_pendentes, _ = await worker._try_mni_download(
+            "5000005" + "-00.2024.8.08.0001", tmp_path, incluir_anexos=True
+        )
+
+        assert anexos_pendentes == 1
+
+    @pytest.mark.asyncio
     async def test_try_mni_download_reports_expected_total_with_annexes(self, tmp_path):
         w = _load_worker_module()
         worker = w.PJeSessionWorker()
@@ -1581,7 +1610,8 @@ class TestMniOptimization:
         )
 
         assert files == [{"nome": "a.pdf"}]
-        assert anexos_pendentes == 2
+        # The MNI delivers annexes by id: none failed, so none is pending.
+        assert anexos_pendentes == 0
         assert total_docs == 4
         worker.mni_client.download_documentos.assert_awaited_once_with(
             processo,

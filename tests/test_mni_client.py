@@ -1709,3 +1709,156 @@ async def test_restricted_selection_preserves_duplicates_and_leaves_annex_pendin
     assert {r["id"] for r in files[0]["documentos"]} == {"12", "14"}
     assert client.consultar_processo.await_args.kwargs["documento_ids"] == ["12", "14"]
     assert len(list(tmp_path.iterdir())) == 1
+
+
+class TestDownloadDocumentosFetchesAnnexesById:
+    """Measured 2026-11-14 on the TJES MNI: asking `documento=[<annex id>]`
+    returns the annex bytes, nested under its parent's `vinculados`. The old
+    comment ("MNI não retorna conteúdo de vinculados") was wrong, so every
+    process with annexes ended `partial`."""
+
+    # Built at runtime: gitleaks flags formatted CNJ numbers, even fake ones.
+    _NUM = "5000001" + "-00.2024.8.08.0001"
+
+    _doc = staticmethod(TestDownloadDocumentosReportsFailures._doc)
+    _answer = staticmethod(TestDownloadDocumentosReportsFailures._answer)
+
+    @classmethod
+    def _tree(cls, with_content=False):
+        parent = cls._doc(1)
+        annex = cls._doc(2)
+        annex.id_pai = parent.id
+        parent.vinculados = [annex]
+        if with_content:
+            full_parent = cls._doc(1, b"parent")
+            full_annex = cls._doc(2, b"annex")
+            full_annex.id_pai = full_parent.id
+            full_parent.vinculados = [full_annex]
+            return parent, full_parent
+        return parent, None
+
+    @pytest.mark.asyncio
+    async def test_annex_is_saved_from_the_nested_answer(self, tmp_path):
+        from mni_client import MNIProcesso
+
+        parent, full = self._tree(with_content=True)
+        processo = MNIProcesso(numero=self._NUM, documentos=[parent])
+        client = _make_client()
+        asked = []
+
+        async def consultar(numero, **kw):
+            asked.append(kw["documento_ids"])
+            return self._answer(numero, [full])
+
+        with (
+            patch.object(client, "consultar_processo", side_effect=consultar),
+            patch("audit.log_access"),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            saved = await client.download_documentos(processo, tmp_path, batch_size=5)
+
+        assert sorted(asked[0]) == ["doc1", "doc2"]
+        assert len(saved) == 2
+        assert saved.failed_ids == []
+
+    @pytest.mark.asyncio
+    async def test_annex_missing_from_the_answer_is_reported_failed(self, tmp_path):
+        from mni_client import MNIProcesso
+
+        parent, _ = self._tree()
+        answer_parent = self._doc(1, b"parent")  # annex not returned
+        processo = MNIProcesso(numero=self._NUM, documentos=[parent])
+        client = _make_client()
+
+        async def consultar(numero, **kw):
+            return self._answer(numero, [answer_parent])
+
+        with (
+            patch.object(client, "consultar_processo", side_effect=consultar),
+            patch("audit.log_access"),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            saved = await client.download_documentos(processo, tmp_path, batch_size=5)
+
+        assert len(saved) == 1
+        assert saved.failed_ids == ["doc2"]
+
+    @pytest.mark.asyncio
+    async def test_incluir_anexos_false_never_asks_for_annexes(self, tmp_path):
+        from mni_client import MNIProcesso
+
+        parent, full = self._tree(with_content=True)
+        processo = MNIProcesso(numero=self._NUM, documentos=[parent])
+        client = _make_client()
+        asked = []
+
+        async def consultar(numero, **kw):
+            asked.append(kw["documento_ids"])
+            return self._answer(numero, [full])
+
+        with (
+            patch.object(client, "consultar_processo", side_effect=consultar),
+            patch("audit.log_access"),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            saved = await client.download_documentos(
+                processo, tmp_path, batch_size=5, incluir_anexos=False
+            )
+
+        assert asked == [["doc1"]]
+        assert len(saved) == 1
+
+    @pytest.mark.asyncio
+    async def test_content_copy_wins_when_the_answer_repeats_an_id(self, tmp_path):
+        """A parent can appear twice in one answer (as requested, and as the
+        wrapper of a nested annex). The copy WITH content must not be shadowed
+        by a later copy without it."""
+        from mni_client import MNIProcesso
+
+        parent, full = self._tree(with_content=True)
+        wrapper = self._doc(1)  # same id, no content, annex nested under it
+        wrapper.vinculados = full.vinculados
+        processo = MNIProcesso(numero=self._NUM, documentos=[parent])
+        client = _make_client()
+
+        async def consultar(numero, **kw):
+            full_parent = self._doc(1, b"parent")
+            return self._answer(numero, [full_parent, wrapper])
+
+        with (
+            patch.object(client, "consultar_processo", side_effect=consultar),
+            patch("audit.log_access"),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            saved = await client.download_documentos(processo, tmp_path, batch_size=5)
+
+        assert len(saved) == 2
+        assert saved.failed_ids == []
+
+    @pytest.mark.asyncio
+    async def test_failed_batch_still_signals_progress(self, tmp_path):
+        """The dashboard gives up after RESULT_WAIT_TIMEOUT_SECS without a
+        message, and only a saved file used to publish one: a run of failing
+        annex batches went silent while the worker kept going."""
+        from mni_client import MNIProcesso, MNIResult
+
+        docs = [self._doc(i) for i in range(6)]
+        processo = MNIProcesso(numero=self._NUM, documentos=docs)
+        client = _make_client()
+        progress = AsyncMock()
+
+        async def consultar(numero, **kw):
+            return MNIResult(success=False, error="MNI recusou")
+
+        with (
+            patch.object(client, "consultar_processo", side_effect=consultar),
+            patch("audit.log_access"),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            saved = await client.download_documentos(
+                processo, tmp_path, batch_size=5, progress_cb=progress
+            )
+
+        assert len(saved.failed_ids) == 6
+        assert progress.await_count == 2  # one per failed batch (5 + 1)
+        assert progress.await_args.kwargs["file_info"] is None
