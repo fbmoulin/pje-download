@@ -43,6 +43,7 @@ from file_utils import (
     DownloadedFiles,
     merge_file_lists,
     missing_docs_message,
+    no_session_message,
     total_bytes,
 )
 from mni_client import MNIClient, MNIResult
@@ -1025,10 +1026,7 @@ class PJeSessionWorker:
                 await self._ensure_browser()
 
             if ctx.anexos_pendentes and (self.page is None or self.context is None):
-                warning = (
-                    f"MNI baixou documentos principais, mas {ctx.anexos_pendentes} anexo(s) "
-                    "permanecem pendentes sem sessão PJe disponível"
-                )
+                warning = no_session_message(ctx.mni_failed_ids, ctx.anexos_pendentes)
                 await self._publish_progress(
                     job,
                     "partial",
