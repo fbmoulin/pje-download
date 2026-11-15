@@ -39,6 +39,7 @@ import structlog
 import metrics
 from async_retry import AsyncRetry
 from file_utils import duration_stats, total_bytes, valid_duration
+from retention import purge_old_downloads
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.dashboard-api")
 
@@ -52,6 +53,10 @@ from config import (
     AUDIT_LOG_DIR,
     AUDIT_LOG_RETENTION_DAYS,
     AUDIT_ROTATE_INTERVAL_SECS,
+    DOWNLOAD_RETENTION_DAYS,
+    DOWNLOAD_RETENTION_DAYS_INVALID,
+    DOWNLOAD_RETENTION_DRY_RUN,
+    DOWNLOAD_RETENTION_INTERVAL_SECS,
     AUDIT_SYNC_AUTO_MIGRATE,
     AUDIT_SYNC_BATCH_SIZE,
     AUDIT_SYNC_CATCHUP_DAYS,
@@ -81,6 +86,7 @@ import audit_sync
 AUDIT_SYNCER_KEY: web.AppKey = web.AppKey("audit_syncer", audit_sync.AuditSyncer)
 AUDIT_SYNC_TASK_KEY: web.AppKey = web.AppKey("audit_sync_task", asyncio.Task)
 AUDIT_ROTATE_TASK_KEY: web.AppKey = web.AppKey("audit_rotate_task", asyncio.Task)
+RETENTION_TASK_KEY: web.AppKey = web.AppKey("download_retention_task", asyncio.Task)
 APP_CTX_KEY: web.AppKey = web.AppKey("_ctx", "AppContext")
 
 _MAX_DOWNLOAD_PAYLOAD_BYTES = 10 * 1024 * 1024  # hard cap for POST /api/download (H5)
@@ -1573,6 +1579,14 @@ async def _on_cleanup(app: web.Application) -> None:
         except asyncio.CancelledError:
             pass
 
+    retention_task = app.get(RETENTION_TASK_KEY) if hasattr(app, "get") else None
+    if isinstance(retention_task, asyncio.Task):
+        retention_task.cancel()
+        try:
+            await retention_task
+        except asyncio.CancelledError:
+            pass
+
     syncer = app.get(AUDIT_SYNCER_KEY) if hasattr(app, "get") else None
     sync_task = app.get(AUDIT_SYNC_TASK_KEY) if hasattr(app, "get") else None
     if isinstance(syncer, audit_sync.AuditSyncer) and isinstance(
@@ -1661,10 +1675,79 @@ async def _audit_rotation_loop(interval_secs: float) -> None:
             )
 
 
+async def _download_retention_loop(
+    state: "DashboardState", interval_secs: float
+) -> None:
+    """Purge finished batches' downloaded files (see ``retention.purge_old_downloads``).
+
+    Runs once right away and then every ``interval_secs``: it must NOT sleep first, or a
+    dashboard redeployed more often than the interval would never purge. The protect set
+    is taken right before each pass. A failure is logged by type only and the loop goes on.
+    """
+    while True:
+        try:
+            protect = {state.current_batch_id} | {
+                bid
+                for bid, job in state.batches.items()
+                if job.status in ("queued", "running")
+            }
+            protect.discard(None)
+            result = await asyncio.to_thread(
+                purge_old_downloads,
+                state.output_dir,
+                DOWNLOAD_RETENTION_DAYS,
+                frozenset(protect),
+                dry_run=DOWNLOAD_RETENTION_DRY_RUN,
+            )
+            fields = {
+                "candidates": result.candidates,
+                "purged": result.purged,
+                "bytes_freed": result.bytes_freed,
+                "errors": result.errors,
+                "skipped_active": result.skipped_active,
+                "unmatched_dirs": result.unmatched_dirs,
+                "dry_run": DOWNLOAD_RETENTION_DRY_RUN,
+                "retention_days": DOWNLOAD_RETENTION_DAYS,
+            }
+            for detail in result.details:
+                log.info(
+                    "dashboard.retention.would_purge"
+                    if DOWNLOAD_RETENTION_DRY_RUN
+                    else "dashboard.retention.purging",
+                    **detail,
+                )
+            if result.errors:
+                log.warning(
+                    "dashboard.retention.complete",
+                    error_type=result.error_type,
+                    **fields,
+                )
+            else:
+                log.info("dashboard.retention.complete", **fields)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("dashboard.retention.failed", error_type=type(exc).__name__)
+        await asyncio.sleep(interval_secs)
+
+
 async def _on_startup(app: web.Application) -> None:
     ctx: AppContext | None = app.get(APP_CTX_KEY) if hasattr(app, "get") else None
     if ctx is not None:
         await ctx.state.resume_active_batch()
+        # After the resume: the active batch is already known, hence protected.
+        if DOWNLOAD_RETENTION_DAYS >= 1:
+            app[RETENTION_TASK_KEY] = asyncio.create_task(
+                _download_retention_loop(ctx.state, DOWNLOAD_RETENTION_INTERVAL_SECS)
+            )
+        elif DOWNLOAD_RETENTION_DAYS_INVALID:
+            log.error(
+                "dashboard.retention.config_invalid",
+                variable="DOWNLOAD_RETENTION_DAYS",
+            )
+            log.info("dashboard.retention.disabled")
+        else:
+            log.info("dashboard.retention.disabled")
 
     # Before the syncer's early returns: rotation does not depend on the Postgres sink.
     app[AUDIT_ROTATE_TASK_KEY] = asyncio.create_task(

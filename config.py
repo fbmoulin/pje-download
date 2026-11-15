@@ -136,6 +136,48 @@ AUDIT_ROTATE_INTERVAL_SECS = max(
     60, int(os.getenv("AUDIT_ROTATE_INTERVAL_SECS", "86400"))
 )
 SESSION_TIMEOUT_MINUTES = int(os.getenv("SESSION_TIMEOUT_MINUTES", "60"))
+
+
+def parse_retention_days(raw: str) -> tuple[int, bool]:
+    """``(days, invalid)`` for DOWNLOAD_RETENTION_DAYS. The purge deletes files for good,
+    so a typo must never turn into deletion: anything that is not a positive integer
+    disables it (``0`` quietly; negative or unparseable also flags ``invalid``)."""
+    try:
+        days = int(raw.strip())
+    except ValueError:
+        return 0, True
+    if days >= 1:
+        return days, False
+    return 0, days < 0
+
+
+def parse_dry_run(raw: str) -> bool:
+    """Dry-run stays ON unless the value is a literal ``false`` (fail safe)."""
+    return raw.strip().lower() != "false"
+
+
+# Retention of finished batches' downloaded files (docs/specs/2026-11-15-retencao-downloads.md).
+DOWNLOAD_RETENTION_DAYS, DOWNLOAD_RETENTION_DAYS_INVALID = parse_retention_days(
+    os.getenv("DOWNLOAD_RETENTION_DAYS", "14")
+)
+# Starts in dry-run: the first passes only log what WOULD be deleted. Flipping the
+# default to real deletion is a separate, owner-authorized change.
+DOWNLOAD_RETENTION_DRY_RUN = parse_dry_run(
+    os.getenv("DOWNLOAD_RETENTION_DRY_RUN", "true")
+)
+
+
+def _retention_interval(raw: str) -> int:
+    """A typo here only reschedules the purge: fall back to daily, never crash-loop."""
+    try:
+        return max(60, int(raw.strip()))
+    except ValueError:
+        return 86400
+
+
+DOWNLOAD_RETENTION_INTERVAL_SECS = _retention_interval(
+    os.getenv("DOWNLOAD_RETENTION_INTERVAL_SECS", "86400")
+)
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 MAX_DOCS_PER_SESSION = int(os.getenv("MAX_DOCS_PER_SESSION", "50"))
 DOWNLOAD_DELAY_SECS = float(os.getenv("DOWNLOAD_DELAY_SECS", "1.5"))
