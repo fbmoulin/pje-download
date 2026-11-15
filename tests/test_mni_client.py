@@ -186,6 +186,44 @@ class TestMimetypeToExt:
 
         assert _mimetype_to_ext("") == ".bin"
 
+    def test_none_returns_bin(self):
+        from mni_client import _mimetype_to_ext
+
+        assert _mimetype_to_ext(None) == ".bin"
+
+    def test_video_mp4_falls_back_to_stdlib(self):
+        from mni_client import _mimetype_to_ext
+
+        assert _mimetype_to_ext("video/mp4") == ".mp4"
+
+    def test_unknown_type_returns_bin(self):
+        from mni_client import _mimetype_to_ext
+
+        assert _mimetype_to_ext("application/x-nao-existe") == ".bin"
+
+    def test_parameters_and_case_are_ignored(self):
+        from mni_client import _mimetype_to_ext
+
+        assert _mimetype_to_ext("Video/MP4; codecs=avc1") == ".mp4"
+        assert _mimetype_to_ext("text/plain; charset=utf-8") == ".txt"
+
+    @pytest.mark.parametrize(
+        "hostile",
+        [
+            "application/x-msdownload",
+            "application/x-sh",
+            "application/java-archive",
+            "text/x-python",
+            "application/x-msdos-program",
+        ],
+    )
+    def test_executable_looking_types_never_get_an_executable_extension(self, hostile):
+        """The OS mime table maps these to .exe/.sh/.jar/.py and varies by
+        system; an explicit list keeps the saved file name deterministic."""
+        from mni_client import _mimetype_to_ext
+
+        assert _mimetype_to_ext(hostile) == ".bin"
+
 
 # ---------------------------------------------------------------------------
 # MNIClient.__init__
@@ -259,6 +297,26 @@ class TestSaveDocument:
         saved_file = Path(result["localPath"])
         assert saved_file.exists()
         assert saved_file.read_bytes() == content
+
+    def test_saves_video_mp4_with_mp4_extension(self, tmp_path):
+        from mni_client import MNIDocumento
+
+        client = _make_client()
+        content = b"\x00\x00\x00\x18ftypisom" + b"0" * 64
+        doc = MNIDocumento(
+            id="789",
+            nome="Video",
+            tipo="anexo",
+            mimetype="video/mp4",
+            conteudo_base64=base64.b64encode(content).decode("ascii"),
+            tamanho_bytes=len(content),
+        )
+        outcome: dict = {}
+        result = client._save_document(doc, tmp_path, set(), outcome=outcome)
+        assert result is not None
+        assert outcome["status"] == "saved"
+        assert result["nome"].endswith(".mp4")
+        assert Path(result["localPath"]).read_bytes() == content
 
     def test_skips_duplicate_by_checksum(self, tmp_path):
         from mni_client import MNIDocumento

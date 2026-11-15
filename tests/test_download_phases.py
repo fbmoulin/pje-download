@@ -70,6 +70,35 @@ def _make_worker(w):
     return worker
 
 
+class TestNoSessionBranchNamesLostDocuments:
+    @pytest.mark.asyncio
+    async def test_principal_and_annex_lost_without_session_are_in_error(self):
+        w = _load_worker_module()
+        worker = _make_worker(w)
+        worker.mni_client = MagicMock()
+        worker._ensure_browser = AsyncMock(return_value=False)
+        worker.is_session_expired = lambda: False
+        worker._try_mni_download = AsyncMock(
+            return_value=(
+                w.DownloadedFiles([{"nome": "a.pdf", "tamanhoBytes": 1}], ["P9", "A1"]),
+                1,
+                3,
+            )
+        )
+        numero = "5000001" + "-00.2024.8.08.0001"
+
+        result = await worker.download_process(
+            {"jobId": "j-nosess", "numeroProcesso": numero}
+        )
+
+        assert result["status"] == "partial_success", result
+        msg = result["errorMessage"]
+        assert "P9" in msg
+        assert "1 anexo(s) e 1 principal(is)" in msg
+        assert "sem sessão PJe" in msg
+        assert "pendente" not in msg
+
+
 class TestPhaseGdrive:
     @pytest.mark.asyncio
     async def test_gdrive_merges_files_and_continues_when_session_available(self):

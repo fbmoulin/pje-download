@@ -1896,7 +1896,10 @@ class TestSprintFiveBFixes:
         ds.get_redis = AsyncMock(return_value=fake_redis)
 
         # -1 makes elapsed > -1 always True from the very first check.
-        with patch("dashboard_api.BATCH_MAX_DURATION_SECS", -1):
+        with (
+            patch("dashboard_api.BATCH_MAX_DURATION_SECS", -1),
+            patch("dashboard_api.BATCH_MAX_DURATION_CAP_SECS", -1),
+        ):
             await ds._run_batch(job)
 
         assert job.status == "failed", (

@@ -7,7 +7,33 @@ byte summation and deduplication.
 
 from __future__ import annotations
 
-from file_utils import merge_file_lists, total_bytes
+from file_utils import merge_file_lists, no_session_message, total_bytes
+
+
+class TestNoSessionMessage:
+    def test_counts_annexes_and_principals_then_ids(self):
+        msg = no_session_message(["P9", "A1", "A2"], 2)
+        assert msg.startswith("3 documento(s) não baixados via MNI, sem sessão PJe")
+        assert "2 anexo(s) e 1 principal(is)" in msg
+        assert "sem sessão PJe" in msg
+        assert msg.index("2 anexo(s)") < msg.index("P9")
+        assert "pendente" not in msg
+
+    def test_truncates_ids_like_missing_docs_message(self):
+        ids = [f"D{i}" for i in range(8)]
+        msg = no_session_message(ids, 0)
+        assert "D4" in msg and "D5" not in msg
+        assert msg.endswith("…")
+
+    def test_more_annexes_than_failed_ids_never_negative(self):
+        msg = no_session_message(["A1"], 4)
+        assert "0 principal(is)" in msg
+        assert "1 anexo(s)" in msg
+
+    def test_empty_failed_ids_still_mentions_session(self):
+        msg = no_session_message([], 2)
+        assert "sem sessão PJe" in msg
+        assert "pendente" not in msg
 
 
 class TestTotalBytes:
@@ -78,3 +104,14 @@ class TestMergeFileLists:
 
     def test_empty_groups_returns_empty(self):
         assert merge_file_lists([], []) == []
+
+
+def test_no_session_message_shows_the_reason_before_the_80_char_cut():
+    """The dashboard cell cuts the text at 80 characters: the reason must be
+    visible there, and nothing may promise a retry that does not happen."""
+    from file_utils import no_session_message
+
+    msg = no_session_message(["P9", "A1"], 1)
+
+    assert "sem sessão PJe" in msg[:80]
+    assert "nova tentativa" not in msg

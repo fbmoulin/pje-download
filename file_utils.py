@@ -66,6 +66,25 @@ def missing_docs_message(
     )
 
 
+def no_session_message(
+    failed_ids: list[str], anexos_pendentes: int, shown: int = 5
+) -> str:
+    """Operator text for MNI losses when no PJe session exists to retry them.
+
+    Counts and the reason come first (the dashboard cell cuts the text at 80 chars), ids last.
+    ``anexos_pendentes`` counts annex ids inside ``failed_ids``; the rest are
+    principals.
+    """
+    anexos = min(anexos_pendentes, len(failed_ids))
+    principais = len(failed_ids) - anexos
+    head = ", ".join(failed_ids[:shown])
+    more = "…" if len(failed_ids) > shown else ""
+    return (
+        f"{len(failed_ids)} documento(s) não baixados via MNI, sem sessão PJe "
+        f"({anexos} anexo(s) e {principais} principal(is)); ex.: {head}{more}"
+    )
+
+
 def total_bytes(files: Iterable[dict]) -> int:
     """Sum ``tamanhoBytes`` across a sequence of file-metadata dicts.
 
