@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import mimetypes
 import os
 import threading
 import time
@@ -1187,8 +1188,8 @@ def _flatten_documents(docs: list["MNIDocumento"]):
         yield from _flatten_documents(doc.vinculados)
 
 
-def _mimetype_to_ext(mimetype: str) -> str:
-    """Converte mimetype para extensão de arquivo."""
+def _mimetype_to_ext(mimetype: str | None) -> str:
+    """Converte mimetype para extensão de arquivo (``.bin`` se desconhecido)."""
     mapping = {
         "application/pdf": ".pdf",
         "text/html": ".html",
@@ -1198,4 +1199,10 @@ def _mimetype_to_ext(mimetype: str) -> str:
         "application/msword": ".doc",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     }
-    return mapping.get(mimetype, ".bin")
+    if mimetype in mapping:
+        return mapping[mimetype]
+    # O atributo mimetype é opcional no WSDL: o zeep devolve None se ausente.
+    base = (mimetype or "").split(";")[0].strip().lower()
+    if base in mapping:
+        return mapping[base]
+    return (base and mimetypes.guess_extension(base)) or ".bin"
