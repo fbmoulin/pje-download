@@ -631,7 +631,7 @@ function renderHistory(batches) {
       <td>${b.processos}</td>
       <td>${statusTag(b.status)}${errHint}</td>
       <td>${b.total_docs || 0}</td>
-      <td>${fmtBytes(b.total_bytes || 0)}</td>
+      <td>${fmtBytes(b.total_bytes || 0)}${b.purged ? ' <span class="tag tag--antigo" title="Os arquivos deste lote foram apagados pela retenção; o relatório continua">arquivos removidos</span>' : ''}</td>
       <td class="text-xs">${fmtDate(b.finished_at || b.created_at)}</td>
     </tr>`;
   }

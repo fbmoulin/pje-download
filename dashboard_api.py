@@ -39,7 +39,7 @@ import structlog
 import metrics
 from async_retry import AsyncRetry
 from file_utils import duration_stats, total_bytes, valid_duration
-from retention import purge_old_downloads
+from retention import purge_old_downloads, purge_old_logs
 
 log: structlog.BoundLogger = structlog.get_logger("kratos.dashboard-api")
 
@@ -1410,6 +1410,9 @@ async def handle_history(request: web.Request) -> web.Response:
                 "finished_at": job.finished_at,
                 "total_docs": total_docs,
                 "total_bytes": total_bytes,
+                "purged": bool(
+                    job.output_dir and (Path(job.output_dir) / "_purged.json").is_file()
+                ),
                 "error": job.error,
             }
         )
@@ -1724,6 +1727,27 @@ async def _download_retention_loop(
                 )
             else:
                 log.info("dashboard.retention.complete", **fields)
+            logs_result = await asyncio.to_thread(
+                purge_old_logs,
+                state.output_dir,
+                DOWNLOAD_RETENTION_DAYS,
+                dry_run=DOWNLOAD_RETENTION_DRY_RUN,
+            )
+            logs_fields = {
+                "candidates": logs_result.candidates,
+                "purged": logs_result.purged,
+                "bytes_freed": logs_result.bytes_freed,
+                "errors": logs_result.errors,
+                "dry_run": DOWNLOAD_RETENTION_DRY_RUN,
+            }
+            if logs_result.errors:
+                log.warning(
+                    "dashboard.retention.logs_complete",
+                    error_type=logs_result.error_type,
+                    **logs_fields,
+                )
+            else:
+                log.info("dashboard.retention.logs_complete", **logs_fields)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -219,3 +219,47 @@ def purge_old_downloads(
             if result.error_type is None:
                 result.error_type = type(exc).__name__
     return result
+
+
+LOGS_DIR = "_logs"
+
+
+def purge_old_logs(
+    base_dir: Path,
+    max_days: int,
+    *,
+    now: float | None = None,
+    dry_run: bool = True,
+) -> RetentionResult:
+    """Delete the worker's per-job result logs (``<base>/_logs/*.json``) past ``max_days``.
+
+    Those logs list the saved file names, which can carry party names, so they follow the
+    same window as the downloads. Only regular ``*.json`` files directly inside a real
+    ``_logs`` directory, judged by their own mtime; symlinks are never followed.
+    """
+    result = RetentionResult()
+    if max_days < 1:
+        return result
+    logs = Path(base_dir) / LOGS_DIR
+    if logs.is_symlink() or not logs.is_dir():
+        return result
+    now = datetime.now(UTC).timestamp() if now is None else now
+    cutoff = now - max_days * DAY_SECS
+    for entry in sorted(logs.iterdir()):
+        try:
+            if entry.suffix != ".json" or entry.is_symlink() or not entry.is_file():
+                continue
+            st = entry.lstat()
+            if st.st_mtime > now or st.st_mtime >= cutoff:
+                continue
+            result.candidates += 1
+            result.bytes_freed += st.st_size
+            if dry_run:
+                continue
+            os.unlink(entry)
+            result.purged += 1
+        except Exception as exc:
+            result.errors += 1
+            if result.error_type is None:
+                result.error_type = type(exc).__name__
+    return result
