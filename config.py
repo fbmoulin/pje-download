@@ -160,10 +160,11 @@ def parse_dry_run(raw: str) -> bool:
 DOWNLOAD_RETENTION_DAYS, DOWNLOAD_RETENTION_DAYS_INVALID = parse_retention_days(
     os.getenv("DOWNLOAD_RETENTION_DAYS", "14")
 )
-# Starts in dry-run: the first passes only log what WOULD be deleted. Flipping the
-# default to real deletion is a separate, owner-authorized change.
+# Real deletion is ON (owner-authorized 2026-11-15, after the production dry-run selected
+# exactly the 6 expected batches). `DOWNLOAD_RETENTION_DRY_RUN=true` goes back to log-only,
+# and any value other than a literal `false` stays in dry-run (fail safe).
 DOWNLOAD_RETENTION_DRY_RUN = parse_dry_run(
-    os.getenv("DOWNLOAD_RETENTION_DRY_RUN", "true")
+    os.getenv("DOWNLOAD_RETENTION_DRY_RUN", "false")
 )
 
 
