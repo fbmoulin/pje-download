@@ -52,14 +52,14 @@ Regras da limpeza (módulo novo `retention.py`, função pura `purge_old_downloa
 | Segurança de caminho | o lote e cada alvo precisam resolver para dentro do diretório base; lote que é symlink é ignorado |
 | Idempotência | lote sem nenhuma entrada apagável é ignorado; reexecutar não faz nada |
 | Marcador | gravado **antes** da primeira remoção com `state: started` e reescrito com `state: done` ao fim (`purged_at`, `bytes_freed`): um passe interrompido por deploy deixa `started` como evidência |
-| Dry-run | `DOWNLOAD_RETENTION_DRY_RUN` (padrão **true**): seleciona e conta, mas **não apaga nem grava o marcador** (ele afirmaria uma limpeza que não houve); só registra contagens |
+| Dry-run | `DOWNLOAD_RETENTION_DRY_RUN` (padrão **true** no #113; **false** a partir deste PR, autorizado pelo dono depois do dry-run em produção): seleciona e conta, mas **não apaga nem grava o marcador** (ele afirmaria uma limpeza que não houve); só registra contagens |
 | Log | uma linha `dashboard.retention.complete` com `candidates`, `purged`, `bytes_freed`, `errors`, `skipped_active`, `unmatched_dirs`, `dry_run`, `retention_days`; nunca nomes de arquivo ou de processo. Mais uma linha por lote candidato (`dashboard.retention.would_purge` em dry-run, `...purging` na deleção real) só com `batch_id` (data+hora+hex), `status`, `age_days` e `bytes`, para conferir a seleção contra a lista medida. `errors > 0` sobe para WARNING com o tipo da primeira exceção |
 | Falha | erro por lote capturado (a validação do relatório fica dentro do `try`); o laço segue com o próximo e nunca derruba o dashboard |
 
 Configuração (fail-safe, a deleção é irreversível): `DOWNLOAD_RETENTION_DAYS` padrão 14;
 `0`, negativo ou **inválido desativa** a limpeza e registra um ERROR com o nome da variável (nunca o
 valor); `DOWNLOAD_RETENTION_INTERVAL_SECS` padrão 86400, mínimo 60; `DOWNLOAD_RETENTION_DRY_RUN`
-padrão true (só `false` literal liga a deleção real). As variáveis têm padrão em `config.py`; o `.env` que `deploy.yml`
+padrão `false` a partir do PR que liga a deleção real (era `true` no #113); qualquer valor que não seja o literal `false` mantém o dry-run. As variáveis têm padrão em `config.py`; o `.env` que `deploy.yml`
 reescreve a cada deploy não as define, então mudar o padrão exige PR (ou uma entrada
 `environment:` no compose). O laço roda **uma vez no início** (depois de `resume_active_batch`) e a cada intervalo; não
 dorme primeiro, porque deploys mais frequentes que o intervalo impediriam qualquer execução.
@@ -109,3 +109,12 @@ limpar `/data/audit` (retenção própria), apagar o histórico (`_report.json`)
 `_on_startup`), `worker.py` (`_resolve_output_dir`), `audit.py` (`rotate_logs`),
 `docker-compose.yml` (volumes), `CLAUDE.md` (Audit Sync, Test Patterns),
 `docs/handoff/2026-11-15-aceite-tjes-anexos.md`, `TODO.md` (item de retenção).
+
+## Evidência do dry-run em produção (2026-11-15, build `528ff5b`)
+
+O primeiro passe registrou `candidates=6 purged=0 errors=0 skipped_active=0 unmatched_dirs=1
+dry_run=True bytes_freed=4799795` e seis linhas `would_purge`: quatro lotes de 2026-07-18 (todos
+`failed`, 0, 0, 1,7 e 1,7 MB) e dois de 2026-10-18 (um `failed` com 0 e um `done` com 1,4 MB). Bate
+exatamente com a seleção medida antes (as pastas dos processos continuavam no disco e nenhum
+`_purged.json` foi criado). Os ~9 MB estimados antes vinham do `du`, que conta também o relatório e
+a sobrecarga de blocos; o que seria apagado são 4,8 MB.

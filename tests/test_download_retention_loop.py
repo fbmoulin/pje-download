@@ -64,12 +64,20 @@ class TestConfigIsFailSafe:
 
     def test_defaults(self):
         assert config.DOWNLOAD_RETENTION_DAYS == 14
-        assert config.DOWNLOAD_RETENTION_DRY_RUN is True
+        assert config.DOWNLOAD_RETENTION_DRY_RUN is False  # real deletion, authorized
         assert config.DOWNLOAD_RETENTION_INTERVAL_SECS == 86400
 
     @pytest.mark.parametrize(
         "raw, expected",
-        [("true", True), ("TRUE", True), ("1", True), ("", True), ("false", False)],
+        [
+            ("true", True),
+            ("TRUE", True),
+            ("1", True),
+            ("no", True),
+            ("", True),
+            ("false", False),
+            (" False ", False),
+        ],
     )
     def test_only_a_literal_false_turns_dry_run_off(self, raw, expected):
         assert config.parse_dry_run(raw) is expected
