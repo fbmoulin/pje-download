@@ -352,12 +352,12 @@ asyncio.run(main())"
 **Deve aparecer:** um número de versão, como `145.0.xxxx`. Se aparecer
 "executable doesn't exist", guarde as últimas linhas para pedir ajuda.
 
-## Passo 5: decidir o #84 (playwright 1.64.0)
+## Passo 5: conferir a versão atual do Chromium
 
-Atualização do navegador automático. O navegador de reserva está dormente em produção,
-então não há pressa. Se o passo 4 deu certo, peça "Merge #84" (atualiza a branch, roda a
-suíte com Redis e mergeia; o deploy refaz a imagem, cerca de 3 minutos) ou diga "deixa o
-#84".
+O #84 (Playwright 1.64.0) já foi integrado em 24/10/2026; não solicitar novamente
+esse merge. O teste de lançamento passou na imagem anterior após o #98, mas a
+repetição na imagem posterior continua sem conclusão documentada. Use o Passo 4
+para a versão efetivamente instalada e registre a evidência antes de encerrar o item.
 
 ## Passo 6: limpezas e prazos
 
@@ -365,9 +365,17 @@ suíte com Redis e mergeia; o deploy refaz a imagem, cerca de 3 minutos) ou diga
   `ssh pje-vps` e `sudo snap remove tailscale`.
 - **Pasta `ops/monitoring/`** (painéis antigos do openclaw). Quando confirmar que o
   openclaw foi desligado, peça a remoção em um PR próprio.
-- **Revisão do prompt gate, até 31/10/2026.** No Mac mini:
-  `cd /Users/felipemoulin/pje-download && python3 tools/prompt_gate.py --report`.
-  Decidir entre manter, estender (a última vez, até 14/11) ou remover a regra.
+- **D2 encerrado por Felipe em 14/11/2026:** manter as três regras de qualidade
+  apenas como avisos; proteção existente de CPF/CNPJ preservada. A fonte real
+  consultada tinha um evento antigo e nenhum rótulo; os smokes ficaram separados.
+  Não há promoção, remoção, prorrogação retroativa ou novo prazo. Não é necessário
+  fabricar uma amostra nem rotular um evento sem seu contexto original.
+  O PR103 foi integrado em `987e208` em 14/11/2026; CI pós-merge e deploy aprovados. Sessão pausada: retome pelo `HANDOFF.md`, começando pelo Passo 4 (Chromium), depois Passo 2 (lote pequeno).
+  Para consulta posterior na versão corrigida: `python3 tools/prompt_gate.py --report`.
+  Se o relatório responder `EVIDENCIA_INCOMPLETA`, rode de novo; se persistir, a
+  mensagem diz o arquivo e o número da linha: guarde uma cópia do arquivo e apague
+  só aquela linha (`CLAUDE.md`, seção "Prompt gate").
+  A decisão aprovada está na Task9 da spec original e em `../../HANDOFF.md`.
 - **Trocar a chave SSH de deploy e a `DASHBOARD_API_KEY`.** Adiado desde julho; envolve
   secrets do GitHub e a VPS.
 - **Logs de auditoria.** São apagados todo dia quando passam de 120 dias, e **não existe

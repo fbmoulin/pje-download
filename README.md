@@ -9,6 +9,14 @@ O caminho principal de execucao agora e desacoplado:
 - o worker executa os downloads e responde por fila especifica do batch
 - a dashboard agrega resultados e persiste `_progress.json` e `_report.json`
 
+## Estado verificado — 14/11/2026
+
+- **Base master consultada:** `e5ec846` (#101, importação de arquivos corrigida em 04/11).
+- **SPEC-D2-001 / PR103:** integrado na `master` em `987e208` em 14/11/2026; CI pós-merge 43560698713 e deploy 43560885678 aprovados. Sessão pausada; próximo passo operacional e prompt em [HANDOFF.md](HANDOFF.md).
+- **CI do código `e0a5d72`:** [43551254323](https://github.com/fbmoulin/pje-download/actions/runs/43551254323), aprovado com **1331 passed, 0 skipped, 1 warning**, Redis real. Não é medição da produção nem da telemetria do Mac.
+- **D2 encerrado por decisão de Felipe em 14/11:** três regras mantidas em advisory; nenhuma promoção, remoção ou prorrogação retroativa. Medição real do Mac concluída (1 evento,0 rótulos); T7 concluída. Próxima etapa: aceite operacional do Chromium e lote pequeno TJES; merge e deploy do PR103 concluídos. Registro completo na Task9 da spec original.
+- **Retomada:** [HANDOFF.md](HANDOFF.md). Pendências operacionais do TJES: [TODO.md](TODO.md).
+
 ## Arquitetura
 
 ```
@@ -62,7 +70,7 @@ CLI offline:
 | `static/css/style.css` | ~775 | Design system — glassmorphism, Oswald KPIs, dot-grid bg, staggered animations |
 | `static/js/app.js` | ~768 | Dashboard — adaptive polling, pipeline renderer (SVG), toasts, file upload, sessao PJe |
 | `migrations/` | 1 file | Schema SQL idempotente para `audit_entries` (Railway Postgres, requer PG 15+ para `UNIQUE NULLS NOT DISTINCT`) |
-| `tools/prompt_gate.py` | ~644 | Hooks do Claude Code (`.claude/settings.json`): bloqueia prompt com CPF/CNPJ válido antes do modelo principal, avisa sobre prompt vago no 1º prompt da sessão, e no `Stop` roda ruff + pytest só nos `.py` alterados no turno. Ver `CLAUDE.md` §"Prompt gate" |
+| `tools/prompt_gate.py` | — | Hooks do Claude Code (`.claude/settings.json`): bloqueia prompt com CPF/CNPJ válido antes do modelo principal, avisa sobre prompt vago no 1º prompt da sessão, e no `Stop` roda ruff + pytest só nos `.py` alterados no turno. Ver `CLAUDE.md` §"Prompt gate" |
 
 ## Estrategias de Download
 
@@ -174,6 +182,30 @@ PY
 ```
 
 Detalhes, limites e escapes (`!!`, `PROMPT_GATE_DISABLE=1`): `CLAUDE.md` §"Prompt gate".
+
+Desde o **PR103**, integrado na master, a revisão D2 usa rótulos por regra:
+
+```text
+python3 tools/prompt_gate.py --label <id> <regra> fp|tp
+python3 tools/prompt_gate.py --report
+```
+
+Substitua os campos entre `< >`; não os copie literalmente para o shell. Regras:
+`alvo_ou_sintoma`, `possui_dod`, `multi_tarefa`. A forma curta com apenas ID e
+rótulo aceita somente avisos de regra única. Rótulos antigos multirregra exigem
+revisão individual; os arquivos brutos são preservados.
+
+| Relatório | Exit | Significado |
+|---|---|---|
+| `TELEMETRIA_AUSENTE` | 1 | Fonte não encontrada; decisão inconclusiva |
+| `AMOSTRA_VAZIA` | 0 | Fonte presente, sem eventos; nenhuma regra elegível |
+| `EVIDENCIA_INCOMPLETA` | 1 | Arquivo ilegível, corrompido ou incompatível; não decidir pelos subtotais |
+| Fonte válida | 0 | Contagens emitidas; não significa aprovação nem promoção |
+
+Confirme caminho e período da fonte local. Telemetria de outro ambiente não mede
+seu Mac. Use um rotulador por vez; não apague histórico para obter métricas verdes.
+Veja a [spec incremental](docs/specs/2026-11-14-d2-rotulagem-telemetria.md).
+
 
 ## Configuracao
 
@@ -568,11 +600,11 @@ ssh -i <chave_deploy> -L 8007:localhost:8007 <VPS_USER>@<VPS_HOST>
 
 | Workflow | Trigger | Etapas |
 |----------|---------|--------|
-| `ci.yml` | push / PR | ruff lint (**pinado em `0.14.14`**) → pytest (**920 testes** em master, medido 2026-10-10 com Redis vivo) — badge acima |
+| `ci.yml` | push / PR | ruff lint (**pinado em `0.14.14`**) → pytest (resultado datado do `987e208`: **1331 passed, sem skips, 1 warning**, com Redis; ver seção Estado verificado) |
 | `deploy.yml` | CI concluido com sucesso em `master` | rsync → `docker compose up --build` no VPS → healthcheck worker/dashboard → smoke test da fila + validação MNI |
 | `dependabot.yml` | semanal | atualiza actions + pip deps |
 
-Localmente, suba um Redis antes de rodar `pytest tests/` (`docker run -d --rm -p 6379:6379 redis:7.4-alpine`); sem ele, 2 testes de socket real pulam silenciosamente.
+Localmente, suba um Redis antes de rodar `pytest tests/` (`docker run -d --rm -p 6379:6379 redis:7.4-alpine`); sem ele, a validação local do #103 teve 14 skips. Declare os skips; não equivalem a testes aprovados.
 
 Secrets necessarios no repositorio: `VPS_SSH_KEY`, `VPS_HOST`, `VPS_USER`.
 
@@ -591,10 +623,10 @@ python tools/verify_spec.py docs/specs/*.md
 
 **Integração:**
 - Rodado automaticamente no CI (`ci.yml`)
-- 3 testes unitários em `tests/test_verify_spec.py`
+- Testes unitários em `tests/test_verify_spec.py`; validação estrutural não comprova execução das tarefas da spec.
 
 ## Integracao com Kratos Case Pipeline
 
-Este projeto e o primeiro estagio do [Kratos Case Pipeline (KCP)](https://github.com/fbmoulin/kratos-case-pipeline) — o orquestrador que conecta download PJe, extracao PDF e analise FIRAC em um pipeline automatizado para gabinetes judiciais.
+Este projeto fornece a etapa de aquisição prevista para o [Kratos Case Pipeline (KCP)](https://github.com/fbmoulin/kratos-case-pipeline). O desenho abaixo representa a arquitetura pretendida; a atualização D2 não implementa nem homologa entrega documental direta, n8n ou geração jurídica ponta a ponta.
 
-Fluxo: **pje-download** (MNI SOAP) → **KCP** (organiza, classifica, despacha) → **kratos-pdf-extractor** (extracao) → **kratos-v5** (FIRAC + minuta)
+Fluxo previsto: **pje-download** (MNI SOAP) → **KCP** (organiza, classifica, despacha) → **kratos-pdf-extractor** (extracao) → **kratos-v5** (FIRAC + minuta)

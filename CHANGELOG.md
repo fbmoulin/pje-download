@@ -6,6 +6,48 @@ o projeto segue versionamento semântico.
 
 ## [Unreleased]
 
+### Fixed — achados baixos do pré-mortem do #106 (14/11/2026)
+
+- `--report`/`--label` respondem `EVIDENCIA_INCOMPLETA` (em vez de traceback) para uma
+  linha de JSON aninhado demais (`RecursionError`).
+- Último registro sem `\n` final passa a ser `EVIDENCIA_INCOMPLETA ... sem fim de linha`;
+  antes era aceito e o append seguinte do hook colava dois registros. Reparo: acrescentar
+  a quebra de linha.
+
+### Fixed — revisão do merge do #103 no prompt gate (14/11/2026)
+
+- `--report`/`--label` não falham mais quando um campo gravado pelo hook contém U+2028,
+  U+2029 ou U+0085: o leitor estrito separa registros só em `\n`.
+- O aviso mostra um comando `--label <id> <regra>` por regra, colável no shell e sem
+  rótulo padrão (acrescenta-se `tp` ou `fp`); antes imprimia `<regra> fp|tp` literal.
+- `--label` recusado não quebra mais em Python anterior ao 3.11 (`sys.exception()`).
+- Removido `_ler_jsonl`, sem uso desde o #103. Linha ruim, colisão de id e regra 60/2
+  mantidas por decisão do Felipe (adendo na SPEC-D2-001).
+
+### Documentation — encerramento de sessão (14/11/2026)
+
+- Handoff com prompt de retomada, evidências de merge/CI/deploy e sincronização do Mac.
+- TODO, README, AGENTS, CLAUDE e guia reconciliados; próximo passo: Chromium, lote pequeno e só depois aceite controlado de recuperação (Task 6).
+- Sem alteração de código, settings, política D2 ou execução dos testes operacionais pendentes.
+
+### Fixed — revisão D2 por regra (14/11/2026; PR103 integrado)
+
+- Rótulos v2 por evento/regra; precedência de rótulos específicos, compatibilidade com
+  legado de regra única e pendência explícita para legado multirregra.
+- Relatório distingue fonte ausente, vazia e inválida; mostra origem, período e contagens
+  sem promover regras. PII, isenções e Stop preservados; aviso orienta a nova sintaxe.
+- Spec incremental e testes: CI43551254323 no código `e0a5d72`, **1331 passed, sem skips,
+  1 warning**, com Redis real. Integrado em `987e208`; CI pós-merge 43560698713 e deploy 43560885678 aprovados em 14/11/2026.
+- Documentação reconciliada: README, AGENTS, CLAUDE, TODO, spec, guia do dono e handoffs.
+  Medição real do Mac e smokes isolados concluídos via saída fornecida por Felipe. Em14/11, Felipe ratificou manter as três regras advisory, encerrando D2/Task9/T7 sem promoção, remoção ou extensão retroativa; não se cria novo prazo. Merge autorizado posteriormente e concluído; sessão pausada antes do aceite funcional TJES.
+
+### Fixed — importação de arquivos (04/11/2026; #101)
+
+- Remove filtro silencioso de linhas curtas e impede truncar um identificador maior para
+  um prefixo com aparência válida; informa linhas ignoradas. Integrado em `e5ec846`.
+- CI41927830978 e deploy41928168216 aprovados nesse SHA; **1298 passed, 1 warning** no CI.
+  Esse registro histórico não comprova estado atual do host nem aceite operacional.
+
 ### Added — prompt gate do Claude Code (2026-10-03 → 2026-10-10; #66, #71, #72)
 
 - **`tools/prompt_gate.py` registrado em `.claude/settings.json`** como hooks `UserPromptSubmit` e

@@ -4,6 +4,7 @@ Telemetry lives outside the repo and never stores the prompt text or a hash of i
 """
 
 import json
+import shlex
 import subprocess
 import sys
 
@@ -119,7 +120,7 @@ def test_kill_switch_nao_registra(estado):
 
 def test_label_grava_rotulo_para_id_existente(estado):
     rotulo = _id_do_aviso(_hook(VAGO, estado))
-    p = _cli(estado, "--label", rotulo, "fp")
+    p = _cli(estado, "--label", rotulo, "possui_dod", "fp")
     assert p.returncode == 0, p.stderr
     rotulos = (estado / "pje-prompt-gate" / "rotulos.jsonl").read_text("utf-8")
     (linha,) = [json.loads(x) for x in rotulos.splitlines()]
@@ -136,11 +137,39 @@ def test_label_rejeita_id_desconhecido_ou_rotulo_invalido(estado, args):
 
 def test_ultimo_rotulo_vale(estado):
     rotulo = _id_do_aviso(_hook(VAGO, estado))
-    _cli(estado, "--label", rotulo, "fp")
-    _cli(estado, "--label", rotulo, "tp")
+    _cli(estado, "--label", rotulo, "possui_dod", "fp")
+    _cli(estado, "--label", rotulo, "possui_dod", "tp")
     p = _cli(estado, "--report")
     linha = next(x for x in p.stdout.splitlines() if x.startswith("possui_dod"))
     assert linha.split()[1:5] == ["1", "1", "0", "1"]  # avisos rotulados fp tp
+
+
+def test_aviso_mostra_um_comando_por_regra_sem_rotulo_padrao(estado):
+    """`<regra>` e `fp|tp` colados no zsh viram redirecionamento e pipe."""
+    p = _hook(VAGO, estado)
+    msg = json.loads(p.stdout)["systemMessage"]
+    rotulo = _id_do_aviso(p)
+    assert not set("<>|;&") & set(msg)
+    assert " tp " in msg and " fp " in msg  # as duas opcoes, em texto
+    comandos = [x.strip() for x in msg.splitlines() if "--label" in x]
+    assert not set("()[]") & set("".join(comandos))
+    assert [c.split()[-2:] for c in comandos] == [
+        [rotulo, "alvo_ou_sintoma"],
+        [rotulo, "possui_dod"],
+    ]
+    arq = estado / "pje-prompt-gate" / "rotulos.jsonl"
+    for comando, valor in zip(comandos, ("fp", "tp")):
+        args = shlex.split(comando)
+        assert args[:2] == ["python3", "tools/prompt_gate.py"]
+        # Colado sem editar nao rotula nada: nenhum valor e o padrao.
+        assert _cli(estado, *args[2:]).returncode == 1
+        assert not arq.exists() or valor == "tp"
+        assert _cli(estado, *args[2:], valor).returncode == 0
+    gravados = [json.loads(x) for x in arq.read_text("utf-8").splitlines()]
+    assert [(r["regra"], r["rotulo"]) for r in gravados] == [
+        ("alvo_ou_sintoma", "fp"),
+        ("possui_dod", "tp"),
+    ]
 
 
 # --- --report -----------------------------------------------------------------
@@ -152,8 +181,8 @@ def test_report_conta_por_regra_e_lista_pendentes(estado):
         ids.append(_id_do_aviso(_hook(VAGO, estado, sessao=f"s{i}", prompt_id=f"p{i}")))
     _hook(COMPLETO, estado, sessao="s9")
     _hook(f"consulta {CPF} agora", estado, sessao="s8")
-    _cli(estado, "--label", ids[0], "fp")
-    _cli(estado, "--label", ids[1], "tp")
+    _cli(estado, "--label", ids[0], "alvo_ou_sintoma", "fp")
+    _cli(estado, "--label", ids[1], "alvo_ou_sintoma", "tp")
     p = _cli(estado, "--report")
     assert p.returncode == 0, p.stderr
     linhas = p.stdout.splitlines()
@@ -161,11 +190,12 @@ def test_report_conta_por_regra_e_lista_pendentes(estado):
     assert alvo.split()[1:5] == ["3", "2", "1", "1"]
     assert "prompts avaliados: 4" in p.stdout
     assert "bloqueios por PII: 1" in p.stdout
-    assert ids[2] in p.stdout and "s2" in p.stdout and "p2" in p.stdout
-    assert ids[0] not in p.stdout.split("pendentes", 1)[1]
+    assert ids[2] in p.stdout
+    assert "possui_dod" in p.stdout.split("pendentes", 1)[1]
 
 
-def test_report_sem_telemetria_nao_quebra(estado):
+def test_report_sem_telemetria_e_inconclusivo(estado):
     p = _cli(estado, "--report")
-    assert p.returncode == 0
-    assert "prompts avaliados: 0" in p.stdout
+    assert p.returncode == 1
+    assert "TELEMETRIA_AUSENTE" in p.stderr
+    assert not estado.exists()

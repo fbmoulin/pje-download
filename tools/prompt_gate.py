@@ -30,7 +30,7 @@ Telemetria (fora do repo, sem texto nem hash do prompt) em
 `${XDG_STATE_HOME:-~/.local/state}/pje-prompt-gate/telemetria.jsonl`; registros de PII
 guardam so `ts`, `regras` e `decisao`. Uso manual:
 
-    python3 tools/prompt_gate.py --label <id> fp|tp   # rotula um aviso
+    python3 tools/prompt_gate.py --label <id> <regra> fp|tp  # rotula uma regra
     python3 tools/prompt_gate.py --report             # avisos/rotulos por regra
 
 Como hook `Stop` (`--stop`): compara o repo com o snapshot do turno e, se algum .py
@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -53,6 +54,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -314,19 +316,6 @@ def _anexar(nome: str, registro: dict) -> None:
         f.write(json.dumps(registro, ensure_ascii=False) + "\n")
 
 
-def _ler_jsonl(nome: str) -> list[dict]:
-    arq = _base_estado() / nome
-    if not arq.exists():
-        return []
-    registros = []
-    for linha in arq.read_text("utf-8").splitlines():
-        try:
-            registros.append(json.loads(linha))
-        except ValueError:
-            continue  # linha truncada por escrita concorrente: ignora
-    return registros
-
-
 def _hook_prompt() -> int:
     pii_decidida = False
     inicio = time.perf_counter()
@@ -394,9 +383,20 @@ def _hook_prompt() -> int:
                             "assumir."
                         ),
                     },
-                    "systemMessage": (
-                        f"gate [{rotulo}] {', '.join(resultado.regras)} — rotule: "
-                        f"python3 tools/prompt_gate.py --label {rotulo} fp|tp"
+                    # Um comando por regra, colavel (`<regra>` e `fp|tp` no shell
+                    # viram redirecionamento e pipe) e SEM o rotulo: colado como
+                    # esta, cai no erro de uso e nao grava. Um rotulo padrao
+                    # enviesaria a evidencia do D2.
+                    "systemMessage": "\n".join(
+                        [
+                            f"gate [{rotulo}] {', '.join(resultado.regras)} — para "
+                            "rotular, acrescente ao final tp se o aviso foi correto "
+                            "ou fp se foi indevido:"
+                        ]
+                        + [
+                            f"  python3 tools/prompt_gate.py --label {rotulo} {regra}"
+                            for regra in resultado.regras
+                        ]
                     ),
                 },
                 ensure_ascii=False,
@@ -590,42 +590,242 @@ def _hook_stop() -> int:
 # --- uso manual: --label / --report -----------------------------------------
 
 
-def _rotular(args: list[str]) -> int:
-    if len(args) != 2 or args[1] not in ("fp", "tp"):
-        print("uso: prompt_gate.py --label <id> fp|tp", file=sys.stderr)
-        return 1
-    rotulo, valor = args
-    ids = {r.get("id") for r in _ler_jsonl("telemetria.jsonl")}
-    if rotulo not in ids:
-        print(f"id desconhecido: {rotulo}", file=sys.stderr)
-        return 1
-    _anexar("rotulos.jsonl", {"ts": _agora(), "id": rotulo, "rotulo": valor})
-    print(f"rotulado: {rotulo} = {valor}")
-    return 0
-
-
 REGRAS_DE_QUALIDADE = ("alvo_ou_sintoma", "possui_dod", "multi_tarefa")
 
 
+class EvidenciaInvalida(ValueError):
+    """Somente diagnosticos fixos; nunca incluir o conteudo da linha."""
+
+
+def _objeto_sem_duplicatas(pares: list[tuple]) -> dict:
+    resultado = {}
+    for chave, valor in pares:
+        if chave in resultado:
+            raise ValueError("chave duplicada")
+        resultado[chave] = valor
+    return resultado
+
+
+def _ler_evidencia(nome: str, *, obrigatorio: bool = False) -> tuple[list[dict], str]:
+    """Leitor estrito do CLI (--label/--report). Os hooks so anexam, nunca leem."""
+    try:
+        texto = (_base_estado() / nome).read_text("utf-8")
+    except FileNotFoundError:
+        if obrigatorio:
+            raise EvidenciaInvalida(
+                "TELEMETRIA_AUSENTE: fonte nao encontrada"
+            ) from None
+        return [], "ausente"
+    except (OSError, UnicodeError):
+        raise EvidenciaInvalida(
+            f"EVIDENCIA_INCOMPLETA: {nome}, linha 1: leitura"
+        ) from None
+    registros = []
+    # split("\n"), nao splitlines(): esta tambem corta em U+2028/U+2029/U+0085, que
+    # _anexar grava crus (ensure_ascii=False) dentro de um campo.
+    brutos = texto.split("\n")
+    terminado = brutos[-1] == ""
+    if terminado:
+        brutos.pop()  # terminador do ultimo registro (ou arquivo vazio)
+    for linha, bruto in enumerate(brutos, 1):
+        try:
+            r = json.loads(bruto, object_pairs_hook=_objeto_sem_duplicatas)
+            if not isinstance(r, dict):
+                raise ValueError
+            registros.append(r)
+        except (ValueError, RecursionError):  # RecursionError: JSON aninhado demais
+            raise EvidenciaInvalida(
+                f"EVIDENCIA_INCOMPLETA: {nome}, linha {linha}: JSON"
+            ) from None
+    if not terminado:
+        # Sem o "\n" final, o proximo append do hook colaria dois registros numa
+        # linha; acusar ja, enquanto o reparo e so acrescentar a quebra de linha.
+        raise EvidenciaInvalida(
+            f"EVIDENCIA_INCOMPLETA: {nome}, linha {len(brutos)}: sem fim de linha"
+        )
+    return registros, "vazio" if not registros else "valido"
+
+
+def _timestamp_valido(valor: object) -> bool:
+    if not isinstance(valor, str):
+        return False
+    try:
+        data = datetime.fromisoformat(valor.replace("Z", "+00:00"))
+        return data.utcoffset() is not None
+    except ValueError:
+        return False
+
+
+def _validar_linha(condicao: bool, nome: str, linha: int) -> None:
+    if not condicao:
+        raise EvidenciaInvalida(
+            f"EVIDENCIA_INCOMPLETA: {nome}, linha {linha}: contrato"
+        )
+
+
+def _latencia_valida(valor: object) -> bool:
+    try:
+        return type(valor) in (int, float) and math.isfinite(valor) and valor >= 0
+    except OverflowError:
+        return False
+
+
+def _carregar_evidencia() -> tuple[list[dict], dict, dict, dict, dict]:
+    telemetria, origem_t = _ler_evidencia("telemetria.jsonl", obrigatorio=True)
+    eventos = {}
+    campos = {"ts", "id", "regras", "decisao", "session_id", "prompt_id", "latencia_ms"}
+    for linha, r in enumerate(telemetria, 1):
+        valido = (
+            not (r.keys() - campos)
+            and _timestamp_valido(r.get("ts"))
+            and isinstance(r.get("regras"), list)
+            and all(isinstance(x, str) for x in r["regras"])
+            and len(set(r["regras"])) == len(r["regras"])
+        )
+        _validar_linha(valido, "telemetria.jsonl", linha)
+        if "id" in r:
+            valido = (
+                isinstance(r["id"], str)
+                and re.fullmatch(r"[0-9a-f]{8}", r["id"]) is not None
+                and r["id"] not in eventos
+                and set(r["regras"]).issubset(REGRAS_DE_QUALIDADE)
+                and r.get("decisao") in ("aviso", "bloqueia", "passa")
+                and ((r["decisao"] == "passa") == (not r["regras"]))
+                and all(
+                    isinstance(r.get(k, ""), str) for k in ("session_id", "prompt_id")
+                )
+            )
+            valido = valido and _latencia_valida(r.get("latencia_ms", 0))
+            _validar_linha(valido, "telemetria.jsonl", linha)
+            eventos[r["id"]] = r
+        else:
+            _validar_linha(
+                set(r) == {"ts", "regras", "decisao"}
+                and bool(r["regras"])
+                and set(r["regras"]).issubset({"pii_cpf", "pii_cnpj"})
+                and r.get("decisao") == "bloqueia",
+                "telemetria.jsonl",
+                linha,
+            )
+    linhas_rotulos, origem_r = _ler_evidencia("rotulos.jsonl")
+    especificos, legados, ambiguos = {}, {}, {}
+    for linha, r in enumerate(linhas_rotulos, 1):
+        _validar_linha(
+            isinstance(r.get("id"), str)
+            and r["id"] in eventos
+            and _timestamp_valido(r.get("ts"))
+            and r.get("rotulo") in ("fp", "tp")
+            and bool(eventos[r["id"]]["regras"]),
+            "rotulos.jsonl",
+            linha,
+        )
+        regras = eventos[r["id"]]["regras"]
+        if "schema_version" in r:
+            _validar_linha(
+                set(r) == {"ts", "id", "rotulo", "regra", "schema_version"}
+                and type(r["schema_version"]) is int
+                and r["schema_version"] == 2
+                and r.get("regra") in regras,
+                "rotulos.jsonl",
+                linha,
+            )
+            especificos[r["id"], r["regra"]] = r["rotulo"]
+        else:
+            _validar_linha(set(r) == {"ts", "id", "rotulo"}, "rotulos.jsonl", linha)
+            if len(regras) == 1:
+                legados[r["id"], regras[0]] = r["rotulo"]
+            else:
+                for regra in regras:
+                    ambiguos[r["id"], regra] = r["rotulo"]
+    rotulos = legados | especificos
+    ambiguos = {k: v for k, v in ambiguos.items() if k not in rotulos}
+    return (
+        telemetria,
+        eventos,
+        rotulos,
+        ambiguos,
+        {"telemetria": origem_t, "rotulos": origem_r},
+    )
+
+
+def _rotular(args: list[str]) -> int:
+    if len(args) not in (2, 3) or args[-1] not in ("fp", "tp"):
+        print("uso: prompt_gate.py --label <id> <regra> fp|tp", file=sys.stderr)
+        return 1
+    try:
+        _, eventos, _, _, _ = _carregar_evidencia()
+        evento = eventos.get(args[0])
+        if evento is None or not evento["regras"]:
+            raise EvidenciaInvalida("aviso de qualidade nao encontrado")
+        regras = evento["regras"]
+        if len(args) == 2 and len(regras) != 1:
+            raise EvidenciaInvalida("aviso com varias regras: informe <regra>")
+        regra = args[1] if len(args) == 3 else regras[0]
+        if regra not in regras:
+            raise EvidenciaInvalida("regra nao disparou nesse aviso")
+        _anexar(
+            "rotulos.jsonl",
+            {
+                "schema_version": 2,
+                "ts": _agora(),
+                "id": args[0],
+                "regra": regra,
+                "rotulo": args[-1],
+            },
+        )
+    except EvidenciaInvalida as erro:
+        print(str(erro), file=sys.stderr)
+        return 1
+    except OSError:
+        # Nunca ecoa dados/caminhos de excecoes externas.
+        print("falha ao gravar rotulo", file=sys.stderr)
+        return 1
+    print(f"rotulado: {args[0]} {regra} = {args[-1]}")
+    return 0
+
+
 def _relatorio() -> int:
-    telemetria = _ler_jsonl("telemetria.jsonl")
-    rotulos = {r["id"]: r["rotulo"] for r in _ler_jsonl("rotulos.jsonl")}  # ultimo vale
-    avaliados = [r for r in telemetria if "id" in r]
-    pii = sum(1 for r in telemetria if "id" not in r)
+    print(f"fonte_local: {_base_estado().absolute()}")
+    print(f"gerado_em: {_agora()}")
+    try:
+        telemetria, eventos, rotulos, ambiguos, origens = _carregar_evidencia()
+    except EvidenciaInvalida as erro:
+        print(str(erro), file=sys.stderr)
+        return 1
+    for nome, origem in origens.items():
+        print(f"{nome}: {origem}")
+    datas = [datetime.fromisoformat(r["ts"].replace("Z", "+00:00")) for r in telemetria]
+    print(
+        f"intervalo: {min(datas).isoformat()} .. {max(datas).isoformat()}"
+        if datas
+        else "AMOSTRA_VAZIA"
+    )
+    avaliados = list(eventos.values())
+    pii = len(telemetria) - len(avaliados)
     print(f"prompts avaliados: {len(avaliados)}")
     print(f"bloqueios por PII: {pii}")
-    print(f"{'regra':<16} avisos rotulados fp tp")
+    print(f"{'regra':<16} avisos rotulados fp tp nao_rotulados ambiguos elegibilidade")
     for regra in REGRAS_DE_QUALIDADE:
         com = [r for r in avaliados if regra in r.get("regras", [])]
-        rot = [rotulos[r["id"]] for r in com if r["id"] in rotulos]
-        print(f"{regra:<16} {len(com)} {len(rot)} {rot.count('fp')} {rot.count('tp')}")
-    pendentes = [r for r in avaliados if r.get("regras") and r["id"] not in rotulos]
+        rot = [rotulos[r["id"], regra] for r in com if (r["id"], regra) in rotulos]
+        amb = sum((r["id"], regra) in ambiguos for r in com)
+        elegivel = len(rot) >= 60 and rot.count("fp") <= 2
+        print(
+            f"{regra:<16} {len(com)} {len(rot)} {rot.count('fp')} {rot.count('tp')} "
+            f"{len(com) - len(rot)} {amb} {'elegivel' if elegivel else 'insuficiente'}"
+        )
+    print(
+        "Elegibilidade mecanica nao promove regras; exige decisao humana e fonte correta."
+    )
+    pendentes = [
+        r
+        for r in avaliados
+        if any((r["id"], regra) not in rotulos for regra in r["regras"])
+    ]
     print(f"pendentes de rotulo ({len(pendentes)}; mais recentes primeiro):")
     for r in reversed(pendentes[-20:]):
-        print(
-            f"  {r['id']}  {r['ts']}  sessao={r.get('session_id')} "
-            f"prompt={r.get('prompt_id')}  {','.join(r['regras'])}"
-        )
+        faltantes = [regra for regra in r["regras"] if (r["id"], regra) not in rotulos]
+        print(f"  {r['id']}  {','.join(faltantes)}")
     return 0
 
 

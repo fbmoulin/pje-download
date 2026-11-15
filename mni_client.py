@@ -757,11 +757,10 @@ class MNIClient:
             if blob is not None:
                 merge_document_references(blob, [outcome["documento"]])
 
-        # Montar lista de docs principais (MNI só retorna conteúdo destes).
-        # Documentos vinculados (anexos) NÃO são acessíveis via parâmetro
-        # 'documento' do MNI — ficam registrados para download via Playwright.
+        # Montar a lista de docs. Os anexos (documentos vinculados) entram na
+        # mesma lista: medido no MNI do TJES em 2026-11-14, pedir o ID do anexo em
+        # `documento` devolve o binário dele, aninhado em `vinculados` do pai.
         all_docs: list[MNIDocumento] = []
-        vinculados_pendentes: list[MNIDocumento] = []
 
         for doc in processo.documentos:
             if tipos_filtro and doc.tipo.lower() not in [
@@ -770,14 +769,7 @@ class MNIClient:
                 continue
             all_docs.append(doc)
             if incluir_anexos and doc.vinculados:
-                vinculados_pendentes.extend(doc.vinculados)
-
-        if vinculados_pendentes:
-            log.info(
-                "mni.download.vinculados_skipped",
-                count=len(vinculados_pendentes),
-                note="MNI não retorna conteúdo de documentos vinculados; usar Playwright",
-            )
+                all_docs.extend(doc.vinculados)
 
         # Separar docs que já têm conteúdo dos que precisam de fase 2
         docs_with_content: list[MNIDocumento] = []
@@ -789,7 +781,7 @@ class MNIClient:
             else:
                 docs_need_fetch.append(doc)
 
-        total_vinculados = sum(len(d.vinculados) for d in processo.documentos)
+        total_vinculados = sum(1 for d in all_docs if d.id_pai is not None)
         log.info(
             "mni.download.plan",
             total_principais=len(processo.documentos),
@@ -821,6 +813,18 @@ class MNIClient:
                         total=len(all_docs),
                         local_bytes=local_bytes,
                     )
+
+        # Progress heartbeat: the dashboard gives up after RESULT_WAIT_TIMEOUT_SECS
+        # without a message and only a saved file used to publish one, so a run of
+        # failing batches went silent while the worker kept going.
+        async def heartbeat() -> None:
+            if progress_cb is not None:
+                await progress_cb(
+                    file_info=None,
+                    completed=len(saved_files),
+                    total=len(all_docs),
+                    local_bytes=local_bytes,
+                )
 
         # ── Fase 2: buscar conteúdo em batches via SOAP ──
         if docs_need_fetch:
@@ -862,10 +866,18 @@ class MNIClient:
                         )
                         failed_ids.extend(batch_ids)
                         handled.update(batch_ids)
+                        await heartbeat()
                         continue
 
                     # Mapear docs retornados por ID para salvar
-                    fetched_docs = {doc.id: doc for doc in result.processo.documentos}
+                    # A parent can show up twice (as asked, and as the wrapper of
+                    # a nested annex): never let a copy without content shadow
+                    # the one that has it.
+                    fetched_docs: dict[str, MNIDocumento] = {}
+                    for doc in _flatten_documents(result.processo.documentos):
+                        known = fetched_docs.get(doc.id)
+                        if known is None or (doc.has_content and not known.has_content):
+                            fetched_docs[doc.id] = doc
 
                     for doc_id in batch_ids:
                         fetched = fetched_docs.get(doc_id)
@@ -917,6 +929,7 @@ class MNIClient:
                     )
                     failed_ids.extend(i for i in batch_ids if i not in handled)
                     handled.update(batch_ids)
+                    await heartbeat()
                     continue
 
         log.info(
@@ -1165,6 +1178,13 @@ class MNIClient:
 # ─────────────────────────────────────────────
 # UTILITÁRIOS
 # ─────────────────────────────────────────────
+
+
+def _flatten_documents(docs: list["MNIDocumento"]):
+    """Principais e, recursivamente, os vinculados aninhados nelas."""
+    for doc in docs:
+        yield doc
+        yield from _flatten_documents(doc.vinculados)
 
 
 def _mimetype_to_ext(mimetype: str) -> str:

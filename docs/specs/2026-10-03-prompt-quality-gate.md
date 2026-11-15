@@ -6,7 +6,7 @@
 Decisões vigentes:
 D1=**B** (só T0 determinístico; o usuário escolheu a opção "a" em 2026-10-03, revendo o
 D1=A anterior), D2=advisory, D3=sim, D4=só pje-download, D5=sim (aprovado 2026-10-03).
-**Tasks 1–8 implementadas em 2026-10-03** (PR #66). Task 9 (revisão D2) é datada: merge + 14 dias; estendida em 2026-10-17 para 2026-10-31.
+**Tasks 1–8 implementadas em 2026-10-03** (PR #66). Task9 (revisão D2) encerrada por decisão de Felipe em 14/11/2026: manter qualidade advisory, sem promoção ou extensão retroativa. O calendário anterior está preservado abaixo como histórico.
 **Origem:** `docs/research/2026-10-03-review-jev-claude-code-langgraph.md`.
 **Alvo:** `tools/prompt_gate.py`, `.claude/settings.json`,
 `.claude/skills/refine-prompt/SKILL.md`, `tests/test_prompt_gate.py`,
@@ -302,7 +302,56 @@ Seção "Prompt gate" no `CLAUDE.md`: modelo de ameaça resumido, "não digite P
 sozinhos), `--label`/`--report`. Sem números de teste fixos. Rodar
 `python tools/verify_spec.py docs/specs/*.md`. Commit.
 
-### Task 9 — Revisão D2 (datada: merge + 14 dias)
+### Task 9 — Revisão D2 (encerrada em 14/11/2026)
+
+## Decisão D2 ratificada por Felipe — 14/11/2026
+
+Felipe aprovou expressamente nesta conversa **manter as três regras de qualidade
+em modo advisory**, sem promover bloqueios nem remover regras:
+`alvo_ou_sintoma`, `possui_dod` e `multi_tarefa`.
+
+**Fonte:** relatório real do Mac fornecido por Felipe, gerado em
+14/11/2026 às 05:07:24 UTC (02:07:24 BRT), na fonte local padrão
+`~/.local/state/pje-prompt-gate`. Telemetria válida, 1 evento de 10/10/2026
+às 07:33:38 UTC e nenhum rótulo. O mesmo evento disparou as duas primeiras
+regras; a terceira teve zero avisos. Não há 60 classificações por regra.
+
+| Regra | Avisos | Rotulados | Decisão |
+|---|---:|---:|---|
+| alvo_ou_sintoma |1|0| Manter aviso; não promover |
+| possui_dod |1|0| Manter aviso; não promover |
+| multi_tarefa |0|0| Manter aviso; não promover |
+
+A justificativa é insuficiência de evidência para bloqueio; não houve classificação
+inventada do evento antigo. Os smokes isolados não compõem a amostra real.
+A decisão **encerra a revisão D2 datada/Task9 e T7**, substituindo o calendário
+anterior de extensões. É continuidade advisory expressamente aprovada, **não**
+prorrogação retroativa nem satisfação dos critérios estatísticos. Não se cria
+novo prazo ou tarefa agendada.
+
+A proteção existente de CPF/CNPJ e o Stop permanecem inalterados. Uma futura
+promoção/remoção exige nova revisão e autorização específicas; o relatório não
+altera configurações. A rotulagem contextual do evento antigo fica opcional para
+investigação futura e não bloqueia esta decisão. A consulta da fonte e os smokes
+foram concluídos; isso não atesta todas as sessões, fontes ou comportamento futuro.
+
+Esta aprovação trata da política D2; **não autoriza merge ou deploy do PR103**,
+nem ações no caso KCP. Nenhum settings ou código foi alterado para esta decisão.
+
+### Histórico técnico e calendário anterior (superado pela decisão acima)
+
+**Atualização técnica de 14/11/2026 — SPEC-D2-001:** a rotulagem passa a ser por
+`--label <id> <regra> fp|tp`. A forma antiga serve somente a eventos com uma regra.
+Rótulos antigos multirregra ficam pendentes; não replicar TP/FP entre regras.
+O relatório diferencia fonte ausente, vazia e inválida e não promove regras.
+Fonte correta e rotulagem individual são pré-condições para a decisão abaixo.
+A referência histórica ao `env` versionado nesta Task diverge das opções locais
+no corpo da spec; resolver em um futuro PR de promoção aprovado, com teste da
+configuração efetiva. Nenhum settings foi alterado nesta entrega.
+A data de 14/11 é o limite da última extensão possível, não prorrogação realizada.
+Não há medição nova do Mac, decisão de promoção ou nova extensão registrada.
+Ver `docs/specs/2026-11-14-d2-rotulagem-telemetria.md`.
+
 
 `--report`. Para cada regra: ≥ 60 avisos rotulados **e** ≤ 2 FP → promover a bloqueio
 (acrescentar o id a `PROMPT_GATE_BLOCK_RULES` no `env` do `.claude/settings.json`, com o
