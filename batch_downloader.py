@@ -578,6 +578,15 @@ async def download_batch(
 
                 total_docs = len(result.processo.documentos)
                 total_vinc = sum(len(d.vinculados) for d in result.processo.documentos)
+                anexo_ids = (
+                    {
+                        str(v.id)
+                        for d in result.processo.documentos
+                        for v in d.vinculados
+                    }
+                    if incluir_anexos
+                    else set()
+                )
                 ps.total_docs = total_docs + (total_vinc if incluir_anexos else 0)
 
                 # ── MNI SOAP: Fase 2 (download) ──
@@ -593,13 +602,17 @@ async def download_batch(
                 all_files = _merge_downloaded_files(all_files, mni_files)
                 # Documents MNI attempted but lost (not checksum duplicates).
                 mni_failed = list(getattr(mni_files, "failed_ids", None) or [])
+                # Only annexes MNI did not deliver are pending; those are handled
+                # (complemented or warned) below, so they leave mni_failed.
+                anexos_pendentes = sum(1 for i in mni_failed if str(i) in anexo_ids)
+                mni_failed = [i for i in mni_failed if str(i) not in anexo_ids]
 
                 anexos_warning = None
-                if incluir_anexos and total_vinc:
+                if incluir_anexos and anexos_pendentes:
                     if pje_client is not None:
                         ps.phase = "pje_session"
                         ps.phase_detail = (
-                            f"Complementando {total_vinc} anexo(s) via sessão PJe"
+                            f"Complementando {anexos_pendentes} anexo(s) via sessão PJe"
                         )
                         progress.save()
                         try:
@@ -617,39 +630,39 @@ async def download_batch(
                                 log.info(
                                     "batch.processo.anexos_complemented",
                                     processo=numero,
-                                    anexos_pendentes=total_vinc,
+                                    anexos_pendentes=anexos_pendentes,
                                     total_arquivos=len(all_files),
                                 )
                             else:
                                 anexos_warning = (
-                                    f"MNI indicou {total_vinc} anexo(s), mas a "
+                                    f"MNI indicou {anexos_pendentes} anexo(s), mas a "
                                     "complementação via sessão não retornou anexos"
                                 )
                                 log.warning(
                                     "batch.processo.anexos_complement_empty",
                                     processo=numero,
-                                    anexos_pendentes=total_vinc,
+                                    anexos_pendentes=anexos_pendentes,
                                 )
                         except Exception as exc:
                             anexos_warning = (
-                                f"MNI indicou {total_vinc} anexo(s), mas a "
+                                f"MNI indicou {anexos_pendentes} anexo(s), mas a "
                                 f"sessão PJe falhou ao complementar: {exc}"
                             )
                             log.warning(
                                 "batch.processo.anexos_complement_failed",
                                 processo=numero,
-                                anexos_pendentes=total_vinc,
+                                anexos_pendentes=anexos_pendentes,
                                 error=str(exc),
                             )
                     else:
                         anexos_warning = (
-                            f"MNI indicou {total_vinc} anexo(s) vinculados, "
+                            f"MNI indicou {anexos_pendentes} anexo(s) vinculados, "
                             "mas não há sessão PJe disponível para complementar"
                         )
                         log.warning(
                             "batch.processo.anexos_pending",
                             processo=numero,
-                            anexos_pendentes=total_vinc,
+                            anexos_pendentes=anexos_pendentes,
                         )
 
                 if mni_failed:

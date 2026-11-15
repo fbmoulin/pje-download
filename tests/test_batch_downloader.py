@@ -13,6 +13,8 @@ import threading
 
 import pytest
 
+from file_utils import DownloadedFiles
+
 # Patch heavy imports before loading module
 os.environ.setdefault("MNI_USERNAME", "user")
 os.environ.setdefault("MNI_PASSWORD", "pass")
@@ -359,7 +361,7 @@ async def test_download_batch_complements_annexes_with_session(tmp_path, monkeyp
     result = MagicMock()
     result.success = True
     result.processo = MagicMock(
-        documentos=[MagicMock(vinculados=[MagicMock()], tipo="pdf")]
+        documentos=[MagicMock(id="p1", vinculados=[MagicMock(id="a1")], tipo="pdf")]
     )
 
     mock_client = AsyncMock()
@@ -370,15 +372,18 @@ async def test_download_batch_complements_annexes_with_session(tmp_path, monkeyp
         "latency_ms": 1,
     }
     mock_client.consultar_processo.return_value = result
-    mock_client.download_documentos.return_value = [
-        {
-            "nome": "principal.pdf",
-            "tamanhoBytes": 10,
-            "localPath": str(tmp_path / "principal.pdf"),
-            "checksum": "dup",
-            "fonte": "mni",
-        }
-    ]
+    mock_client.download_documentos.return_value = DownloadedFiles(
+        [
+            {
+                "nome": "principal.pdf",
+                "tamanhoBytes": 10,
+                "localPath": str(tmp_path / "principal.pdf"),
+                "checksum": "dup",
+                "fonte": "mni",
+            }
+        ],
+        failed_ids=["a1"],
+    )
 
     mock_pje_client = AsyncMock()
     mock_pje_client.download_processo.return_value = [
@@ -445,7 +450,13 @@ async def test_download_batch_reports_pending_annexes_without_session(
     result = MagicMock()
     result.success = True
     result.processo = MagicMock(
-        documentos=[MagicMock(vinculados=[MagicMock(), MagicMock()], tipo="pdf")]
+        documentos=[
+            MagicMock(
+                id="p1",
+                vinculados=[MagicMock(id="a1"), MagicMock(id="a2")],
+                tipo="pdf",
+            )
+        ]
     )
 
     mock_client = AsyncMock()
@@ -456,15 +467,18 @@ async def test_download_batch_reports_pending_annexes_without_session(
         "latency_ms": 1,
     }
     mock_client.consultar_processo.return_value = result
-    mock_client.download_documentos.return_value = [
-        {
-            "nome": "principal.pdf",
-            "tamanhoBytes": 10,
-            "localPath": str(tmp_path / "principal.pdf"),
-            "checksum": "main",
-            "fonte": "mni",
-        }
-    ]
+    mock_client.download_documentos.return_value = DownloadedFiles(
+        [
+            {
+                "nome": "principal.pdf",
+                "tamanhoBytes": 10,
+                "localPath": str(tmp_path / "principal.pdf"),
+                "checksum": "main",
+                "fonte": "mni",
+            }
+        ],
+        failed_ids=["a1", "a2"],
+    )
 
     with (
         patch("mni_client.MNIClient", return_value=mock_client),
@@ -506,7 +520,7 @@ async def test_download_batch_warns_when_annex_complement_returns_empty(
     result = MagicMock()
     result.success = True
     result.processo = MagicMock(
-        documentos=[MagicMock(vinculados=[MagicMock()], tipo="pdf")]
+        documentos=[MagicMock(id="p1", vinculados=[MagicMock(id="a1")], tipo="pdf")]
     )
 
     mock_client = AsyncMock()
@@ -517,15 +531,18 @@ async def test_download_batch_warns_when_annex_complement_returns_empty(
         "latency_ms": 1,
     }
     mock_client.consultar_processo.return_value = result
-    mock_client.download_documentos.return_value = [
-        {
-            "nome": "principal.pdf",
-            "tamanhoBytes": 10,
-            "localPath": str(tmp_path / "principal.pdf"),
-            "checksum": "main",
-            "fonte": "mni",
-        }
-    ]
+    mock_client.download_documentos.return_value = DownloadedFiles(
+        [
+            {
+                "nome": "principal.pdf",
+                "tamanhoBytes": 10,
+                "localPath": str(tmp_path / "principal.pdf"),
+                "checksum": "main",
+                "fonte": "mni",
+            }
+        ],
+        failed_ids=["a1"],
+    )
 
     mock_pje_client = AsyncMock()
     mock_pje_client.download_processo.return_value = []
@@ -552,6 +569,151 @@ async def test_download_batch_warns_when_annex_complement_returns_empty(
     assert ps.erro is not None
     assert ("sessão PJe falhou" if raises else "não retornou anexos") in ps.erro
     assert ps.status == "failed"
+
+
+def _annex_batch_mocks(tmp_path, monkeypatch, *, failed_ids, with_session):
+    """Shared setup: one principal p1 with annex a1, MNI answers with failed_ids."""
+    monkeypatch.setenv("MNI_USERNAME", "u")
+    monkeypatch.setenv("MNI_PASSWORD", "p")
+    import pje_session
+
+    session_file = tmp_path / ("session.json" if with_session else "missing.json")
+    if with_session:
+        session_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(pje_session, "SESSION_FILE", session_file)
+
+    result = MagicMock()
+    result.success = True
+    result.processo = MagicMock(
+        documentos=[MagicMock(id="p1", vinculados=[MagicMock(id="a1")], tipo="pdf")]
+    )
+    mock_client = AsyncMock()
+    mock_client.health_check.return_value = {
+        "status": "healthy",
+        "tribunal": "T",
+        "operations": [],
+        "latency_ms": 1,
+    }
+    mock_client.consultar_processo.return_value = result
+    mock_client.download_documentos.return_value = DownloadedFiles(
+        [
+            {
+                "nome": "principal.pdf",
+                "tamanhoBytes": 10,
+                "localPath": str(tmp_path / "principal.pdf"),
+                "checksum": "main",
+                "fonte": "mni",
+            },
+            {
+                "nome": "anexo.pdf",
+                "tamanhoBytes": 5,
+                "localPath": str(tmp_path / "anexo.pdf"),
+                "checksum": "annex",
+                "fonte": "mni",
+            },
+        ],
+        failed_ids=failed_ids,
+    )
+    mock_pje_client = AsyncMock()
+    mock_pje_client.download_processo.return_value = []
+    return mock_client, mock_pje_client
+
+
+async def _run_annex_batch(tmp_path, mock_client, mock_pje_client):
+    from batch_downloader import download_batch
+
+    with (
+        patch("mni_client.MNIClient", return_value=mock_client),
+        patch("pje_session.PJeSessionClient", return_value=mock_pje_client),
+        patch("gdrive_downloader.is_processo_antigo", return_value=False),
+        patch(
+            "gdrive_downloader.download_gdrive_folder",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        progress = await download_batch(
+            numeros=["1234567" + "-89.2024.8.08.0001"],
+            output_dir=tmp_path,
+            delay_entre_processos=0.0,
+        )
+    return progress.processos["1234567" + "-89.2024.8.08.0001"]
+
+
+@pytest.mark.asyncio
+async def test_download_batch_annexes_saved_by_mni_do_not_use_session(
+    tmp_path, monkeypatch
+):
+    """Annex delivered by MNI is not pending: done, no warning, no PJe session call."""
+    mock_client, mock_pje = _annex_batch_mocks(
+        tmp_path, monkeypatch, failed_ids=[], with_session=True
+    )
+    ps = await _run_annex_batch(tmp_path, mock_client, mock_pje)
+    assert ps.status == "done"
+    assert ps.erro is None
+    assert ps.docs_baixados == 2
+    mock_pje.download_processo.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_download_batch_annexes_saved_by_mni_done_without_session(
+    tmp_path, monkeypatch
+):
+    """No session is needed (and no warning) when MNI delivered every annex."""
+    mock_client, mock_pje = _annex_batch_mocks(
+        tmp_path, monkeypatch, failed_ids=[], with_session=False
+    )
+    ps = await _run_annex_batch(tmp_path, mock_client, mock_pje)
+    assert ps.status == "done"
+    assert ps.erro is None
+
+
+@pytest.mark.asyncio
+async def test_download_batch_failed_annex_id_uses_session(tmp_path, monkeypatch):
+    """An annex id in failed_ids is pending and is complemented via the session."""
+    mock_client, mock_pje = _annex_batch_mocks(
+        tmp_path, monkeypatch, failed_ids=["a1"], with_session=True
+    )
+    mock_pje.download_processo.return_value = [
+        {
+            "nome": "anexo2.pdf",
+            "tamanhoBytes": 5,
+            "localPath": str(tmp_path / "anexo2.pdf"),
+            "checksum": "annex2",
+            "fonte": "pje_api",
+        }
+    ]
+    ps = await _run_annex_batch(tmp_path, mock_client, mock_pje)
+    mock_pje.download_processo.assert_awaited_once()
+    assert ps.status == "done"
+    assert ps.erro is None
+
+
+@pytest.mark.asyncio
+async def test_download_batch_failed_annex_id_without_session_fails(
+    tmp_path, monkeypatch
+):
+    mock_client, mock_pje = _annex_batch_mocks(
+        tmp_path, monkeypatch, failed_ids=["a1"], with_session=False
+    )
+    ps = await _run_annex_batch(tmp_path, mock_client, mock_pje)
+    assert ps.status == "failed"
+    assert "anexo" in ps.phase_detail.lower()
+    mock_pje.download_processo.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_download_batch_failed_principal_is_not_a_pending_annex(
+    tmp_path, monkeypatch
+):
+    """A lost PRINCIPAL id fails the process but never triggers annex complement."""
+    mock_client, mock_pje = _annex_batch_mocks(
+        tmp_path, monkeypatch, failed_ids=["p1"], with_session=True
+    )
+    ps = await _run_annex_batch(tmp_path, mock_client, mock_pje)
+    mock_pje.download_processo.assert_not_called()
+    assert ps.status == "failed"
+    assert "anexo(s)" not in (ps.erro or "")
 
 
 # ─────────────────────────────────────────────
