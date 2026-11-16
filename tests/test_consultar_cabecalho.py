@@ -231,3 +231,40 @@ class TestFerramenta:
 
     def test_parse_numeros_aceita_separadores_e_tira_repetidos(self):
         assert cc.parse_numeros(f" {cnj(1)};{cnj(2)}\n{cnj(1)} ") == [cnj(1), cnj(2)]
+
+
+def test_saida_existente_com_0644_vira_0600(fake_client, capsys, tmp_path):
+    destino = tmp_path / "cab.json"
+    destino.write_text("{}", encoding="utf-8")
+    os.chmod(destino, 0o644)
+    code, _ = _rodar(capsys, [cnj(1), "--saida", str(destino), "--pausa", "0"])
+    assert code == 0
+    assert oct(os.stat(destino).st_mode & 0o777) == "0o600"
+
+
+def test_logs_do_mni_nao_sujam_o_json(capsys):
+    import structlog
+
+    client = MagicMock()
+    client.tribunal = "TJES"
+
+    async def _consultar(numero, **kwargs):
+        structlog.get_logger("kratos.mni-client").info(
+            "mni.consultar_processo.start", processo=numero
+        )
+        return MNIResult(success=True, processo=_processo(numero), status="success")
+
+    client.consultar_processo = AsyncMock(side_effect=_consultar)
+    try:
+        with (
+            patch("mni_client.MNIClient", return_value=client),
+            patch.object(cc, "_load_env"),
+            patch("audit.log_access"),
+        ):
+            code = cc.main([cnj(1), "--pausa", "0"])
+        out = capsys.readouterr()
+    finally:
+        structlog.reset_defaults()
+    assert code == 0
+    json.loads(out.out)
+    assert "mni.consultar_processo.start" in out.err

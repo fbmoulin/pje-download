@@ -158,8 +158,18 @@ async def consultar(
     }
 
 
+def _configurar_log() -> None:
+    """Manda os logs do structlog para stderr: o stdout é só do JSON."""
+    import structlog
+
+    structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))
+
+
 def _gravar(caminho: Path, texto: str) -> None:
     fd = os.open(str(caminho), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # O modo do os.open só vale para arquivo novo: um arquivo existente com 0644
+    # continuaria legível por outros usuários.
+    os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(texto)
 
@@ -212,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     _load_env()
+    _configurar_log()
     try:
         saida = asyncio.run(
             consultar(
