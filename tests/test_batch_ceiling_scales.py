@@ -100,11 +100,10 @@ class TestPollLoopUsesTheScaledCeiling:
         assert redis_stub.queues[JOBS] == []
 
     @pytest.mark.asyncio
-    async def test_resume_sizes_the_ceiling_from_the_processos_still_pending(
-        self, tmp_path
-    ):
-        """resume_active_batch re-enters with enqueue_jobs=False; `state.pending`
-        already excludes finished processos, so the ceiling is sized from those."""
+    async def test_resume_sizes_the_ceiling_from_the_whole_batch(self, tmp_path):
+        """resume_active_batch re-enters with enqueue_jobs=False. The absolute clock now
+        counts from the persisted `started_at` (it no longer restarts), so the ceiling
+        is sized from the whole batch, as at submission, not from what is pending."""
         job = _job(tmp_path, "resume")
         ds = _state(tmp_path, job)
         seen = []
@@ -126,7 +125,7 @@ class TestPollLoopUsesTheScaledCeiling:
             patch("dashboard_api.BATCH_MAX_DURATION_CAP_SECS", -1),
         ):
             await ds._poll_results_loop(job, _silent_worker_redis(), state)
-        assert seen[0] == 1
+        assert seen[0] == len(job.processos) == 3
 
 
 class TestConfigConstants:

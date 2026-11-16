@@ -125,6 +125,22 @@ def _batch_ceiling_secs(n_processos: int) -> int:
     )
 
 
+def _elapsed_since_start_secs(started_at: object) -> float:
+    """Wall-clock seconds since the batch's persisted ``started_at``.
+
+    ``time.monotonic()`` is local to this process, so a resumed batch (new process after
+    a deploy) used to restart the absolute ceiling from zero. ``started_at`` is persisted
+    in the active-batch marker. Missing/invalid -> 0; a start in the future (clock skew)
+    -> 0, never negative. A naive timestamp is read as UTC.
+    """
+    started = _parse_iso(started_at)
+    if started is None:
+        return 0.0
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    return max((datetime.now(UTC) - started).total_seconds(), 0.0)
+
+
 @dataclass
 class BatchPollState:
     """Mutable state for the result-polling phase of ``DashboardState._run_batch``.
@@ -609,11 +625,19 @@ class DashboardState:
             phase = "failed"
 
         processos = job.progress.setdefault("processos", {})
+        # Em ``done`` tudo o que o worker esperava foi baixado: N/N. Em partial/failed o
+        # esperado visto no progresso (total_docs) sobrevive, para mostrar N/M com M > N;
+        # nunca abaixo do baixado e sem inventar número se o progresso não trouxe nenhum.
+        total_docs = docs_baixados
+        if status != "done":
+            seen = processos.get(numero, {}).get("total_docs")
+            if isinstance(seen, int) and not isinstance(seen, bool):
+                total_docs = max(seen, docs_baixados)
         processos[numero] = {
             "status": status,
             "phase": phase,
             "phase_detail": error if status in {"done", "partial"} and error else None,
-            "total_docs": docs_baixados,
+            "total_docs": total_docs,
             "docs_baixados": docs_baixados,
             "tamanho_bytes": tamanho_bytes,
             "erro": error if status in {"failed", "partial"} else None,
@@ -732,9 +756,11 @@ class DashboardState:
                 "status": "failed",
                 "phase": "failed",
                 "phase_detail": error,
-                "total_docs": 0,
-                "docs_baixados": 0,
-                "tamanho_bytes": 0,
+                # Mantém o que o progresso já tinha (um processo em andamento não
+                # vira 0/0 só porque o lote estourou o tempo).
+                "total_docs": current.get("total_docs", 0),
+                "docs_baixados": current.get("docs_baixados", 0),
+                "tamanho_bytes": current.get("tamanho_bytes", 0),
                 "erro": error,
                 "duracao_s": None,
             }
@@ -830,12 +856,16 @@ class DashboardState:
         Mutates ``state`` in place: pending, last_result_at, timed_out, fatal_error.
         """
         batch_start_time = time.monotonic()
-        # Sized from what is still pending: on resume (enqueue_jobs=False) that
-        # excludes finished processos, and the clock restarts at the resume.
-        ceiling_secs = _batch_ceiling_secs(len(state.pending))
+        # The absolute clock counts from the persisted wall-clock ``started_at``, so a
+        # resumed batch (enqueue_jobs=False) does not restart it; the idle clock
+        # (``last_result_at``) does restart on resume, which is deliberate: the worker
+        # needs time to come back. Since the clock no longer restarts, the ceiling is
+        # sized from the whole batch, as at submission, not from what is still pending.
+        elapsed_before_secs = _elapsed_since_start_secs(job.started_at)
+        ceiling_secs = _batch_ceiling_secs(len(job.processos))
         redis_errors = 0  # consecutive BLPOP failures; reset on any success
         while state.pending:
-            if time.monotonic() - batch_start_time > ceiling_secs:
+            if elapsed_before_secs + time.monotonic() - batch_start_time > ceiling_secs:
                 abs_error = f"Batch absolute timeout ({ceiling_secs}s)"
                 await self._purge_pending_jobs(job, redis_client, state)
                 self._fail_remaining_processes(job, state.pending, abs_error)
@@ -1150,6 +1180,11 @@ async def handle_status(request: web.Request) -> web.Response:
             "worker_status": worker_status,
             "worker": worker_data,
             "recovered_active_batch": state.recovered_active_batch_id,
+            # Sem sync, /data/audit é a única cópia e a rotação a apaga após a janela.
+            "audit": {
+                "sync_enabled": AUDIT_SYNC_ENABLED,
+                "retention_days": AUDIT_LOG_RETENTION_DAYS,
+            },
         }
     )
 
@@ -1337,9 +1372,12 @@ async def handle_download(request: web.Request) -> web.Response:
             status=400,
         )
 
-    include_anexos = (
-        False if documento_ids is not None else body.get("include_anexos", True)
-    )
+    raw_anexos = body.get("include_anexos", True)
+    if not isinstance(raw_anexos, bool):
+        return web.json_response(
+            {"error": "include_anexos deve ser booleano (true/false)"}, status=400
+        )
+    include_anexos = False if documento_ids is not None else raw_anexos
 
     # ── Check + submit under lock (BUG-3) ──
     async with ctx.batch_lock:
@@ -1648,6 +1686,19 @@ async def _on_cleanup(app: web.Application) -> None:
         await state.close()
 
 
+def _log_audit_rotation(deleted: int, *, periodic: bool = False) -> None:
+    """Log a rotation that deleted logs; warning when no copy exists (sync off)."""
+    emit = log.info if AUDIT_SYNC_ENABLED else log.warning
+    extra = {"periodic": True} if periodic else {}
+    emit(
+        "dashboard.audit.rotation_complete",
+        deleted=deleted,
+        retention_days=AUDIT_LOG_RETENTION_DAYS,
+        sync_enabled=AUDIT_SYNC_ENABLED,
+        **extra,
+    )
+
+
 async def _audit_rotation_loop(interval_secs: float) -> None:
     """Re-run ``audit.rotate_logs`` every ``interval_secs`` while the dashboard is up.
 
@@ -1664,12 +1715,7 @@ async def _audit_rotation_loop(interval_secs: float) -> None:
                 rotate_logs, max_days=AUDIT_LOG_RETENTION_DAYS
             )
             if deleted:
-                log.info(
-                    "dashboard.audit.rotation_complete",
-                    deleted=deleted,
-                    retention_days=AUDIT_LOG_RETENTION_DAYS,
-                    periodic=True,
-                )
+                _log_audit_rotation(deleted, periodic=True)
         except Exception as exc:
             log.warning(
                 "dashboard.audit.rotation_failed",
@@ -1811,11 +1857,7 @@ def _rotate_audit_logs_on_startup() -> None:
     try:
         deleted = rotate_logs(max_days=AUDIT_LOG_RETENTION_DAYS)
         if deleted:
-            log.info(
-                "dashboard.audit.rotation_complete",
-                deleted=deleted,
-                retention_days=AUDIT_LOG_RETENTION_DAYS,
-            )
+            _log_audit_rotation(deleted)
     except Exception as exc:
         log.warning("dashboard.audit.rotation_failed", error=str(exc))
 
