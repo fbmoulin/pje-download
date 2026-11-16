@@ -600,7 +600,7 @@ ssh -i <chave_deploy> -L 8007:localhost:8007 <VPS_USER>@<VPS_HOST>
 
 | Workflow | Trigger | Etapas |
 |----------|---------|--------|
-| `ci.yml` | push / PR | ruff lint (**pinado em `0.14.14`**) → pytest (resultado datado do `987e208`: **1331 passed, sem skips, 1 warning**, com Redis; ver seção Estado verificado) |
+| `ci.yml` | push / PR | ruff lint (**pinado em `0.14.14`**) → pytest (medido em 2026-11-16 no `663c856`, sem Redis: **1510 passed, 14 skipped, 1 warning**; os 14 skips são os testes de Redis real, que rodam no CI; ver seção Estado verificado) |
 | `deploy.yml` | CI concluido com sucesso em `master` | rsync → `docker compose up --build` no VPS → healthcheck worker/dashboard → smoke test da fila + validação MNI |
 | `dependabot.yml` | semanal | atualiza actions + pip deps |
 

@@ -48,7 +48,7 @@ export AUDIT_LOG_DIR="/data/audit" # CNJ 615/2025 audit trail (default: /data/au
 ## Stack
 - Runtime: Python 3.12, aiohttp (not FastAPI), zeep (SOAP), structlog, asyncio
 - SOAP calls: always via `asyncio.to_thread` — zeep is synchronous
-- Test suite: pytest — run with `pytest tests/ -q` before any commit. Last verified on master `987e208` (#103), CI run 43560698713: **1331 passed, no skips, 1 warning**, with real Redis. Local validation of the same code without Redis: **1317 passed, 14 skipped, 1 warning**; gate subset: **247 passed**. These are dated results, not a fixed required count.
+- Test suite: pytest — run with `pytest tests/ -q` before any commit. Last measured 2026-11-16 on master `663c856` (#122), locally without Redis: **1510 passed, 14 skipped, 1 warning**. The 14 skips are the real-Redis tests (below), which run in CI where Redis is published; the last CI run with Redis (`987e208`, #103) had no skips, but CI was not re-read for `663c856`. These are dated results, not a fixed required count.
   - ⚠️ **Without a reachable Redis the 14 skips are silent.** They are `tests/test_redis_socket_timeout.py`, `tests/test_result_queue_ttl.py` and `tests/test_worker_job_redelivery.py`: the only real-socket tests, and precisely the ones that matter when bumping `redis[hiredis]`. CI publishes Redis on 6379 deliberately so they run. Locally: `docker run -d --rm -p 6379:6379 redis:7.4-alpine` first, or treat a green run as proving nothing about the Redis pin. Report skips explicitly.
   - The warning is the existing AsyncMock RuntimeWarning in `test_worker_lazy_browser.py`. No new live PJe/browser acceptance was performed by this task.
 - Audit sink: asyncpg → Railway Postgres (optional, opt-in via `AUDIT_SYNC_ENABLED`). **Requires PG 15+** — syncer self-disables on older versions (see Sprint 12 B5)
@@ -344,8 +344,6 @@ Default disabled (`AUDIT_SYNC_ENABLED=false`).
 ## Backlog — Phase 1 Complete (Items 1–6 DONE)
 
 **As of 2026-09-29:** All Phase 1 backlog items (1–6) are complete and merged, and Phase 2 T2.1 and T2.2A are merged and deployed (#54, #53). Remaining Phase 2 items are below.
-
-**Test suite status (2026-10-24):** 1293 passed with a live Redis (no failures), master `d59c8a4` (then `a2bfb3f`, Playwright 1.64.0).
 
 ### Phase 1 Completed Items (2026-04-04 → 2026-09-27)
 
