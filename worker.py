@@ -833,10 +833,13 @@ class PJeSessionWorker:
                     error=warning,
                 )
             self._health_status = "ready"
+            error = "Browser fallback indisponível ou sem arquivos"
+            if ctx.mni_failed_ids:
+                error = f"{missing_docs_message(ctx.mni_failed_ids)}; {error}"
             await self._publish_progress(
                 ctx.job,
                 "failed",
-                "Browser fallback indisponível ou sem arquivos",
+                error,
                 total_docs=max(ctx.expected_total_docs, len(ctx.downloaded_files)),
                 docs_baixados=len(ctx.downloaded_files),
                 tamanho_bytes=total_bytes(ctx.downloaded_files),
@@ -845,7 +848,7 @@ class PJeSessionWorker:
                 ctx.job_id,
                 ctx.numero_processo,
                 "failed",
-                error="Browser fallback indisponível ou sem arquivos",
+                error=error,
             )
         ctx.downloaded_files = _merge_downloaded_files(
             ctx.downloaded_files, browser_files
@@ -1235,10 +1238,16 @@ class PJeSessionWorker:
             )
             # O MNI entrega o anexo pelo ID (medido em 2026-11-14): pendente é só o
             # anexo que não veio, e esse ainda pode ir para os fallbacks.
-            anexos_pendentes = sum(
-                1 for i in getattr(files, "failed_ids", []) if str(i) in anexo_ids
-            )
-            return (files if files else None), anexos_pendentes, expected_total_docs
+            failed = getattr(files, "failed_ids", None) or []
+            # Nothing saved but documents lost: keep the empty DownloadedFiles so
+            # `_phase_mni` still reads `failed_ids` and the final result can say
+            # what the MNI lost. No file was saved, so there is no process left to
+            # complement with annexes: `anexos_pendentes` stays 0 and the
+            # fallbacks run as before (dormant ones end `failed`).
+            if not files:
+                return (files if failed else None), 0, expected_total_docs
+            anexos_pendentes = sum(1 for i in failed if str(i) in anexo_ids)
+            return files, anexos_pendentes, expected_total_docs
 
         except DiskWriteError:
             # Not an MNI failure: the fallbacks write to the same disk. Let
