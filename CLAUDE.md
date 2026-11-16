@@ -266,6 +266,10 @@ evidence: `docs/specs/2026-10-03-prompt-quality-gate.md`; premortems in `.premor
   helpers). `.gitleaks.toml` also flags formatted CNJ numbers and formatted CPFs regardless of
   check digit, so never commit such literals, not even invalid ones.
 
+## MNI TJES: attachments and the WSDL wildcard (2026-11-16)
+
+`tipoDocumento` in TJES's WSDL declares `<any ##other lax/>` before `documentoVinculado*`; zeep bound the FIRST attachment of every document to that wildcard (`_value_1`, raw lxml with an unresolved MTOM `xop:Include`), so `_parse_processo` never saw it. `mni_client.strip_documento_xs_any` (applied in `_get_client` by wrapping `transport.load`) removes the wildcard from that type only (`tests/test_mni_wsdl_any_wildcard.py`, which reproduces the bug with real zeep). If a zeep-parsed response looks short, compare the raw XML with the parsed object before blaming the server. Documents the MNI still does not list (5 in one test process, ids older than the case) are only reachable through a PJe session or the origin process.
+
 ## Download retention (added 2026-11-15)
 
 Spec: `docs/specs/2026-11-15-retencao-downloads.md`. `retention.purge_old_downloads` (called by `dashboard_api._download_retention_loop`, started in `_on_startup` after `resume_active_batch`) deletes the downloaded files of **finished dashboard batches** older than `DOWNLOAD_RETENTION_DAYS` (default 14). **The deletion is irreversible**, so:
