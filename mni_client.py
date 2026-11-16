@@ -595,75 +595,7 @@ class MNIClient:
             if not isinstance(documentos, list):
                 documentos = [documentos]
             for doc in documentos:
-                doc_id = str(getattr(doc, "idDocumento", getattr(doc, "id", "")))
-                nome = getattr(doc, "descricao", getattr(doc, "nome", f"doc_{doc_id}"))
-                # tipoDocumento no TJES é um código numérico, não objeto
-                tipo_raw = getattr(doc, "tipoDocumento", "documento")
-                if hasattr(tipo_raw, "descricao"):
-                    tipo = str(tipo_raw.descricao)
-                else:
-                    tipo = str(tipo_raw)
-                mimetype = getattr(doc, "mimetype", "application/pdf")
-
-                # Conteúdo binário (presente quando documento_ids é passado)
-                # No TJES, vem como bytes direto (não base64)
-                conteudo_raw = getattr(doc, "conteudo", None)
-                conteudo_b64 = None
-                tamanho = 0
-                if conteudo_raw is not None:
-                    if isinstance(conteudo_raw, bytes) and len(conteudo_raw) > 0:
-                        conteudo_b64 = base64.b64encode(conteudo_raw).decode("ascii")
-                        tamanho = len(conteudo_raw)
-                    elif isinstance(conteudo_raw, str) and len(conteudo_raw) > 0:
-                        conteudo_b64 = conteudo_raw
-                        tamanho = len(base64.b64decode(conteudo_raw))
-
-                doc_obj = MNIDocumento(
-                    id=doc_id,
-                    nome=nome,
-                    tipo=tipo,
-                    mimetype=mimetype,
-                    conteudo_base64=conteudo_b64,
-                    tamanho_bytes=tamanho,
-                )
-
-                # Documentos vinculados (anexos: procuração, docs pessoais, etc.)
-                vinculados_raw = getattr(doc, "documentoVinculado", [])
-                if not isinstance(vinculados_raw, list):
-                    vinculados_raw = [vinculados_raw]
-                for vdoc in vinculados_raw:
-                    vid = str(getattr(vdoc, "idDocumento", ""))
-                    vnome = getattr(vdoc, "descricao", f"anexo_{vid}")
-                    vtipo_raw = getattr(vdoc, "tipoDocumento", "anexo")
-                    vtipo = (
-                        str(vtipo_raw.descricao)
-                        if hasattr(vtipo_raw, "descricao")
-                        else str(vtipo_raw)
-                    )
-                    vmime = getattr(vdoc, "mimetype", "application/pdf")
-                    vconteudo_raw = getattr(vdoc, "conteudo", None)
-                    vb64 = None
-                    vtam = 0
-                    if vconteudo_raw is not None:
-                        if isinstance(vconteudo_raw, bytes) and len(vconteudo_raw) > 0:
-                            vb64 = base64.b64encode(vconteudo_raw).decode("ascii")
-                            vtam = len(vconteudo_raw)
-                        elif isinstance(vconteudo_raw, str) and len(vconteudo_raw) > 0:
-                            vb64 = vconteudo_raw
-                            vtam = len(base64.b64decode(vconteudo_raw))
-                    doc_obj.vinculados.append(
-                        MNIDocumento(
-                            id=vid,
-                            nome=vnome,
-                            tipo=vtipo,
-                            mimetype=vmime,
-                            conteudo_base64=vb64,
-                            tamanho_bytes=vtam,
-                            id_pai=doc_id,
-                        )
-                    )
-
-                processo.documentos.append(doc_obj)
+                processo.documentos.append(self._parse_documento(doc))
 
             # Movimentações
             movimentos = getattr(proc_data, "movimento", [])
@@ -687,6 +619,71 @@ class MNIClient:
             raise  # Let caller handle — silent swallow causes data loss
 
         return processo
+
+    # Profundidade máxima de documentoVinculado aninhado (contra ciclo/XML hostil).
+    _MAX_VINCULADO_DEPTH = 5
+
+    def _parse_documento(
+        self, doc, id_pai: str | None = None, depth: int = 0
+    ) -> MNIDocumento:
+        """Converte um documento do MNI e, recursivamente, os seus vinculados.
+
+        O nível 0 é o documento principal; níveis seguintes são anexos (e anexos
+        de anexos), com ``id_pai`` apontando para o pai direto. Abaixo de
+        ``_MAX_VINCULADO_DEPTH`` níveis os vinculados são descartados.
+        """
+        if depth == 0:
+            doc_id = str(getattr(doc, "idDocumento", getattr(doc, "id", "")))
+            nome = getattr(doc, "descricao", getattr(doc, "nome", f"doc_{doc_id}"))
+            tipo_default = "documento"
+        else:
+            doc_id = str(getattr(doc, "idDocumento", ""))
+            nome = getattr(doc, "descricao", f"anexo_{doc_id}")
+            tipo_default = "anexo"
+        # tipoDocumento no TJES é um código numérico, não objeto
+        tipo_raw = getattr(doc, "tipoDocumento", tipo_default)
+        if hasattr(tipo_raw, "descricao"):
+            tipo = str(tipo_raw.descricao)
+        else:
+            tipo = str(tipo_raw)
+        mimetype = getattr(doc, "mimetype", "application/pdf")
+
+        # Conteúdo binário (presente quando documento_ids é passado)
+        # No TJES, vem como bytes direto (não base64)
+        conteudo_raw = getattr(doc, "conteudo", None)
+        conteudo_b64 = None
+        tamanho = 0
+        if conteudo_raw is not None:
+            if isinstance(conteudo_raw, bytes) and len(conteudo_raw) > 0:
+                conteudo_b64 = base64.b64encode(conteudo_raw).decode("ascii")
+                tamanho = len(conteudo_raw)
+            elif isinstance(conteudo_raw, str) and len(conteudo_raw) > 0:
+                conteudo_b64 = conteudo_raw
+                tamanho = len(base64.b64decode(conteudo_raw))
+
+        doc_obj = MNIDocumento(
+            id=doc_id,
+            nome=nome,
+            tipo=tipo,
+            mimetype=mimetype,
+            conteudo_base64=conteudo_b64,
+            tamanho_bytes=tamanho,
+            id_pai=id_pai,
+        )
+
+        # Documentos vinculados (anexos: procuração, docs pessoais, etc.), que
+        # podem ter os seus próprios vinculados.
+        if depth < self._MAX_VINCULADO_DEPTH:
+            vinculados_raw = getattr(doc, "documentoVinculado", None) or []
+            if not isinstance(vinculados_raw, list):
+                vinculados_raw = [vinculados_raw]
+            for vdoc in vinculados_raw:
+                if vdoc is None:
+                    continue
+                doc_obj.vinculados.append(
+                    self._parse_documento(vdoc, id_pai=doc_id, depth=depth + 1)
+                )
+        return doc_obj
 
     # ──────────────────────
     # DOWNLOAD DE DOCUMENTOS
