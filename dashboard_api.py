@@ -1970,7 +1970,9 @@ async def api_key_middleware(request: web.Request, handler):
         return await handler(request)
 
     provided = request.headers.get("X-API-Key", "")
-    if not provided or not hmac.compare_digest(provided, DASHBOARD_API_KEY):
+    if not provided or not hmac.compare_digest(
+        provided.encode(), DASHBOARD_API_KEY.encode()
+    ):
         return web.json_response({"error": "Unauthorized"}, status=401)
 
     return await handler(request)
