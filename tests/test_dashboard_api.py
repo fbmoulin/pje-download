@@ -856,6 +856,22 @@ class TestApiKeyMiddleware:
         assert resp.status == 401
 
     @pytest.mark.asyncio
+    async def test_non_ascii_key_returns_401_not_500(self, monkeypatch):
+        """hmac.compare_digest raises TypeError on non-ASCII str: must be a 401."""
+        import config
+
+        monkeypatch.setattr(config, "DASHBOARD_API_KEY", "correct-key")
+        resp = await dashboard_api.api_key_middleware(
+            DummyRequest(
+                method="GET",
+                path="/api/status",
+                headers={"X-API-Key": "caf\u00e9"},
+            ),
+            _ok_handler,
+        )
+        assert resp.status == 401
+
+    @pytest.mark.asyncio
     async def test_get_api_endpoint_without_key_returns_401(self, monkeypatch):
         """GET /api/history (lists CNJ numbers) MUST require auth when key is set.
 

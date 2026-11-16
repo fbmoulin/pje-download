@@ -33,7 +33,7 @@ services:
       redis-server
       --requirepass ${REDIS_PASSWORD:-pje_redis_2026}
       --maxmemory 96mb
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy volatile-lru
       --stop-writes-on-bgsave-error no
     volumes:
       - redis_data:/data
@@ -77,6 +77,11 @@ services:
       TRUST_X_FORWARDED_FOR: ${TRUST_X_FORWARDED_FOR:-false}
       WORKER_HEALTH_HOST: worker
       AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-120}
+      # Download retention (irreversible deletion). Defaults equal config.py's; setting
+      # DOWNLOAD_RETENTION_DRY_RUN=true in the environment is the kill switch.
+      DOWNLOAD_RETENTION_DAYS: ${DOWNLOAD_RETENTION_DAYS:-14}
+      DOWNLOAD_RETENTION_DRY_RUN: ${DOWNLOAD_RETENTION_DRY_RUN:-false}
+      DOWNLOAD_RETENTION_INTERVAL_SECS: ${DOWNLOAD_RETENTION_INTERVAL_SECS:-86400}
       DATABASE_URL: ${DATABASE_URL:-}
       AUDIT_SYNC_ENABLED: ${AUDIT_SYNC_ENABLED:-false}
       AUDIT_SYNC_INTERVAL_SECS: ${AUDIT_SYNC_INTERVAL_SECS:-300}
