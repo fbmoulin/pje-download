@@ -182,6 +182,10 @@ def strip_documento_xs_any(wsdl: bytes) -> bytes:
     return _DOCUMENTO_TYPE.sub(lambda m: _XS_ANY.sub(b"", m.group(1)), wsdl)
 
 
+# consultar_processo statuses where asking again can help (see download_documentos).
+_RETRYABLE_STATUSES = frozenset({"timeout", "error"})
+
+
 class MNIClient:
     """
     Cliente SOAP para o MNI do PJe.
@@ -595,75 +599,7 @@ class MNIClient:
             if not isinstance(documentos, list):
                 documentos = [documentos]
             for doc in documentos:
-                doc_id = str(getattr(doc, "idDocumento", getattr(doc, "id", "")))
-                nome = getattr(doc, "descricao", getattr(doc, "nome", f"doc_{doc_id}"))
-                # tipoDocumento no TJES é um código numérico, não objeto
-                tipo_raw = getattr(doc, "tipoDocumento", "documento")
-                if hasattr(tipo_raw, "descricao"):
-                    tipo = str(tipo_raw.descricao)
-                else:
-                    tipo = str(tipo_raw)
-                mimetype = getattr(doc, "mimetype", "application/pdf")
-
-                # Conteúdo binário (presente quando documento_ids é passado)
-                # No TJES, vem como bytes direto (não base64)
-                conteudo_raw = getattr(doc, "conteudo", None)
-                conteudo_b64 = None
-                tamanho = 0
-                if conteudo_raw is not None:
-                    if isinstance(conteudo_raw, bytes) and len(conteudo_raw) > 0:
-                        conteudo_b64 = base64.b64encode(conteudo_raw).decode("ascii")
-                        tamanho = len(conteudo_raw)
-                    elif isinstance(conteudo_raw, str) and len(conteudo_raw) > 0:
-                        conteudo_b64 = conteudo_raw
-                        tamanho = len(base64.b64decode(conteudo_raw))
-
-                doc_obj = MNIDocumento(
-                    id=doc_id,
-                    nome=nome,
-                    tipo=tipo,
-                    mimetype=mimetype,
-                    conteudo_base64=conteudo_b64,
-                    tamanho_bytes=tamanho,
-                )
-
-                # Documentos vinculados (anexos: procuração, docs pessoais, etc.)
-                vinculados_raw = getattr(doc, "documentoVinculado", [])
-                if not isinstance(vinculados_raw, list):
-                    vinculados_raw = [vinculados_raw]
-                for vdoc in vinculados_raw:
-                    vid = str(getattr(vdoc, "idDocumento", ""))
-                    vnome = getattr(vdoc, "descricao", f"anexo_{vid}")
-                    vtipo_raw = getattr(vdoc, "tipoDocumento", "anexo")
-                    vtipo = (
-                        str(vtipo_raw.descricao)
-                        if hasattr(vtipo_raw, "descricao")
-                        else str(vtipo_raw)
-                    )
-                    vmime = getattr(vdoc, "mimetype", "application/pdf")
-                    vconteudo_raw = getattr(vdoc, "conteudo", None)
-                    vb64 = None
-                    vtam = 0
-                    if vconteudo_raw is not None:
-                        if isinstance(vconteudo_raw, bytes) and len(vconteudo_raw) > 0:
-                            vb64 = base64.b64encode(vconteudo_raw).decode("ascii")
-                            vtam = len(vconteudo_raw)
-                        elif isinstance(vconteudo_raw, str) and len(vconteudo_raw) > 0:
-                            vb64 = vconteudo_raw
-                            vtam = len(base64.b64decode(vconteudo_raw))
-                    doc_obj.vinculados.append(
-                        MNIDocumento(
-                            id=vid,
-                            nome=vnome,
-                            tipo=vtipo,
-                            mimetype=vmime,
-                            conteudo_base64=vb64,
-                            tamanho_bytes=vtam,
-                            id_pai=doc_id,
-                        )
-                    )
-
-                processo.documentos.append(doc_obj)
+                processo.documentos.append(self._parse_documento(doc))
 
             # Movimentações
             movimentos = getattr(proc_data, "movimento", [])
@@ -687,6 +623,71 @@ class MNIClient:
             raise  # Let caller handle — silent swallow causes data loss
 
         return processo
+
+    # Profundidade máxima de documentoVinculado aninhado (contra ciclo/XML hostil).
+    _MAX_VINCULADO_DEPTH = 5
+
+    def _parse_documento(
+        self, doc, id_pai: str | None = None, depth: int = 0
+    ) -> MNIDocumento:
+        """Converte um documento do MNI e, recursivamente, os seus vinculados.
+
+        O nível 0 é o documento principal; níveis seguintes são anexos (e anexos
+        de anexos), com ``id_pai`` apontando para o pai direto. Abaixo de
+        ``_MAX_VINCULADO_DEPTH`` níveis os vinculados são descartados.
+        """
+        if depth == 0:
+            doc_id = str(getattr(doc, "idDocumento", getattr(doc, "id", "")))
+            nome = getattr(doc, "descricao", getattr(doc, "nome", f"doc_{doc_id}"))
+            tipo_default = "documento"
+        else:
+            doc_id = str(getattr(doc, "idDocumento", ""))
+            nome = getattr(doc, "descricao", f"anexo_{doc_id}")
+            tipo_default = "anexo"
+        # tipoDocumento no TJES é um código numérico, não objeto
+        tipo_raw = getattr(doc, "tipoDocumento", tipo_default)
+        if hasattr(tipo_raw, "descricao"):
+            tipo = str(tipo_raw.descricao)
+        else:
+            tipo = str(tipo_raw)
+        mimetype = getattr(doc, "mimetype", "application/pdf")
+
+        # Conteúdo binário (presente quando documento_ids é passado)
+        # No TJES, vem como bytes direto (não base64)
+        conteudo_raw = getattr(doc, "conteudo", None)
+        conteudo_b64 = None
+        tamanho = 0
+        if conteudo_raw is not None:
+            if isinstance(conteudo_raw, bytes) and len(conteudo_raw) > 0:
+                conteudo_b64 = base64.b64encode(conteudo_raw).decode("ascii")
+                tamanho = len(conteudo_raw)
+            elif isinstance(conteudo_raw, str) and len(conteudo_raw) > 0:
+                conteudo_b64 = conteudo_raw
+                tamanho = len(base64.b64decode(conteudo_raw))
+
+        doc_obj = MNIDocumento(
+            id=doc_id,
+            nome=nome,
+            tipo=tipo,
+            mimetype=mimetype,
+            conteudo_base64=conteudo_b64,
+            tamanho_bytes=tamanho,
+            id_pai=id_pai,
+        )
+
+        # Documentos vinculados (anexos: procuração, docs pessoais, etc.), que
+        # podem ter os seus próprios vinculados.
+        if depth < self._MAX_VINCULADO_DEPTH:
+            vinculados_raw = getattr(doc, "documentoVinculado", None) or []
+            if not isinstance(vinculados_raw, list):
+                vinculados_raw = [vinculados_raw]
+            for vdoc in vinculados_raw:
+                if vdoc is None:
+                    continue
+                doc_obj.vinculados.append(
+                    self._parse_documento(vdoc, id_pai=doc_id, depth=depth + 1)
+                )
+        return doc_obj
 
     # ──────────────────────
     # DOWNLOAD DE DOCUMENTOS
@@ -866,34 +867,38 @@ class MNIClient:
                 for i in range(0, len(docs_need_fetch), batch_size)
             ]
 
-            for batch_idx, batch in enumerate(batches):
-                batch_ids = [doc.id for doc in batch]
-                log.info(
-                    "mni.download.batch",
-                    batch=batch_idx + 1,
-                    total_batches=len(batches),
-                    doc_ids=batch_ids,
-                )
+            async def fetch_and_save(
+                ids: list[str], label: str
+            ) -> tuple[list[str], bool]:
+                """Ask the MNI for ``ids`` and save what comes back.
 
+                Returns ``(unfetched, retryable)``: the ids neither saved nor
+                lost to a save failure, and whether asking again could help.
+                ``DiskWriteError`` propagates: a full disk is not retried.
+                """
+                nonlocal local_bytes
                 try:
                     # Chamar consultarProcesso com IDs específicos
                     result = await self.consultar_processo(
                         processo.numero,
                         incluir_documentos=True,
                         incluir_cabecalho=True,
-                        documento_ids=batch_ids,
+                        documento_ids=ids,
                     )
 
                     if not result.success:
                         log.warning(
                             "mni.download.batch_failed",
-                            batch=batch_idx + 1,
+                            batch=label,
                             error=result.error,
                         )
-                        failed_ids.extend(batch_ids)
-                        handled.update(batch_ids)
-                        await heartbeat()
-                        continue
+                        # Retry only what a repeat can fix: a SOAP timeout or a
+                        # transport/server error (status "timeout"/"error").
+                        # A body-level answer (mni_error, not_found), a
+                        # credential rejection (auth_failed), a geo block
+                        # (blocked), an unparseable body or an unclassified
+                        # result would fail the same way for each document.
+                        return list(ids), result.status in _RETRYABLE_STATUSES
 
                     # Mapear docs retornados por ID para salvar
                     # A parent can show up twice (as asked, and as the wrapper of
@@ -905,7 +910,8 @@ class MNIClient:
                         if known is None or (doc.has_content and not known.has_content):
                             fetched_docs[doc.id] = doc
 
-                    for doc_id in batch_ids:
+                    unfetched: list[str] = []
+                    for doc_id in ids:
                         fetched = fetched_docs.get(doc_id)
                         if fetched and fetched.has_content:
                             outcome = {}
@@ -918,6 +924,7 @@ class MNIClient:
                             )
                             handled.add(doc_id)
                             if not saved and outcome.get("status") == "failed":
+                                # Undecodable/invalid content: deterministic.
                                 failed_ids.append(doc_id)
                             retain_duplicate(outcome)
                             if saved:
@@ -936,12 +943,10 @@ class MNIClient:
                                 "mni.download.doc_no_content_after_fetch",
                                 doc_id=doc_id,
                             )
-                            failed_ids.append(doc_id)
-                            handled.add(doc_id)
-
-                    # Pausa entre batches para não sobrecarregar o servidor
-                    if batch_idx < len(batches) - 1:
-                        await asyncio.sleep(1.0)
+                            unfetched.append(doc_id)
+                    # An answer without the document may be a transient
+                    # truncation; the per-document retry settles it.
+                    return unfetched, bool(unfetched)
 
                 except DiskWriteError:
                     # Every remaining batch would be fetched over SOAP only to fail
@@ -950,13 +955,50 @@ class MNIClient:
                 except Exception as exc:
                     log.error(
                         "mni.download.batch_error",
-                        batch=batch_idx + 1,
+                        batch=label,
                         error=str(exc),
                     )
-                    failed_ids.extend(i for i in batch_ids if i not in handled)
-                    handled.update(batch_ids)
+                    return [i for i in ids if i not in handled], True
+
+            for batch_idx, batch in enumerate(batches):
+                batch_ids = [doc.id for doc in batch]
+                log.info(
+                    "mni.download.batch",
+                    batch=batch_idx + 1,
+                    total_batches=len(batches),
+                    doc_ids=batch_ids,
+                )
+
+                unfetched, retryable = await fetch_and_save(
+                    batch_ids, str(batch_idx + 1)
+                )
+                # One round of per-document retries, never more: a batch of
+                # MNI_BATCH_SIZE documents that timed out may owe it to a single
+                # large annex, and asking one by one lets only that one be lost.
+                # A one-document batch has nothing to separate, so it is not
+                # asked again (same call, same timeout).
+                if unfetched and retryable and len(batch_ids) > 1:
+                    log.info(
+                        "mni.download.batch_retry_individual",
+                        batch=batch_idx + 1,
+                        docs=len(unfetched),
+                    )
+                    still_missing: list[str] = []
+                    for doc_id in unfetched:
+                        left, _ = await fetch_and_save(
+                            [doc_id], f"{batch_idx + 1}.{doc_id}"
+                        )
+                        still_missing.extend(left)
+                        await heartbeat()
+                    unfetched = still_missing
+                if unfetched:
+                    failed_ids.extend(unfetched)
+                    handled.update(unfetched)
                     await heartbeat()
-                    continue
+
+                # Pausa entre batches para não sobrecarregar o servidor
+                if batch_idx < len(batches) - 1:
+                    await asyncio.sleep(1.0)
 
         log.info(
             "mni.download.complete",
