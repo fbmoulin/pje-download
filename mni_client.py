@@ -115,6 +115,7 @@ class MNIDocumento:
     tamanho_bytes: int = 0
     vinculados: list["MNIDocumento"] = field(default_factory=list)
     id_pai: str | None = None  # Se é anexo, referência ao doc pai
+    hash_declarado: str | None = None  # atributo `hash` (MD5) que o MNI declara
 
     @property
     def has_content(self) -> bool:
@@ -164,6 +165,7 @@ _DOCUMENTO_TYPE = re.compile(
     rb'(<(?P<p>\w+:)?complexType\s+name="tipoDocumento"\s*>.*?</(?:\w+:)?complexType>)',
     re.S,
 )
+_MD5_HEX = re.compile(r"[0-9a-fA-F]{32}", re.ASCII)
 _XS_ANY = re.compile(rb"[ \t]*<(?:\w+:)?any\b[^>]*/>[ \t]*\r?\n?")
 
 
@@ -180,6 +182,41 @@ def strip_documento_xs_any(wsdl: bytes) -> bytes:
     ``tipoDocumento`` type is touched; other types' wildcards stay.
     """
     return _DOCUMENTO_TYPE.sub(lambda m: _XS_ANY.sub(b"", m.group(1)), wsdl)
+
+
+def install_exact_binary_attachments() -> None:
+    """Make zeep return MTOM parts sent as ``binary`` byte for byte.
+
+    zeep 4.3.3 ``Attachment.content`` does ``content.strip(b"\\r\\n")`` for
+    ``Content-Transfer-Encoding: binary``, but the multipart decoder has already
+    removed the delimiter's CRLF, so the strip eats CR/LF that belong to the file
+    (measured 2026-11-16: 57 of 66 test PDFs lost 1-2 bytes, MD5 no longer matched the
+    ``hash`` the MNI declares). The getter below is the original minus that strip.
+    Idempotent: it reimplements instead of wrapping, and a tag on the function makes
+    a second call a no-op.
+    """
+    from functools import cached_property
+
+    from zeep.wsdl.attachments import Attachment
+
+    current = Attachment.__dict__["content"]
+    if getattr(getattr(current, "func", None), "_exact_binary", False):
+        return
+
+    def content(self):
+        encoding = self.headers.get("Content-Transfer-Encoding", None)
+        raw = self._part.content
+        if encoding == "base64":
+            return base64.b64decode(raw)
+        return raw
+
+    content._exact_binary = True
+    descriptor = cached_property(content)
+    descriptor.__set_name__(Attachment, "content")
+    Attachment.content = descriptor
+
+
+install_exact_binary_attachments()
 
 
 # consultar_processo statuses where asking again can help (see download_documentos).
@@ -651,6 +688,10 @@ class MNIClient:
         else:
             tipo = str(tipo_raw)
         mimetype = getattr(doc, "mimetype", "application/pdf")
+        hash_raw = getattr(doc, "hash", None)
+        hash_declarado = (
+            hash_raw.strip() if isinstance(hash_raw, str) and hash_raw.strip() else None
+        )
 
         # Conteúdo binário (presente quando documento_ids é passado)
         # No TJES, vem como bytes direto (não base64)
@@ -673,6 +714,7 @@ class MNIClient:
             conteudo_base64=conteudo_b64,
             tamanho_bytes=tamanho,
             id_pai=id_pai,
+            hash_declarado=hash_declarado,
         )
 
         # Documentos vinculados (anexos: procuração, docs pessoais, etc.), que
@@ -1040,6 +1082,31 @@ class MNIClient:
 
             content_bytes = decode_document_base64(doc.conteudo_base64)
             validate_document_content(content_bytes, doc.mimetype, filename)
+            declared = doc.hash_declarado
+            if declared and _MD5_HEX.fullmatch(declared):
+                # MD5 only to compare with what the MNI declares, not for security.
+                received = hashlib.md5(content_bytes, usedforsecurity=False)
+                if received.hexdigest() != declared.lower():
+                    log.warning(
+                        "mni.download.hash_mismatch",
+                        doc_id=doc.id,
+                        tamanho=len(content_bytes),
+                    )
+                    audit.log_document_saved(
+                        processo_numero,
+                        "mni_soap",
+                        self.tribunal,
+                        status="error",
+                        documento_id=doc.id,
+                        erro="hash_mismatch",
+                    )
+                    return None
+            else:
+                log.info(
+                    "mni.download.hash_unchecked",
+                    doc_id=doc.id,
+                    motivo="format" if declared else "absent",
+                )
             checksum = hashlib.sha256(content_bytes).hexdigest()
             reference = {
                 "id": str(doc.id),
