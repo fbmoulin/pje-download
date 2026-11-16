@@ -182,6 +182,10 @@ def strip_documento_xs_any(wsdl: bytes) -> bytes:
     return _DOCUMENTO_TYPE.sub(lambda m: _XS_ANY.sub(b"", m.group(1)), wsdl)
 
 
+# consultar_processo statuses where asking again can help (see download_documentos).
+_RETRYABLE_STATUSES = frozenset({"timeout", "error"})
+
+
 class MNIClient:
     """
     Cliente SOAP para o MNI do PJe.
@@ -863,34 +867,38 @@ class MNIClient:
                 for i in range(0, len(docs_need_fetch), batch_size)
             ]
 
-            for batch_idx, batch in enumerate(batches):
-                batch_ids = [doc.id for doc in batch]
-                log.info(
-                    "mni.download.batch",
-                    batch=batch_idx + 1,
-                    total_batches=len(batches),
-                    doc_ids=batch_ids,
-                )
+            async def fetch_and_save(
+                ids: list[str], label: str
+            ) -> tuple[list[str], bool]:
+                """Ask the MNI for ``ids`` and save what comes back.
 
+                Returns ``(unfetched, retryable)``: the ids neither saved nor
+                lost to a save failure, and whether asking again could help.
+                ``DiskWriteError`` propagates: a full disk is not retried.
+                """
+                nonlocal local_bytes
                 try:
                     # Chamar consultarProcesso com IDs específicos
                     result = await self.consultar_processo(
                         processo.numero,
                         incluir_documentos=True,
                         incluir_cabecalho=True,
-                        documento_ids=batch_ids,
+                        documento_ids=ids,
                     )
 
                     if not result.success:
                         log.warning(
                             "mni.download.batch_failed",
-                            batch=batch_idx + 1,
+                            batch=label,
                             error=result.error,
                         )
-                        failed_ids.extend(batch_ids)
-                        handled.update(batch_ids)
-                        await heartbeat()
-                        continue
+                        # Retry only what a repeat can fix: a SOAP timeout or a
+                        # transport/server error (status "timeout"/"error").
+                        # A body-level answer (mni_error, not_found), a
+                        # credential rejection (auth_failed), a geo block
+                        # (blocked), an unparseable body or an unclassified
+                        # result would fail the same way for each document.
+                        return list(ids), result.status in _RETRYABLE_STATUSES
 
                     # Mapear docs retornados por ID para salvar
                     # A parent can show up twice (as asked, and as the wrapper of
@@ -902,7 +910,8 @@ class MNIClient:
                         if known is None or (doc.has_content and not known.has_content):
                             fetched_docs[doc.id] = doc
 
-                    for doc_id in batch_ids:
+                    unfetched: list[str] = []
+                    for doc_id in ids:
                         fetched = fetched_docs.get(doc_id)
                         if fetched and fetched.has_content:
                             outcome = {}
@@ -915,6 +924,7 @@ class MNIClient:
                             )
                             handled.add(doc_id)
                             if not saved and outcome.get("status") == "failed":
+                                # Undecodable/invalid content: deterministic.
                                 failed_ids.append(doc_id)
                             retain_duplicate(outcome)
                             if saved:
@@ -933,12 +943,10 @@ class MNIClient:
                                 "mni.download.doc_no_content_after_fetch",
                                 doc_id=doc_id,
                             )
-                            failed_ids.append(doc_id)
-                            handled.add(doc_id)
-
-                    # Pausa entre batches para não sobrecarregar o servidor
-                    if batch_idx < len(batches) - 1:
-                        await asyncio.sleep(1.0)
+                            unfetched.append(doc_id)
+                    # An answer without the document may be a transient
+                    # truncation; the per-document retry settles it.
+                    return unfetched, bool(unfetched)
 
                 except DiskWriteError:
                     # Every remaining batch would be fetched over SOAP only to fail
@@ -947,13 +955,50 @@ class MNIClient:
                 except Exception as exc:
                     log.error(
                         "mni.download.batch_error",
-                        batch=batch_idx + 1,
+                        batch=label,
                         error=str(exc),
                     )
-                    failed_ids.extend(i for i in batch_ids if i not in handled)
-                    handled.update(batch_ids)
+                    return [i for i in ids if i not in handled], True
+
+            for batch_idx, batch in enumerate(batches):
+                batch_ids = [doc.id for doc in batch]
+                log.info(
+                    "mni.download.batch",
+                    batch=batch_idx + 1,
+                    total_batches=len(batches),
+                    doc_ids=batch_ids,
+                )
+
+                unfetched, retryable = await fetch_and_save(
+                    batch_ids, str(batch_idx + 1)
+                )
+                # One round of per-document retries, never more: a batch of
+                # MNI_BATCH_SIZE documents that timed out may owe it to a single
+                # large annex, and asking one by one lets only that one be lost.
+                # A one-document batch has nothing to separate, so it is not
+                # asked again (same call, same timeout).
+                if unfetched and retryable and len(batch_ids) > 1:
+                    log.info(
+                        "mni.download.batch_retry_individual",
+                        batch=batch_idx + 1,
+                        docs=len(unfetched),
+                    )
+                    still_missing: list[str] = []
+                    for doc_id in unfetched:
+                        left, _ = await fetch_and_save(
+                            [doc_id], f"{batch_idx + 1}.{doc_id}"
+                        )
+                        still_missing.extend(left)
+                        await heartbeat()
+                    unfetched = still_missing
+                if unfetched:
+                    failed_ids.extend(unfetched)
+                    handled.update(unfetched)
                     await heartbeat()
-                    continue
+
+                # Pausa entre batches para não sobrecarregar o servidor
+                if batch_idx < len(batches) - 1:
+                    await asyncio.sleep(1.0)
 
         log.info(
             "mni.download.complete",
