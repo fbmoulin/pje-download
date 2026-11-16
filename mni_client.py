@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -159,6 +160,28 @@ class MNIResult:
 # ─────────────────────────────────────────────
 
 
+_DOCUMENTO_TYPE = re.compile(
+    rb'(<(?P<p>\w+:)?complexType\s+name="tipoDocumento"\s*>.*?</(?:\w+:)?complexType>)',
+    re.S,
+)
+_XS_ANY = re.compile(rb"[ \t]*<(?:\w+:)?any\b[^>]*/>[ \t]*\r?\n?")
+
+
+def strip_documento_xs_any(wsdl: bytes) -> bytes:
+    """Remove the ``xs:any`` wildcard from the WSDL's ``tipoDocumento``.
+
+    TJES declares ``conteudo, assinatura*, outroParametro*, <any ##other lax/>,
+    documentoVinculado*``. zeep lets the wildcard swallow the FIRST
+    ``documentoVinculado`` of every document as a raw lxml element (``_value_1``), so
+    ``doc.documentoVinculado`` lacks it, and the raw element carries an unresolved MTOM
+    ``xop:Include``. Measured 2026-11-16 on 3 test processes: 12 of the 17 documents the
+    PJe PDF had and the worker did not were exactly these first attachments. Dropping the
+    wildcard makes the schema bind every attachment to ``documentoVinculado``. Only the
+    ``tipoDocumento`` type is touched; other types' wildcards stay.
+    """
+    return _DOCUMENTO_TYPE.sub(lambda m: _XS_ANY.sub(b"", m.group(1)), wsdl)
+
+
 class MNIClient:
     """
     Cliente SOAP para o MNI do PJe.
@@ -215,6 +238,7 @@ class MNIClient:
             if proxy:
                 session.proxies = {"http": proxy, "https": proxy}
                 log.info("mni.client.proxy", proxy=proxy.split("@")[-1])
+
             # `timeout` is zeep's *load* timeout (WSDL fetches only). SOAP POSTs use
             # `operation_timeout`, which defaults to None = no socket timeout, so a
             # hung MNI connection would pin its to_thread worker forever (wait_for
@@ -224,6 +248,8 @@ class MNIClient:
                 timeout=self.timeout,
                 operation_timeout=self.timeout,
             )
+            _load = transport.load
+            transport.load = lambda url: strip_documento_xs_any(_load(url))
 
             forbid_external = self.tribunal in MNI_FORBID_EXTERNAL_TRIBUNALS
             settings = Settings(forbid_external=forbid_external)
