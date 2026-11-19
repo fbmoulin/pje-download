@@ -21,7 +21,7 @@ class AuditEntry:
     """Structured record of a document access event."""
 
     # Required
-    event_type: str  # document_saved | batch_started | batch_completed | session_login
+    event_type: str  # document_saved | batch_started | batch_completed | session_login | cabecalho_consultado
     processo_numero: str
     fonte: str  # mni_soap | pje_api | pje_browser | google_drive | batch
     tribunal: str

@@ -135,6 +135,11 @@ class MNIProcesso:
     assuntos: list[str] = field(default_factory=list)
     polo_ativo: list[str] = field(default_factory=list)
     polo_passivo: list[str] = field(default_factory=list)
+    # Uma entrada por parte: {"polo": "AT"|"PA"|..., "nome": str, "tipo_pessoa": str}.
+    # Aditivo (2026-11-16, consulta de cabeçalho): polo_ativo/polo_passivo continuam
+    # iguais para os chamadores antigos. tipo_pessoa vem de pessoa.tipoPessoa do MNI
+    # ("fisica", "juridica", ...) e fica "" quando o tribunal não informa.
+    partes: list[dict] = field(default_factory=list)
     documentos: list[MNIDocumento] = field(default_factory=list)
     movimentacoes: list[dict] = field(default_factory=list)
     raw_xml: str | None = None
@@ -626,6 +631,14 @@ class MNIClient:
                         pessoa = getattr(parte, "pessoa", None)
                         nome = getattr(pessoa, "nome", "") if pessoa else ""
                         if nome:
+                            tipo_pessoa = getattr(pessoa, "tipoPessoa", "") or ""
+                            processo.partes.append(
+                                {
+                                    "polo": str(tipo_polo),
+                                    "nome": nome,
+                                    "tipo_pessoa": str(tipo_pessoa).strip().lower(),
+                                }
+                            )
                             if tipo_polo == "AT":
                                 processo.polo_ativo.append(nome)
                             elif tipo_polo == "PA":
