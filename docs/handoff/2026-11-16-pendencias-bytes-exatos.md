@@ -2,6 +2,8 @@
 
 Continua `docs/handoff/2026-11-16-buraco-mni-xs-any.md`. Esta parte analisou as pendências abertas com subagents, achou e corrigiu um bug de integridade dos arquivos baixados (#124) e provou a correção em produção.
 
+> Atualização de 2026-11-21: `master` avançou para `feec21f` (#126, consulta só de cabeçalho, outra sessão) e a produção foi para esse build; os SHAs `3aea984` abaixo são o estado de 2026-11-16. Retomada: `2026-11-16-pendencias-bytes-exatos-prompt.md`.
+
 ## Estado verificado
 - `master` = `3aea984` (#124), em sincronia com `origin/master`. CI do #124 (Lint e Test, com Redis real) e Deploy `success` (medido com `gh run list --branch master`, `headSha` = `3aea9841935dcc7585e04a84c89e33fcd2b6fdd0`).
 - Produção: dashboard e worker com `build_sha` `3aea9841…` (o agente do lote de prova leu `/healthz` e `/health` antes de disparar), worker `consuming`, `mni: healthy`. Redis healthy, fila vazia.
